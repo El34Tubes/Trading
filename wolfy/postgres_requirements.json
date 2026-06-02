@@ -1,0 +1,33 @@
+{
+  "scope": "Wolfy Postgres technical requirements guard",
+  "policy": "Allow maintenance/security updates within PostgreSQL 16 only. Do not upgrade to PostgreSQL 17+ or change vector dimensions/schema assumptions without explicit user approval and project migration review.",
+  "postgres": {
+    "required_major": 16,
+    "installed_version_verified": "16.14",
+    "allowed_major_min": 16,
+    "allowed_major_max": 16
+  },
+  "extensions": {
+    "vector": {
+      "required": true,
+      "installed_version_verified": "0.6.0",
+      "embedding_dimension": 1536,
+      "notes": "knowledge_chunks.embedding is vector(1536); changing dimensions requires schema/index migration."
+    },
+    "pg_trgm": {
+      "required": true,
+      "installed_version_verified": "1.6"
+    }
+  },
+  "allowed_update_intent": [
+    "apt-get update",
+    "apt-get install --only-upgrade postgresql postgresql-16 postgresql-contrib postgresql-16-pgvector postgresql-client-16 postgresql-client-common postgresql-common",
+    "security/patch updates for the current PostgreSQL 16 line"
+  ],
+  "blocked_without_explicit_user_approval": [
+    "PostgreSQL major upgrade beyond 16",
+    "pgvector changes requiring embedding dimension/schema migration",
+    "dropping/recreating the wolfy database",
+    "destructive migrations or data loss operations"
+  ]
+}

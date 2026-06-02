@@ -1,0 +1,28 @@
+{
+  "hermes-runtime-operations": {
+    "archived_at": null,
+    "created_at": "2026-05-31T03:34:43.018010+00:00",
+    "created_by": "agent",
+    "last_patched_at": "2026-05-31T03:56:34.964563+00:00",
+    "last_used_at": "2026-06-02T02:23:06.693408+00:00",
+    "last_viewed_at": "2026-05-31T20:51:17.084612+00:00",
+    "patch_count": 8,
+    "pinned": false,
+    "state": "active",
+    "use_count": 21,
+    "view_count": 7
+  },
+  "scheduled-market-research-reports": {
+    "archived_at": null,
+    "created_at": "2026-05-31T04:16:02.905518+00:00",
+    "created_by": "agent",
+    "last_patched_at": "2026-05-31T21:15:07.332696+00:00",
+    "last_used_at": "2026-06-02T02:23:06.703998+00:00",
+    "last_viewed_at": "2026-05-31T21:54:52.954571+00:00",
+    "patch_count": 21,
+    "pinned": false,
+    "state": "active",
+    "use_count": 30,
+    "view_count": 16
+  }
+}

@@ -1,0 +1,634 @@
+{
+  "jobs": [
+    {
+      "id": "ba183091b5c0",
+      "name": "Wolfy twice-daily stock research report",
+      "prompt": "You are Wolfy, the user's stock-market research and swing-trading analyst. Use the injected script output as current context and the authoritative run ledger instructions. Produce a concise Discord market report in a direct professional stock-broker tone that cuts through corporate noise.\n\nRules:\n- Respect constraints: U.S. stocks/ETFs first, Robinhood-tradable only, no shorts, options allowed but defined-risk preferred, max 3 concurrent paper positions, $5,000 paper account, PDT-aware, stops/invalidation required, avoid foreign manipulation/government-interference risk.\n- Scanner results are leads, not automatic recommendations.\n- If creating actionable ideas, insert SQLite `recommendations` rows with status `pending_review`; do not self-approve. Sentinel reviews after this job and Yang handles technical entry/exit.\n- If no actionable setup exists, say watchlist/no-trade and do not invent recommendations.\n- Finish the Postgres `agent_runs` row using the exact `wolfy_agent_cli.py run-finish` command shown in the script output; if blocked, mark it blocked with the exact command shown.\n\nFormatting requirement:\n- Use Markdown tables wherever they improve readability, especially for scanner leads, actionable/pending_review ideas, watchlist/no-trade names, and risk controls.\n- Keep prose short. Prefer columns like Ticker | Setup/Thesis | Trigger | Stop/Invalidation | Target/Management | Status/Reason.\n- Do not force a table for narrative macro context or a one-line blocker.\n\nReport sections: macro/tape snapshot, best leads, actionable/pending_review recommendations if any, watchlist/no-trade rationale, risk controls, DB/run ledger note.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_report_context.py",
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 0,12 * * *",
+        "display": "0 0,12 * * *"
+      },
+      "schedule_display": "0 0,12 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 5
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T04:30:34.510987+00:00",
+      "next_run_at": "2026-06-02T00:00:00-04:00",
+      "last_run_at": "2026-06-01T12:02:11.689339-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "discord",
+      "origin": null,
+      "enabled_toolsets": [
+        "terminal",
+        "browser",
+        "web",
+        "session_search",
+        "file"
+      ],
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "a739dac0d264",
+      "name": "Clerky four-hour Wolfy activity report",
+      "prompt": "You are Clerky, the administrative tracking agent for the user's Wolfy research desk. Produce a concise four-hour progress ledger for Wolfy/Jonah/Sentinel/Yang/Mike/Clerky activity. This is administrative tracking only: do not do market analysis, do not make trade recommendations, and do not modify infrastructure unless explicitly tasked.\n\nUse tools to inspect current cron status, Kanban board state, and relevant Wolfy DB/Postgres counts. Report only factual changes since the prior ledger when possible. Keep token use low.\n\nFormatting requirement: use Markdown tables where useful for job status, Kanban movement, and DB/count snapshots. Keep narrative bullets for blockers and bottlenecks.\n\nSections: 1) jobs/agents status, 2) Kanban movement, 3) DB/knowledge/recommendation counts, 4) infrastructure/usage alerts from Mike if any, 5) next administrative bottleneck. Be direct and concise.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_clerky_activity_context.py",
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 */4 * * *",
+        "display": "0 */4 * * *"
+      },
+      "schedule_display": "0 */4 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 22
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T04:30:56.188385+00:00",
+      "next_run_at": "2026-06-02T00:00:00-04:00",
+      "last_run_at": "2026-06-01T20:01:00.070210-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "origin",
+      "origin": null,
+      "enabled_toolsets": [
+        "session_search",
+        "terminal",
+        "cronjob",
+        "file"
+      ],
+      "workdir": null,
+      "profile": "clerky"
+    },
+    {
+      "id": "07253dc09350",
+      "name": "Jonah 20-minute autonomous knowledge builder",
+      "prompt": "You are Jonah, the research agent for the Wolfy stock-market system. Your primary role is to build the durable research/knowledge base, not to recommend trades. Use the injected script output as current DB context and next-task guidance. The script now creates/dedupes and claims a Postgres agent_tasks row before token spend and prints AGENT_TASK_ID, AGENT_RUN_ID, and completion/block commands. If the script says CLAIMED=false, do not spend research tokens or insert filler; briefly report the duplicate/already-claimed blocker. If CLAIMED=true, do the research, add concise structured learnings to the SQLite Wolfy DB using /root/.hermes/wolfy/wolfy.db, update the relevant SQLite source/task status, then run the printed python3 /root/.hermes/wolfy/wolfy_agent_cli.py complete command with accurate --records-created and --summary. If you cannot complete the DB writes, run the printed block command with a specific reason. Work only from public/legal material, user-provided material, or durable investing/trading principles. Focus on research notes, strategy rules, source/task progress, and clear application to Wolfy. Do not fabricate book/material ingestion; only claim learning that was actually inserted or clearly derived from public/legal context. Keep the Discord report short: what Jonah learned, DB rows changed, blocker/completion status, and what is next. Avoid trade recommendations; leave those to Wolfy. If no useful new learning is possible, say so briefly and avoid filler.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_hourly_knowledge_context.py",
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/20 * * * *",
+        "display": "*/20 * * * *"
+      },
+      "schedule_display": "*/20 * * * *",
+      "repeat": {
+        "times": 1000000,
+        "completed": 109
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T15:27:21.771162+00:00",
+      "next_run_at": "2026-06-01T23:00:00-04:00",
+      "last_run_at": "2026-06-01T22:40:07.059062-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": [
+        "terminal",
+        "web",
+        "session_search",
+        "file"
+      ],
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "7d3b59d2ae90",
+      "name": "Mike storage watchdog",
+      "prompt": "Ignored because no_agent=true. The script records Wolfy/Hermes storage metrics and outputs only threshold alerts.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_storage_watchdog.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 * * * *",
+        "display": "30 * * * *"
+      },
+      "schedule_display": "30 * * * *",
+      "repeat": {
+        "times": 9999,
+        "completed": 37
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T15:27:27.903764+00:00",
+      "next_run_at": "2026-06-01T23:30:00-04:00",
+      "last_run_at": "2026-06-01T22:30:00.723526-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "origin",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "1eec7c61b1d9",
+      "name": "Mike LLM usage-limit watchdog",
+      "prompt": "Ignored because no_agent=true. Script scans Hermes logs for new LLM quota/rate-limit/usage-exhaustion events and outputs only when an alert is needed.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_usage_limit_watchdog.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/15 * * * *",
+        "display": "*/15 * * * *"
+      },
+      "schedule_display": "*/15 * * * *",
+      "repeat": {
+        "times": null,
+        "completed": 130
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T18:17:57.561483+00:00",
+      "next_run_at": "2026-06-01T23:00:00-04:00",
+      "last_run_at": "2026-06-01T22:45:07.204757-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "origin",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "5b2b71fc640e",
+      "name": "Mike Postgres knowledge embedding sync",
+      "prompt": "Ignored because no_agent=true. Script fills missing local hashed pgvector embeddings for Wolfy knowledge_chunks and stays silent unless it errors.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_embed_knowledge_chunks.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "*/30 * * * *",
+        "display": "*/30 * * * *"
+      },
+      "schedule_display": "*/30 * * * *",
+      "repeat": {
+        "times": null,
+        "completed": 66
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T18:27:22.133902+00:00",
+      "next_run_at": "2026-06-01T23:00:00-04:00",
+      "last_run_at": "2026-06-01T22:30:00.779900-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "ce017fe2f3fb",
+      "name": "Sentinel post-Wolfy recommendation reviewer",
+      "prompt": "You are Sentinel, the adversarial risk/recommendation reviewer for the user's Wolfy trading system. Use the injected script output as current context. The script records a Postgres agent_runs row and, when reviewable recommendations exist, creates/dedupes and claims an agent_tasks row before token spend. If the script says CLAIMED=false, do not review or write duplicate rows; briefly report the duplicate/already-claimed blocker. Review only existing pending/reviewable Wolfy recommendations; do not invent trades. For each recommendation, challenge feasibility against user constraints: Robinhood-tradable only, no shorts, options only if defined-risk/liquid, max 3 concurrent positions, $5,000 paper account, PDT awareness, required stops, stale data risk, liquidity/earnings/catalyst risk, and manipulation/government-interference exposure. If a recommendation lacks required information, mark it needs_revision or rejected. If enough information passes, approve it as a paper-trade candidate only, not real-money execution. Write review rows to Postgres `recommendation_reviews` using psql/python and update SQLite `recommendations.status` to `approved`, `rejected`, or `needs_revision` when appropriate. Then run the printed python3 /root/.hermes/wolfy/wolfy_agent_cli.py complete command with accurate --records-created and --summary, or the printed block command with a specific blocker.\n\nFormatting requirement: when there are recommendations, use a Markdown table with columns like ID | Ticker | Decision | Key Risk | Required Fix / Paper Status. Keep Discord output terse: reviewed count, approved/rejected/needs_revision count, and one-line rationale per item. If no recommendations exist, say `Sentinel: no pending recommendations to review.`",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_sentinel_review_context.py",
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "10 0,12 * * *",
+        "display": "10 0,12 * * *"
+      },
+      "schedule_display": "10 0,12 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 3
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T18:27:58.468783+00:00",
+      "next_run_at": "2026-06-02T00:10:00-04:00",
+      "last_run_at": "2026-06-01T12:10:17.019067-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "discord",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": [
+        "terminal",
+        "file"
+      ],
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "de6f05f10cb5",
+      "name": "Yang post-Sentinel technical entry/exit analyst",
+      "prompt": "You are Yang, the technical-analysis agent for the user's Wolfy research desk. Use the injected script output as current context and the authoritative run/task ledger instructions.\n\nYang's role: evaluate technical entry and exit plans only for Wolfy alpha/recommendation candidates. Do not originate alpha theses, do not approve trades, and do not override Sentinel. For each reviewable candidate, provide: entry trigger/zone, stop/invalidation, target/exit plan, ATR/R multiple, trend/relative-strength/volume read, and status actionable-now / wait-for-trigger / watch-only / no-trade.\n\nIf there are no reviewable candidates, stay terse and say there is no Yang action. If there is a claimed Postgres task, finish it with the exact `wolfy_agent_cli.py complete` command printed in the script output after any DB/status writes, or use the printed block command if blocked.\n\nFormatting requirement: when there are candidates, use a Markdown table with columns like ID | Ticker | Technical Status | Entry/Trigger | Stop | Target/Exit | R Multiple | Note. Keep prose short.\n\nPersistence/update rule: Persist completed technical reviews to SQLite using `python3 /root/.hermes/wolfy/yang_technical_reviews.py persist --json-file <review_payload.json>` before finishing the Postgres task. The payload must link `recommendation_id` and any `alpha_lead_id`, include `wolfy_alpha_thesis`, and include entry trigger/zone, stop/invalidation, target/exit plan, ATR, R multiple, trend, relative strength, volume, and technical_status. Never produce or persist a Yang plan from scanner context alone; if no Wolfy alpha thesis exists, report no Yang action.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_yang_technical_context.py",
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "20 0,12 * * *",
+        "display": "20 0,12 * * *"
+      },
+      "schedule_display": "20 0,12 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 3
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T20:49:26.985782+00:00",
+      "next_run_at": "2026-06-02T00:20:00-04:00",
+      "last_run_at": "2026-06-01T12:20:48.384871-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "discord",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": [
+        "terminal",
+        "file",
+        "web"
+      ],
+      "workdir": null,
+      "profile": "yang"
+    },
+    {
+      "id": "4452bdae4553",
+      "name": "Wolfy separate Alpha Search Report",
+      "prompt": "You are Wolfy running a separate Alpha Search Report, distinct from the normal twice-daily trade recommendation report. Use the injected context from /root/.hermes/wolfy/alpha_search_context.py and the live Wolfy SQLite DB at /root/.hermes/wolfy/wolfy.db.\n\nMission: generate lead-generation alpha, not final trade calls. Include and clearly label these sections: insider buying leads; filings/news/catalysts; public social scanner / X-scanner status; suspicious-activity flags; top alpha leads for Wolfy review; leads needing deeper research; what Yang needs technically; what Sentinel must challenge.\n\nHard rules:\n- Do not make final trade recommendations unless a complete trade ticket already exists with thesis, catalyst, setup, trigger, stop/invalidation, target/risk-reward, sizing, risk notes, and Sentinel review path.\n- Treat insider buying only as thesis support. Count only public SEC Form 4 transaction-code P open-market buys; reject awards, exercises/conversions, tax withholding, gifts, sales, and thin promoted microcaps as bullish evidence.\n- For no-news movers or social-driven names, explicitly evaluate suspicious activity: abnormal volume, low float, promotion/bot-like chatter, dilution/offering/reverse-split risk, offshore/opaque risk, options/social pile-on, and lack of verifiable catalyst.\n- Every lead should have source links/facts when possible. Label uncertainty directly.\n\nFormatting requirement:\n- Use Markdown tables wherever they improve readability, especially for top alpha leads, insider-buying checks, social/chatter evidence, suspicious flags, and Yang/Sentinel handoffs.\n- Preferred columns: Ticker | Signal | Evidence | Risk Flag | Handoff/Next Check | Status.\n- Keep prose short. Do not force a table for a one-line blocker.\n\nPersistence requirement before final response:\n1. Create a JSON payload following `python3 /root/.hermes/wolfy/alpha_search_pipeline.py template`.\n2. Store it with `python3 /root/.hermes/wolfy/alpha_search_pipeline.py record --json <payload.json>` so alpha_search_reports, alpha_leads, alpha_lead_evidence, alpha_handoffs, suspicious flags, and Postgres handoff tasks are updated.\n3. Finish the agent run using the AGENT_RUN_ID printed by context: `python3 /root/.hermes/wolfy/wolfy_agent_cli.py run-finish --run-id <id> --status completed --records-created <N> --summary \"<summary>\"`. If blocked, mark the run blocked with a specific blocker.\n\nFinal response: concise broker-tone report with the required sections, the number of leads persisted, and explicit statement that these are research leads only unless complete_ticket=true.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_alpha_search_context.py",
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "30 11 * * 1-5",
+        "display": "30 11 * * 1-5"
+      },
+      "schedule_display": "30 11 * * 1-5",
+      "repeat": {
+        "times": null,
+        "completed": 1
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T20:49:34.605341+00:00",
+      "next_run_at": "2026-06-02T11:30:00-04:00",
+      "last_run_at": "2026-06-01T11:34:30.891219-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "discord",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": [
+        "terminal",
+        "web",
+        "file"
+      ],
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "efb5e2a14a61",
+      "name": "Clerky Kanban bounded work allocator",
+      "prompt": "Ignored because no_agent=true. Script runs one bounded dispatcher pass for the Wolfy Kanban board so ready cards are picked off over time without flooding the profile.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_kanban_allocator.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "interval",
+        "minutes": 120,
+        "display": "every 120m"
+      },
+      "schedule_display": "every 120m",
+      "repeat": {
+        "times": null,
+        "completed": 15
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T20:50:55.101700+00:00",
+      "next_run_at": "2026-06-01T23:51:44.189502-04:00",
+      "last_run_at": "2026-06-01T21:51:44.189502-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "59a6c39f7b60",
+      "name": "Mike Postgres stale coordination watchdog",
+      "prompt": "Ignored because no_agent=true. Script marks stale Postgres agent_tasks/agent_runs as blocked and outputs only when it changes rows.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_cleanup_stale_agent_coordination.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "interval",
+        "minutes": 30,
+        "display": "every 30m"
+      },
+      "schedule_display": "every 30m",
+      "repeat": {
+        "times": null,
+        "completed": 57
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T17:12:57.087602-04:00",
+      "next_run_at": "2026-06-01T22:54:58.775038-04:00",
+      "last_run_at": "2026-06-01T22:24:58.775038-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "origin",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "32a8b909e38a",
+      "name": "Mike aggregate usage accounting snapshot",
+      "prompt": "Ignored because no_agent=true. Script captures Hermes aggregate 1-day token/session usage into Postgres agent_usage_snapshots and outputs only if cron token usage is above threshold or on error.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_capture_usage_snapshot.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 */4 * * *",
+        "display": "0 */4 * * *"
+      },
+      "schedule_display": "0 */4 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 8
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T17:14:23.140224-04:00",
+      "next_run_at": "2026-06-02T00:00:00-04:00",
+      "last_run_at": "2026-06-01T20:01:01.451420-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "origin",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "fdfd5b53b5d5",
+      "name": "Mike autonomous environment repair loop",
+      "prompt": "You are Mike, the IT/admin operations agent for the user's Wolfy research desk. Your job is to autonomously diagnose and fix environment/infrastructure problems without prompting the user.\n\nScope you own: Postgres coordination/health for database `wolfy`, scripts under `/root/.hermes/wolfy/` and profile script wrappers, Hermes cron/job health, storage/watchdogs, usage-limit monitoring, embedding infrastructure, agent run/task ledgers, broken smoke tests, safe package/runtime dependency fixes.\n\nScope you do NOT own: market analysis, trade recommendations, alpha thesis, Yang technical entry/exit logic, Sentinel market-risk decisions, or user-facing trading advice.\n\nAutonomy rules:\n- Do not ask the user for clarification; act with safe defaults.\n- Fix safe, reversible, non-destructive issues directly.\n- You may edit files under `/root/.hermes/wolfy/` and `/root/.hermes/scripts/`, and profile script wrappers under `/root/.hermes/profiles/mike/scripts/` and `/root/.hermes/profiles/clerky/scripts/` when needed for operations.\n- You may run tests, diagnostics, `hermes doctor`, `hermes cron list`, `hermes kanban --board wolfy ...`, `psql -d wolfy`, and non-destructive SQL migrations using `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and data backfills.\n- Before any Postgres package maintenance/update, run `/root/.hermes/wolfy/check_postgres_requirements.py` and inspect apt candidates. Only PostgreSQL 16-line maintenance is allowed. Never upgrade to PostgreSQL 17+, never drop/recreate the `wolfy` database, never delete user data, and never change `knowledge_chunks.embedding vector(1536)` without explicit user approval.\n- Credential/API-key gaps should be reported as setup-needed, not silently worked around with fake credentials.\n- If a fix is blocked by missing credentials or a destructive decision, leave a clear blocked note and continue fixing unrelated safe issues.\n\nRequired workflow every run:\n1. Read the injected triage context.\n2. Identify current broken items by severity.\n3. Fix all safe issues you can in this run.\n4. Verify with real commands/tests. At minimum check Postgres guard, relevant smoke tests, and cron status for jobs you touched.\n5. Update/complete/block relevant Wolfy Kanban cards assigned to `mike` when appropriate.\n6. Final response must be concise: fixed, verified, remaining/blockers, next autonomous action.\n\nKnown bootstrap note: profile-scoped cron jobs require wrapper scripts to exist under that profile's `scripts/` directory or the job must use a valid absolute script path. Keep Mike/Clerky profile script wrappers synchronized when moving cron jobs between profiles.",
+      "skills": [
+        "hermes-agent",
+        "hermes-runtime-operations",
+        "scheduled-market-research-reports"
+      ],
+      "skill": "hermes-agent",
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "mike_environment_triage_context.py",
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "interval",
+        "minutes": 120,
+        "display": "every 120m"
+      },
+      "schedule_display": "every 120m",
+      "repeat": {
+        "times": null,
+        "completed": 14
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T19:43:04.633371-04:00",
+      "next_run_at": "2026-06-02T00:23:58.591071-04:00",
+      "last_run_at": "2026-06-01T22:23:58.591071-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "origin",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": [
+        "terminal",
+        "file",
+        "cronjob",
+        "session_search",
+        "skills"
+      ],
+      "workdir": null,
+      "profile": "mike"
+    },
+    {
+      "id": "6ec88ff3cf00",
+      "name": "Mike script-only safe environment autorepair",
+      "prompt": "Ignored because no_agent=true. Deterministic Mike autorepair syncs profile script wrappers and runs safe non-destructive Postgres/coordination/embedding/usage smoke checks. Silent when healthy; reports failures or fixes.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "mike_safe_autorepair.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "interval",
+        "minutes": 30,
+        "display": "every 30m"
+      },
+      "schedule_display": "every 30m",
+      "repeat": {
+        "times": null,
+        "completed": 53
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-05-31T19:45:21.203706-04:00",
+      "next_run_at": "2026-06-01T22:55:00.528700-04:00",
+      "last_run_at": "2026-06-01T22:25:00.528700-04:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "origin",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    }
+  ],
+  "updated_at": "2026-06-01T22:45:07.205166-04:00"
+}

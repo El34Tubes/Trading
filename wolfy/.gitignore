@@ -1,0 +1,43 @@
+# Runtime/data stores
+*.db
+*.sqlite
+*.sqlite3
+*.db-*
+*.dump
+*.backup
+
+# Secrets and local env
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.token
+*credentials*
+
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Generated reports/payloads/state
+alpha_report_payload_*.json
+usage_limit_watchdog_state.json
+*.log
+logs/
+reports/
+
+# Source-data inboxes/transcripts; keep only source code in git
+sources/inbox/*
+!sources/inbox/README.md
+sources/youtube/*
+
+# OS/editor
+.DS_Store
+*.swp
+*.tmp

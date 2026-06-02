@@ -1,0 +1,10 @@
+{
+  "slug": "wolfy",
+  "name": "Wolfy Research Desk",
+  "description": "Jonah/Wolfy/Sentinel stock-research and paper-trading buildout",
+  "icon": "🐺",
+  "color": "#7c3aed",
+  "default_workdir": null,
+  "created_at": 1780254234,
+  "archived": false
+}

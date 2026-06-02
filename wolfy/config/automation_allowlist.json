@@ -1,0 +1,181 @@
+{
+  "approved_by": "Nutblastah",
+  "scope": "Wolfy automation",
+  "items": [
+    {
+      "type": "command",
+      "item": "sqlite3",
+      "purpose": "Inspect and maintain Wolfy SQLite DB"
+    },
+    {
+      "type": "command",
+      "item": "python3",
+      "purpose": "Run Wolfy automation scripts"
+    },
+    {
+      "type": "path",
+      "item": "/root/.hermes/wolfy",
+      "purpose": "Wolfy working directory"
+    },
+    {
+      "type": "path",
+      "item": "/root/.hermes/wolfy/wolfy.db",
+      "purpose": "Wolfy persistent database"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/init_wolfy_db.py",
+      "purpose": "DB initialization"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/wolfy_scanner.py",
+      "purpose": "Market scanner"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/hourly_knowledge_context.py",
+      "purpose": "Hourly KB context"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/wolfy_status.py",
+      "purpose": "Status metrics"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/wolfy_storage_watchdog.py",
+      "purpose": "Silent storage watchdog"
+    },
+    {
+      "type": "command",
+      "item": "psql",
+      "purpose": "Postgres scale-up and vector search operations"
+    },
+    {
+      "type": "command",
+      "item": "pg_ctlcluster",
+      "purpose": "Postgres service management"
+    },
+    {
+      "type": "path",
+      "item": "/root/.hermes/wolfy/postgres_init.sql",
+      "purpose": "Postgres schema initialization"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/sync_sqlite_to_postgres.py",
+      "purpose": "SQLite-to-Postgres knowledge sync"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/scripts/wolfy_usage_limit_watchdog.py",
+      "purpose": "Silent LLM usage-limit watchdog"
+    },
+    {
+      "type": "command",
+      "item": "apt-cache policy postgresql postgresql-16 postgresql-16-pgvector",
+      "purpose": "Check Postgres package candidates before updates"
+    },
+    {
+      "type": "command",
+      "item": "apt-get update",
+      "purpose": "Refresh package index before approved Postgres maintenance"
+    },
+    {
+      "type": "command",
+      "item": "apt-get install --only-upgrade postgresql postgresql-16 postgresql-contrib postgresql-16-pgvector postgresql-client-16 postgresql-client-common postgresql-common",
+      "purpose": "Apply Postgres maintenance/security updates within PostgreSQL 16 technical requirements only"
+    },
+    {
+      "type": "path",
+      "item": "/root/.hermes/wolfy/postgres_requirements.json",
+      "purpose": "Postgres/pgvector technical requirement guardrails"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/check_postgres_requirements.py",
+      "purpose": "Verify Postgres updates do not exceed Wolfy technical requirements"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/embed_knowledge_chunks.py",
+      "purpose": "Fill pgvector embeddings for Wolfy knowledge chunks"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/scripts/wolfy_embed_knowledge_chunks.py",
+      "purpose": "Cron wrapper for Postgres knowledge embedding sync"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/sentinel_review_context.py",
+      "purpose": "Build Sentinel recommendation review context"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/scripts/wolfy_sentinel_review_context.py",
+      "purpose": "Cron wrapper for Sentinel review context"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/yang_technical_context.py",
+      "purpose": "Build Yang technical-analysis context"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/scripts/wolfy_yang_technical_context.py",
+      "purpose": "Cron wrapper for Yang technical-analysis context"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/scripts/wolfy_kanban_allocator.py",
+      "purpose": "Scheduled bounded dispatcher for Wolfy Kanban board"
+    },
+    {
+      "type": "command",
+      "item": "hermes kanban dispatch --max 1 --json",
+      "purpose": "Allocate bounded work time to Wolfy Kanban cards"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/wolfy_report_context.py",
+      "purpose": "Wolfy report context with Postgres agent_runs ledger"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/scripts/wolfy_report_context.py",
+      "purpose": "Cron wrapper for Wolfy report context"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/alpha_search_context.py",
+      "purpose": "Alpha Search Report context with Postgres agent_runs ledger"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/scripts/wolfy_alpha_search_context.py",
+      "purpose": "Cron wrapper for Alpha Search Report context"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/cleanup_stale_agent_coordination.py",
+      "purpose": "Postgres stale agent_tasks/agent_runs cleanup watchdog"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/scripts/wolfy_cleanup_stale_agent_coordination.py",
+      "purpose": "Cron wrapper for Postgres stale coordination cleanup"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/wolfy/capture_usage_snapshot.py",
+      "purpose": "Aggregate Hermes token/session usage accounting into Postgres"
+    },
+    {
+      "type": "script",
+      "item": "/root/.hermes/scripts/wolfy_capture_usage_snapshot.py",
+      "purpose": "Cron wrapper for aggregate usage accounting"
+    }
+  ]
+}
