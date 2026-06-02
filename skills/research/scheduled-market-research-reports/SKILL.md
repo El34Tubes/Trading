@@ -145,6 +145,21 @@ When this user asks for recurring stock reports, load this skill and use the Wol
 - Portfolio constraints: $5,000 starting paper account, max 3 concurrent positions, stops/invalidation required, and avoid trade frequency that risks Pattern Day Trader limits.
 - Objective: seek alpha, but validate through paper trading/backtesting before live automation.
 
+### Hermes-EOD framework override
+
+If the user references the newer Hermes-EOD goals/constitution/framework, treat it as the governing Wolfy operating mode over the earlier twice-daily swing-report posture:
+
+- **EOD only:** decisions use closing data; any execution is next-session and human-only.
+- **LLM out of the signal path:** deterministic scripts/functions compute prices, features, strategy signals, risk checks, and setup eligibility. The LLM interprets, filters, ranks, explains, and writes proposals; it never fabricates or invents numeric edge.
+- **No auto-execution:** no broker authority, no money movement, no live order placement.
+- **Human-gated strategy deployment:** strategies move `research_only -> candidate -> approved -> retired`; agents may mark `candidate` after walk-forward OOS validation, but only the human can mark `approved`.
+- **Approved-strategy gate:** actionable setup proposals require deterministic signal rows tied to `strategies.status='approved'`. Research-only/candidate signals can be reported as research/watch-only, not capital setups.
+- **Risk circuit breakers are code gates:** enforce risk-per-trade, portfolio heat, max name weight, ADV fraction, drawdown kill switch, slippage/cost assumptions, and event/liquidity exclusions before proposing new risk.
+- **Quiet nights are valid:** prefer no setup over forced trades.
+- **FACT vs JUDGMENT:** every rationale should distinguish measured/filed/database facts from inference.
+
+Under Hermes-EOD, scanner/social/Alpha Search outputs are candidate-discovery context only until they pass deterministic strategy, screening, risk, and approval gates. See `references/wolfy-hermes-eod-framework-2026-06-01.md` for the session-specific implementation graph and safety boundary.
+
 For actionable setups under these constraints, include position sizing suitable for a small paper account, stop/invalidation, holding-period expectation, and whether the idea is a trade candidate or watch-only.
 
 ## Agentic team pattern
@@ -242,7 +257,7 @@ When the user asks what Wolfy did overnight or whether the knowledge base was up
 
 ## Wolfy durable DB workflow
 
-For this user's Wolfy setup, use `/root/.hermes/wolfy/wolfy.db` as the local SQLite source of truth. The installed SQLite CLI is available as `sqlite3`; Python's `sqlite3` module is also available.
+For this user's Wolfy setup, the active direction is **Postgres-primary**: migrate operational Wolfy state to PostgreSQL and keep `/root/.hermes/wolfy/wolfy.db` only as a compatibility/fallback store until each consumer is migrated and verified. Do not destructively remove SQLite tables yet; inventory direct SQLite consumers, migrate scripts/cron contexts to Postgres-first helpers, and explicitly warn when a report falls back to SQLite. The installed SQLite CLI remains available as `sqlite3` for legacy inspection.
 
 Core files:
 
@@ -295,7 +310,7 @@ Honesty rule: Wolfy may only claim durable learning if it inserted `knowledge_no
 
 Scale-up thresholds and current scale-up foundation:
 
-- SQLite remains the current live source of truth until job scripts are migrated or dual-written.
+- Postgres is now the intended primary operational source of truth; SQLite remains a legacy compatibility/fallback store until each live consumer is migrated and verified.
 - Postgres scale-up foundation is installed for this user: database `wolfy`, PostgreSQL 16, `pgvector`, and `pg_trgm`.
 - DB >1GB: optimize/archive/index review.
 - DB >5GB or multiple concurrent writer contention: migrate live writes from SQLite to Postgres.
@@ -310,6 +325,19 @@ Postgres/vector files for this user:
 - `/root/.hermes/wolfy/POSTGRES_VECTOR_SCALEUP.md` — scale-up handoff notes.
 - `/root/.hermes/wolfy/postgres_requirements.json` — durable guardrails for allowed PostgreSQL/pgvector versions and blocked destructive changes.
 - `/root/.hermes/wolfy/check_postgres_requirements.py` — run this before Postgres package maintenance; it verifies current/candidate versions remain within Wolfy's technical requirements.
+
+Postgres knowledge chunk verification pitfall:
+
+- `knowledge_chunks` does **not** have top-level columns named `embedding_provider`, `embedding_model`, or `embedding_method`; provider/model/method metadata is stored in the `metadata` JSONB field. Verify embedding coverage with `count(embedding)`, and query metadata as `metadata->>'embedding_provider'`, `metadata->>'embedding_model'`, etc. Do not add compatibility alias columns for these unless a real consumer requires them; the safe ops check is:
+  ```sql
+  select count(*) total, count(embedding) embedded, count(*)-count(embedding) missing from knowledge_chunks;
+  select coalesce(metadata->>'embedding_provider','NULL') provider,
+         coalesce(metadata->>'embedding_model','NULL') model,
+         count(*)
+  from knowledge_chunks
+  group by 1,2
+  order by 3 desc;
+  ```
 
 Guarded Postgres maintenance rule:
 
@@ -334,6 +362,8 @@ Operational helper files now installed under `/root/.hermes/wolfy/`:
 - `test_agent_coordination_smoke.py` — smoke tests proving rows insert and duplicate task claiming is avoided.
 - `sync_cron_usage_to_agent_runs.py` — idempotently syncs Hermes cron sessions from `~/.hermes/state.db` into Postgres `agent_runs` for per-agent usage accounting; keep wrappers under global/Mike/Clerky `scripts/` synchronized when profile cron jobs call it.
 - `wolfy_clerky_activity_context.py` — deterministic pre-run context for Clerky's four-hour administrative ledger. It should own schema-sensitive reads of Kanban SQLite, Wolfy SQLite, Hermes state, and Postgres coordination ledgers so Clerky summarizes facts instead of guessing table/column names.
+
+Coordination pitfall: context generators should claim only fresh queued work, not stale local `in_progress` rows. Re-selecting stale SQLite `in_progress` work can create repeated Postgres `agent_runs.status='blocked'` rows with `duplicate-or-already-claimed` every cron tick. Leave stale `in_progress` cleanup to `wolfy_cleanup_stale_agent_coordination.py` and verify post-fix with a duplicate-count query. See `references/wolfy-jonah-coordination-noise-2026-06-02.md`.
 
 Use this chain for auditable trade ideas: Jonah research note -> strategy rule -> scanner result -> Wolfy recommendation -> Sentinel review -> paper trade/watchlist status -> outcome grading.
 
@@ -368,3 +398,4 @@ See `references/wolfy-accountability-loop-kanban-plan-2026-06-01.md` for the con
 - `references/wolfy-wrapper-autorepair-global-profile-sync-2026-06-01.md` — follow-up nuance: verify and sync all invocation layers for renamed scripts (live Wolfy implementation, Wolfy legacy wrapper, global `/root/.hermes/scripts/` wrapper, and profile script wrappers), because default-profile cron can call the global wrapper even when a profile wrapper is healthy.
 - `references/wolfy-report-tables-scanner-scaleup-2026-06-01.md` — report-format and scanner scale-up pattern: Markdown tables for legible Wolfy/Sentinel/Yang/Clerky outputs, scanner freshness gates, broader liquid universe, deterministic factors, intraday no-agent snapshots, and alpha-lead handoffs before recommendations.
 - `references/wolfy-source-file-inbox-2026-06-01.md` — source-file inbox pattern for user-provided semi-structured material: drop files under `/root/.hermes/wolfy/sources/inbox/`, queue with `queue_knowledge_source_files.py`, optional `.source.json` sidecars, and Jonah local-file reading instruction.
+- `references/wolfy-postgres-primary-optimization-2026-06-02.md` — Postgres-primary migration direction, Kanban card graph, verification commands, and wording correction: optimize role alignment/distribution, do not say “metabolize.”

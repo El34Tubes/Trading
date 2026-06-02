@@ -4,6 +4,12 @@
 Build Wolfy into an accountable stock-market research and swing-trading analyst by combining a durable knowledge base, repeatable scanner/data pipeline, recommendation logging, paper-trade tracking, and performance review.
 
 ## Operating constraints
+- EOD ONLY: actionable decisions use closing data only and are for next-session human review/execution.
+- No intraday actionable recommendations; intraday/scanner/social observations are diagnostics or leads only until converted into deterministic EOD signals.
+- No auto-execution, broker authority, banking, or money movement; a human places every order.
+- LLM interprets deterministic signals and cited facts; it does not generate numeric edge, triggers, stops, ranks, or sizing.
+- Separate FACT (measured/filed/database-backed) from JUDGMENT (analyst inference) in every report rationale.
+- Capital or paper-trade proposals require an approved strategy row plus deterministic signal/setup support; otherwise label research-only, watchlist, or no-trade.
 - U.S. stocks and ETFs first.
 - Robinhood-tradable only where verifiable/proxy-passable.
 - Long-only; no shorts.
@@ -13,6 +19,8 @@ Build Wolfy into an accountable stock-market research and swing-trading analyst 
 - Stops/invalidation required.
 - Respect pattern day trading limits.
 - Avoid thin, promotional, low-float, foreign manipulation-risk names.
+
+Full governance handoff: `/root/.hermes/wolfy/EOD_GOVERNANCE.md`.
 
 ## Hourly training loop
 Each hour, if model/Codex quota is available:

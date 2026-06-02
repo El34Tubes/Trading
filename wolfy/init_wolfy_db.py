@@ -64,6 +64,11 @@ CREATE TABLE IF NOT EXISTS strategy_rules (
   source_basis TEXT,
   implementation_status TEXT NOT NULL DEFAULT 'proposed',
   enabled INTEGER NOT NULL DEFAULT 1,
+  -- Compatibility aliases for diagnostics/report prompts that ask for
+  -- id,name,status,asset_class,description from strategy_rules.
+  name TEXT,
+  status TEXT DEFAULT 'active',
+  asset_class TEXT DEFAULT 'equity_etf_process',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -457,9 +462,51 @@ RULES = [
   ('Grade every recommendation', 'evaluation', 'Recommendations must be later scored for trigger, target, stop, max adverse/favorable excursion, and R multiple.', 'Model accountability'),
 ]
 
+def ensure_strategy_rule_compat(con: sqlite3.Connection) -> None:
+    """Keep non-destructive alias columns available on older Wolfy DBs."""
+    cols = {row[1] for row in con.execute("PRAGMA table_info(strategy_rules)").fetchall()}
+    if 'name' not in cols:
+        con.execute("ALTER TABLE strategy_rules ADD COLUMN name TEXT")
+    if 'status' not in cols:
+        con.execute("ALTER TABLE strategy_rules ADD COLUMN status TEXT DEFAULT 'active'")
+    if 'asset_class' not in cols:
+        con.execute("ALTER TABLE strategy_rules ADD COLUMN asset_class TEXT DEFAULT 'equity_etf_process'")
+    con.execute(
+        """
+        UPDATE strategy_rules
+        SET name = COALESCE(name, rule_name),
+            status = COALESCE(status, CASE WHEN enabled=1 THEN 'active' ELSE 'inactive' END),
+            asset_class = COALESCE(asset_class, 'equity_etf_process')
+        """
+    )
+    con.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_rules_alias_insert
+        AFTER INSERT ON strategy_rules
+        BEGIN
+          UPDATE strategy_rules
+          SET name = COALESCE(NEW.name, NEW.rule_name),
+              status = COALESCE(NEW.status, CASE WHEN NEW.enabled=1 THEN 'active' ELSE 'inactive' END),
+              asset_class = COALESCE(NEW.asset_class, 'equity_etf_process')
+          WHERE id = NEW.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_strategy_rules_alias_update
+        AFTER UPDATE OF rule_name, enabled, name, status, asset_class ON strategy_rules
+        BEGIN
+          UPDATE strategy_rules
+          SET name = COALESCE(NEW.name, NEW.rule_name),
+              status = COALESCE(NEW.status, CASE WHEN NEW.enabled=1 THEN 'active' ELSE 'inactive' END),
+              asset_class = COALESCE(NEW.asset_class, 'equity_etf_process')
+          WHERE id = NEW.id;
+        END;
+        """
+    )
+
+
 def main():
     con = sqlite3.connect(DB)
     con.executescript(SCHEMA)
+    ensure_strategy_rule_compat(con)
     now = datetime.now(timezone.utc).isoformat()
     con.execute("INSERT OR REPLACE INTO meta(key,value,updated_at) VALUES('db_created_or_verified',?,?)", (now, now))
     con.execute("INSERT OR REPLACE INTO meta(key,value,updated_at) VALUES('paper_account_start','5000',?)", (now,))

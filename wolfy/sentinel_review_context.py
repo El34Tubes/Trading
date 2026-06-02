@@ -15,6 +15,8 @@ try:
 except Exception:
     claim_next_task = connect = ensure_agent_task = finish_agent_run = stable_fingerprint = start_agent_run = None
 
+from eod_governance import print_eod_governance
+
 SQLITE_DB = Path('/root/.hermes/wolfy/wolfy.db')
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
 CLI = Path('/root/.hermes/wolfy/wolfy_agent_cli.py')
@@ -104,6 +106,7 @@ def main() -> None:
 
     print('Sentinel recommendation-review context')
     print(f'SQLite DB={SQLITE_DB}')
+    print_eod_governance()
     print('Counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
     print('User hard constraints: Robinhood-tradable only; no shorts; options allowed but prefer defined risk; max 3 concurrent positions; $5,000 paper account; avoid PDT violations; stops required; avoid foreign manipulation/government-interference risk.')
     start_sentinel_run(recs)
@@ -132,7 +135,7 @@ def main() -> None:
         except Exception as e:
             print(f'Postgres review/run table unavailable: {type(e).__name__}: {e}')
 
-    print('Required output: run sentinel_reviews.py for deterministic review persistence. For each reviewable recommendation it writes Postgres recommendation_reviews and updates SQLite recommendations.status to approved, rejected, or needs_revision. LLM rationale may be added in reports, but mechanical checks must not be bypassed. If no pending recommendations exist, do not invent any.')
+    print('Required output: run sentinel_reviews.py for deterministic review persistence. For each reviewable recommendation it writes Postgres recommendation_reviews and updates SQLite recommendations.status to approved, rejected, or needs_revision. Reject/needs_revision any recommendation that is not EOD closing-data backed, lacks deterministic signal/setup support, blurs FACT vs JUDGMENT, or implies intraday/auto-execution. LLM rationale may be added in reports, but mechanical checks must not be bypassed. If no pending recommendations exist, do not invent any.')
 
 
 if __name__ == '__main__':

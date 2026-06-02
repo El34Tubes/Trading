@@ -572,6 +572,10 @@ git commit -m 'Initial source import'
 
 Then create/connect the GitHub remote and push. If a token-bearing API call is blocked by the platform approval layer, stop and report the local commit/remediation status instead of retrying via alternate token paths.
 
+## Hermes operations/source monorepo bootstrap
+
+When the user asks to put the whole Hermes operations layer under version control — not just one agent — use a private monorepo rooted at the Hermes home and aggressively ignore secrets/runtime state. See `references/hermes-ops-source-version-control.md` for the proven bootstrap pattern, `.gitignore` categories, staged secret-scan requirement, and the fine-grained PAT repo-creation pitfall.
+
 ## Quick Reference Table
 
 | Action | gh | git + curl |

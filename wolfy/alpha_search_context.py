@@ -13,6 +13,7 @@ except Exception:
 from wolfy_agent_coordination import connect, start_agent_run
 from insider_buying import ensure_insider_tables
 from alpha_search_pipeline import ensure_alpha_tables, status_snapshot
+from eod_governance import print_eod_governance
 
 DB = Path('/root/.hermes/wolfy/wolfy.db')
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
@@ -53,12 +54,13 @@ def main() -> None:
 
     print('Wolfy standalone Alpha Search Report context')
     print(f'SQLite DB={DB}')
+    print_eod_governance()
     print('SQLite counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
     print(f'Postgres agent run: AGENT_RUN_ID={run_id}')
     print(f'After report/lead DB writes, run: python3 {CLI} run-finish --run-id {run_id} --status completed --records-created <N> --summary "<alpha leads/report summary>"')
     print(f'If blocked, run: python3 {CLI} run-finish --run-id {run_id} --status blocked --error-message "<specific blocker>" --summary "<specific blocker>"')
     print(f'Persist the Alpha Search Report before final answer: write JSON using template from `python3 {ALPHA_PIPELINE} template`, then run `python3 {ALPHA_PIPELINE} record --json <payload.json>`. Use --no-postgres-tasks only for local tests.')
-    print('Purpose: lead generation only. Do not approve trades. Label ideas as leads/watchlist unless they are inserted as pending_review recommendations for Sentinel.')
+    print('Purpose: lead generation only. Do not approve trades. Alpha leads are research inputs, not intraday actionable recommendations. Label ideas as leads/watchlist unless they later pass EOD approved-strategy/deterministic-signal gates and are inserted as pending_review recommendations for Sentinel.')
     print('Insider-buying rule: use public SEC Form 4/free legal sources; count only transaction-code P open-market buys; reject awards/exercises/conversions/sales as bullish evidence; treat qualified buys as thesis support only, never standalone triggers.')
     print('Required sections: insider buying leads, filings/news/catalysts, public social chatter/free-X-scanner status, suspicious-activity filters, top alpha leads for Wolfy review, what Yang needs technically, what Sentinel must challenge.')
     print('Knowledge notes/rules relevant to this report:')

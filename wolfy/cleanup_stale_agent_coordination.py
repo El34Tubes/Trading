@@ -42,6 +42,9 @@ def main() -> int:
             (f'stale started run exceeded {RUN_TIMEOUT}', f'Stale run exceeded {RUN_TIMEOUT}; blocked by watchdog.', RUN_TIMEOUT),
         )
         runs = cur.fetchall()
+        # Be explicit: no-agent cron wrappers invoke this through subprocesses,
+        # and stale rows must remain blocked after the process exits.
+        conn.commit()
     if tasks or runs:
         print('Wolfy Postgres stale coordination cleanup:')
         for row in tasks:

@@ -15,6 +15,7 @@ except Exception:
 
 from wolfy_agent_coordination import connect, finish_agent_run, start_agent_run
 from insider_buying import ensure_insider_tables
+from eod_governance import print_eod_governance
 
 DB = Path('/root/.hermes/wolfy/wolfy.db')
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
@@ -218,6 +219,7 @@ def main() -> None:
     run_id = start_run(len(scanner))
     print('Wolfy twice-daily report context')
     print(f'SQLite DB={DB}')
+    print_eod_governance()
     print(f'Pre-report scanner run: {scanner_refresh}')
     print(format_scanner_freshness(scanner_freshness))
     print('SQLite counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
@@ -227,7 +229,7 @@ def main() -> None:
     print(f'If blocked, run: python3 {CLI} run-finish --run-id {run_id} --status blocked --error-message "<specific blocker>" --summary "<specific blocker>"')
     print('User constraints: Robinhood-tradable only; no shorts; options allowed but defined-risk preferred; max 3 concurrent paper positions; $5,000 paper account; stops required; PDT-aware; avoid foreign manipulation/government-interference risk.')
     print('Insider-buying discipline: SEC Form 4 open-market buys can support a thesis only; ignore awards/exercises/conversions/sales as bullish evidence and require independent setup, liquidity, fundamentals, Yang technicals, and Sentinel review.')
-    print('Authority: Wolfy may create pending_review recommendations but does not self-approve; Sentinel reviews next, Yang handles technical entry/exit after alpha is identified.')
+    print('Authority: Wolfy may create pending_review recommendations only from EOD closing-data/deterministic-signal support; Wolfy does not self-approve; Sentinel reviews next, Yang handles technical entry/exit after alpha is identified.')
     if scanner:
         print('Latest scanner candidates:')
         for s in scanner:
@@ -256,7 +258,7 @@ def main() -> None:
             print(f'Postgres run table unavailable: {type(e).__name__}: {e}')
     if scanner_freshness.get('action_gate') == 'no_trade':
         print('Freshness gate: scanner_stale/no-trade. Do not create actionable recommendations or pending_review trade tickets from stale scanner data.')
-    print('Required output: concise report. If scanner freshness action_gate=no_trade, say scanner_stale/no-trade and create no actionable recommendations. If creating actionable trade ideas, insert rows into SQLite recommendations with status=pending_review and complete the Postgres run with records_created count. If no actionable setup, say watchlist/no-trade and still finish the run.')
+    print('Required output: concise report separating FACT vs JUDGMENT. If scanner freshness action_gate=no_trade or current context is not EOD closing-data backed, say scanner_stale/no-trade/EOD-only and create no actionable recommendations. If creating actionable trade ideas, insert rows into SQLite recommendations with status=pending_review only when approved-strategy plus deterministic signal/setup support exists; complete the Postgres run with records_created count. If no actionable setup, say watchlist/no-trade and still finish the run.')
 
 
 if __name__ == '__main__':

@@ -52,6 +52,13 @@ memories/
 gateway/
 pairing/
 cron/output/
+cron/*.bak
+.skills_prompt_snapshot.json
+processes.json
+lsp/
+profiles/*/lsp/
+profiles/*/bin/
+skills/.hub/
 **/__pycache__/
 **/*.py[cod]
 **/.pytest_cache/
@@ -75,6 +82,9 @@ venv/
 wolfy/wolfy.db
 wolfy/*.db
 wolfy/alpha_report_payload_*.json
+wolfy/alpha_report_*.json
+wolfy/tmp_*.py
+wolfy/tmp_*.md
 wolfy/usage_limit_watchdog_state.json
 wolfy/sources/inbox/*
 !wolfy/sources/inbox/README.md

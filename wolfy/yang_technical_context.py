@@ -12,6 +12,7 @@ except Exception:
 
 from wolfy_agent_coordination import claim_next_task, connect, ensure_agent_task, finish_agent_run, stable_fingerprint, start_agent_run
 from yang_technical_reviews import eligible_yang_candidates, ensure_yang_review_tables
+from eod_governance import print_eod_governance
 
 DB = Path('/root/.hermes/wolfy/wolfy.db')
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
@@ -75,6 +76,7 @@ def main() -> None:
 
     print('Yang technical-analysis context')
     print(f'SQLite DB={DB}')
+    print_eod_governance()
     print('Counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
     print(f'Postgres agent run: AGENT_RUN_ID={run_id}')
     if task_id:
@@ -89,7 +91,7 @@ def main() -> None:
         print('Postgres agent run completed automatically because there are no Yang-eligible Wolfy alpha recommendations.')
     print('Role: Yang owns technical analysis for entry/exit after Wolfy identifies alpha candidates. Yang does not originate fundamental alpha theses and does not approve trades; Sentinel handles feasibility/risk approval.')
     print('Hard gate: only build/persist entry/exit/invalidation/ATR/R-multiple plans for recommendations with a non-empty Wolfy alpha thesis. Scanner rows are context only, not trade theses.')
-    print('Required Yang output: entry trigger/zone, invalidation/stop, target/exit plan, ATR/R multiple, trend/relative-strength/volume read, and actionable-now/wait/no-trade. Update yang_reviews only if enough data is present; otherwise report no technical action.')
+    print('Required Yang output: EOD-only next-session technical plan separating FACT vs JUDGMENT: entry trigger/zone, invalidation/stop, target/exit plan, ATR/R multiple, trend/relative-strength/volume read, and wait-for-next-session-trigger/watch-only/no-trade. Do not label anything actionable intraday. Update yang_reviews only if enough EOD data is present; otherwise report no technical action.')
     if candidates:
         print('Yang-eligible Wolfy alpha recommendations:')
         for c in candidates:

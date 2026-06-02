@@ -214,14 +214,30 @@ def upsert_sessions(conn, sessions: Iterable[CronSession], jobs: dict[str, CronJ
                     agent_name=EXCLUDED.agent_name,
                     role=EXCLUDED.role,
                     job_id=EXCLUDED.job_id,
-                    ended_at=EXCLUDED.ended_at,
-                    status=EXCLUDED.status,
+                    ended_at=CASE
+                        WHEN agent_runs.status='blocked' AND EXCLUDED.ended_at IS NULL
+                        THEN agent_runs.ended_at
+                        ELSE EXCLUDED.ended_at
+                    END,
+                    status=CASE
+                        WHEN agent_runs.status='blocked' AND EXCLUDED.ended_at IS NULL
+                        THEN agent_runs.status
+                        ELSE EXCLUDED.status
+                    END,
                     input_tokens=EXCLUDED.input_tokens,
                     output_tokens=EXCLUDED.output_tokens,
                     total_tokens=EXCLUDED.total_tokens,
                     estimated_cost=EXCLUDED.estimated_cost,
-                    summary=EXCLUDED.summary,
-                    error_message=EXCLUDED.error_message,
+                    summary=CASE
+                        WHEN agent_runs.status='blocked' AND EXCLUDED.ended_at IS NULL
+                        THEN agent_runs.summary
+                        ELSE EXCLUDED.summary
+                    END,
+                    error_message=CASE
+                        WHEN agent_runs.status='blocked' AND EXCLUDED.ended_at IS NULL
+                        THEN agent_runs.error_message
+                        ELSE EXCLUDED.error_message
+                    END,
                     cron_job_id=EXCLUDED.cron_job_id,
                     source=EXCLUDED.source,
                     message_count=EXCLUDED.message_count,

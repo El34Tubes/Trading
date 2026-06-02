@@ -244,6 +244,7 @@ If a user pastes a GitHub token in chat, treat it as exposed and advise revocati
 |---------|----------|
 | `git push` asks for password | GitHub disabled password auth. Use a personal access token as the password, or switch to SSH |
 | `remote: Permission to X denied` | Token may lack `repo` scope — regenerate with correct scopes |
+| `Resource not accessible by personal access token` when creating a repo | Fine-grained PAT can authenticate and read allowed repos but still lack account-level repository creation. Either manually create the empty repo and grant the token Contents read/write for that repo, or use a classic PAT with `repo` scope for bootstrap operations. Do not push to an unrelated accessible repo just because creation failed. |
 | `fatal: Authentication failed` | Cached credentials may be stale — run `git credential reject` then re-authenticate |
 | `ssh: connect to host github.com port 22: Connection refused` | Try SSH over HTTPS port: add `Host github.com` with `Port 443` and `Hostname ssh.github.com` to `~/.ssh/config` |
 | Credentials not persisting | Check `git config --global credential.helper` — must be `store` or `cache` |

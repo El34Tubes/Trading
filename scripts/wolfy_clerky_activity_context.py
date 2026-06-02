@@ -71,7 +71,8 @@ def main() -> int:
     print('CLERKY_ACTIVITY_CONTEXT')
     print(f'generated_at={now.isoformat(timespec="seconds")}')
     print(f'since={et(since)}')
-    print('Instructions: use this script output as the factual source; do not re-query schemas unless investigating an anomaly. Do not make market analysis or trade recommendations.')
+    print('HERMES-EOD CONSTITUTION: EOD ONLY; no intraday actionable recommendations; no auto-execution; LLM interprets deterministic signals only; separate FACT vs JUDGMENT.')
+    print('Instructions: use this script output as the factual source; do not re-query schemas unless investigating an anomaly. Clerky is administrative only: do not make market analysis, trade recommendations, numeric edge claims, or execution suggestions.')
 
     heading('cron_status')
     cron = run(['hermes', '--profile', 'default', 'cron', 'list', '--all'], timeout=90)

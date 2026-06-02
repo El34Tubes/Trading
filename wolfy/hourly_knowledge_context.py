@@ -29,6 +29,8 @@ try:
 except Exception:  # pragma: no cover - context should still print if helper import fails
     claim_next_task = connect = ensure_agent_task = finish_agent_run = stable_fingerprint = start_agent_run = None
 
+from eod_governance import print_eod_governance
+
 DB = Path('/root/.hermes/wolfy/wolfy.db')
 SYNC = Path('/root/.hermes/wolfy/sync_sqlite_to_postgres.py')
 CLI = Path('/root/.hermes/wolfy/wolfy_agent_cli.py')
@@ -161,12 +163,16 @@ def main() -> None:
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
     now = datetime.now(timezone.utc).isoformat()
+    # Only queue fresh work here. Re-selecting stale SQLite ``in_progress`` rows
+    # creates a deduped/blocked Postgres task every Jonah cron tick after the
+    # original claim has already completed or blocked. Stale in-progress cleanup
+    # is owned by the coordination watchdog, not by the context generator.
     task = con.execute(
-        "SELECT * FROM training_tasks WHERE status IN ('queued','in_progress') "
+        "SELECT * FROM training_tasks WHERE status = 'queued' "
         "ORDER BY priority ASC, COALESCE(last_attempt_at,'') ASC, id ASC LIMIT 1"
     ).fetchone()
     source = con.execute(
-        "SELECT * FROM knowledge_sources WHERE status IN ('queued','in_progress') "
+        "SELECT * FROM knowledge_sources WHERE status = 'queued' "
         "ORDER BY priority ASC, id ASC LIMIT 1"
     ).fetchone()
     counts = {t: con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in [
@@ -182,6 +188,7 @@ def main() -> None:
 
     print('Jonah 15-minute knowledge-build context')
     print(f'SQLite DB={DB}')
+    print_eod_governance()
     print('SQLite counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
     print(maybe_sync_postgres())
 
@@ -215,7 +222,7 @@ def main() -> None:
     if claimed_task_id is None and (task or source):
         print('Required output: no research spend this run; report blocked duplicate/already-claimed task and do not insert filler research.')
     else:
-        print('Before writing: check prior artifacts above to avoid duplicate work. Required DB writes after reasoning: insert knowledge_notes and/or strategy_rules; update source/task status; optionally write a concise progress report to reports. Do not recommend trades. Finish the Postgres agent_runs/agent_tasks rows with the command printed above.')
+        print('Before writing: check prior artifacts above to avoid duplicate work. Required DB writes after reasoning: insert knowledge_notes and/or strategy_rules; update source/task status; optionally write a concise progress report to reports. Do not recommend trades, do not create numeric edge by LLM inference, and tag EOD-only/FACT-vs-JUDGMENT implications where relevant. Finish the Postgres agent_runs/agent_tasks rows with the command printed above.')
 
 
 if __name__ == '__main__':
