@@ -355,6 +355,12 @@ git push -u origin HEAD
 # 8. Merge when green (see Section 6)
 ```
 
+## Operational setup / dotfile repository snapshots
+
+When the user asks to "commit everything" in an operational setup directory (Hermes home, dotfiles, cron/scripts, research-desk setup), do not blindly stage runtime state. Treat "everything" as "all safe source/configuration artifacts" and first update `.gitignore` for secrets, databases, sessions, logs, caches, pid/lock files, LSP/node_modules, generated reports, and temp files. Then stage, run a staged path scan plus a staged text scan for concrete token/API-key/password assignments, run the smallest relevant verification suite, commit, push, and verify the remote branch matches local `HEAD`. If no remote exists, create a private GitHub repository by default (via `gh` or GitHub API fallback), add `origin`, and push.
+
+Detailed checklist: `references/config-repo-snapshot-workflow.md`.
+
 ## Useful PR Commands Reference
 
 | Action | gh | git + curl |

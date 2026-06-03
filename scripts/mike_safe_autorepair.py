@@ -24,6 +24,7 @@ MIKE_SCRIPTS = [
     'wolfy_capture_usage_snapshot.py',
     'wolfy_sync_cron_usage_to_agent_runs.py',
     'wolfy_alpha_search_context.py',
+    'eod_monitoring.py',
     'mike_environment_triage_context.py',
     'mike_safe_autorepair.py',
 ]
@@ -38,6 +39,7 @@ CLERKY_SCRIPTS = [
     'wolfy_alpha_search_context.py',
     'wolfy_cleanup_stale_agent_coordination.py',
     'wolfy_capture_usage_snapshot.py',
+    'eod_monitoring.py',
     # Keep Mike's script-only autorepair callable from profile-scoped
     # diagnostics when Clerky is auditing operations handoffs.
     'mike_safe_autorepair.py',

@@ -18,9 +18,9 @@ import os
 import uuid
 from typing import Iterable, Optional
 
-import psycopg
+from wolfy_db import DEFAULT_POSTGRES_DSN, DatabaseConfig, connect_postgres
 
-DEFAULT_PG_DSN = os.environ.get("WOLFY_PG_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
+DEFAULT_PG_DSN = os.environ.get("WOLFY_POSTGRES_DSN") or os.environ.get("WOLFY_PG_DSN") or DEFAULT_POSTGRES_DSN
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class ClaimResult:
 
 def connect(dsn: str = DEFAULT_PG_DSN):
     """Return a psycopg connection to Wolfy's Postgres database."""
-    return psycopg.connect(dsn)
+    return connect_postgres(DatabaseConfig(postgres_dsn=dsn))
 
 
 def stable_fingerprint(*parts: object) -> str:

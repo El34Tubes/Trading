@@ -38,6 +38,7 @@ models_dev_cache.json
 .hermes_history
 
 # Logs / generated output / caches
+*.log
 logs/
 **/logs/
 cache/
