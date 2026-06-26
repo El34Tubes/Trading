@@ -17,6 +17,11 @@ Use this skill when the user asks to validate what is working/not working in a l
 
 This is an operations/checklist skill, not a replacement for the bundled `hermes-agent` reference skill. Load `hermes-agent` first for authoritative CLI/config commands, then use this skill for the practical validation workflow.
 
+## Runtime Discovery Notes
+
+- For user questions about "crontab" on a Hermes host, check both the literal Linux crontab and Hermes's own scheduler; see `references/hermes-scheduler-vs-system-crontab-and-ttyd-browser.md`.
+- For browser-visible hosted Hermes setups, look for a Traefik-routed `ttyd` container endpoint before assuming there is no browser UI; see `references/hermes-scheduler-vs-system-crontab-and-ttyd-browser.md`.
+
 ## Workflow
 
 1. Establish baseline health.

@@ -277,7 +277,7 @@ When the user asks what Wolfy did overnight, whether the knowledge base was upda
 7. For Hermes-EOD, treat `0 setups` as a valid gated outcome when strategies are still `research_only` or deterministic/approved-strategy gates block capital ideas. Report `NO SETUP / WATCHLIST ONLY` with the gate reason rather than implying the pipeline failed.
 8. If a knowledge-base or visibility gap is discovered, make the next build step concrete: create/repair the structured knowledge base, ingest cited materials, connect principles to scanner/report logic, or add a clearer progress notification.
 
-See `references/wolfy-visible-progress-audit-2026-06-18.md` for the concrete audit/resume sequence from the session where LLM jobs were paused while script-only EOD ingest/signals continued.
+See `references/wolfy-visible-progress-audit-2026-06-18.md` for the concrete audit/resume sequence from the session where LLM jobs were paused while script-only EOD ingest/signals continued. For objective/status/"are we tracking to the goal" audits, use `references/wolfy-objective-tracking-postgres-audit-2026-06-25.md`: restate the EOD/no-auto-execution constitution, query Postgres directly, watch for `dt` vs `date` schema drift in visibility scripts, and clearly separate research-only signals from approved/capital-ready setups.
 
 ### Daily optimization planner / visible ledger pattern
 
@@ -455,3 +455,4 @@ See `references/wolfy-accountability-loop-kanban-plan-2026-06-01.md` for the con
 - `references/wolfy-postgres-primary-optimization-2026-06-02.md` — Postgres-primary migration direction, Kanban card graph, verification commands, and wording correction: optimize role alignment/distribution, do not say “metabolize.”
 - `references/wolfy-visible-progress-audit-2026-06-18.md` — user-visible progress audit pattern: distinguish paused LLM/report jobs from still-running script-only backend jobs, inspect usage-limit watchdog state, resume if limits cleared, and report EOD gates/DB counts plainly.
 - `references/wolfy-eod-historical-depth-and-strategy-gates-2026-06-18.md` — EOD historical depth and validation-gate pattern: verify/extend OHLCV depth, regression-test ingest defaults, backfill features/signals, keep candidate strategies non-actionable until human approval, and report concrete progress when the user cannot see activity.
+- `references/wolfy-objective-tracking-postgres-audit-2026-06-25.md` — objective/status audit pattern: inspect the `wolfy` Postgres DB directly, use current `dt`-based schemas, summarize tracking vs the EOD constitution, and identify the next gate to reach paper-trade readiness.

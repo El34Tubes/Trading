@@ -146,6 +146,28 @@ def collect_progress(dsn: str = DEFAULT_DSN) -> dict[str, Any]:
                     ORDER BY name
                     """,
                 )
+                data["postgres"]["latest_backtests"] = _safe_all(
+                    cur,
+                    """
+                    SELECT DISTINCT ON (st.id)
+                           st.name,
+                           bt.id AS backtest_id,
+                           bt.run_at::text AS run_at,
+                           bt.window_start::text AS window_start,
+                           bt.window_end::text AS window_end,
+                           bt.is_sharpe::text AS is_sharpe,
+                           bt.oos_sharpe::text AS oos_sharpe,
+                           bt.oos_cagr::text AS oos_cagr,
+                           bt.max_dd::text AS max_dd,
+                           bt.turnover::text AS turnover,
+                           bt.survives_oos,
+                           coalesce((bt.report->'walk_forward'->>'oos_trades')::int, NULL) AS oos_trades,
+                           coalesce((bt.report->'walk_forward'->>'is_trades')::int, NULL) AS is_trades
+                    FROM strategies st
+                    JOIN backtests bt ON bt.strategy_id = st.id
+                    ORDER BY st.id, bt.run_at DESC, bt.id DESC
+                    """,
+                )
                 data["postgres"]["strategy_readiness"] = _safe_all(
                     cur,
                     """
@@ -353,6 +375,32 @@ def render_markdown(data: dict[str, Any], blocker_limit: int | None = None) -> s
     else:
         lines.append(f"Strategy status unavailable: {strategy_rows}")
 
+    backtest_rows = pg.get("latest_backtests") or []
+    lines.extend(["", "## Latest walk-forward validation"])
+    if backtest_rows and "error" not in backtest_rows[0]:
+        lines.append(
+            _md_table(
+                ["Strategy", "Backtest", "Window", "IS Sharpe", "OOS Sharpe", "OOS CAGR", "Max DD", "Turnover", "Survived", "Trades IS/OOS"],
+                [
+                    [
+                        row.get("name"),
+                        row.get("backtest_id"),
+                        f"{row.get('window_start')}→{row.get('window_end')}",
+                        row.get("is_sharpe"),
+                        row.get("oos_sharpe"),
+                        row.get("oos_cagr"),
+                        row.get("max_dd"),
+                        row.get("turnover"),
+                        row.get("survives_oos"),
+                        f"{row.get('is_trades')}/{row.get('oos_trades')}",
+                    ]
+                    for row in backtest_rows
+                ],
+            )
+        )
+    else:
+        lines.append(f"Latest validation unavailable: {backtest_rows}")
+
     readiness_rows = pg.get("strategy_readiness") or []
     lines.extend(["", "## Deterministic strategy readiness"])
     if readiness_rows and "error" not in readiness_rows[0]:
@@ -417,7 +465,9 @@ def render_markdown(data: dict[str, Any], blocker_limit: int | None = None) -> s
         next_action = "Next build target: run bounded backlog hygiene on stale/duplicate Jonah/Sentinel/Yang tasks after allocator/stale-cleanup jobs are idle; avoid mutating active claims."
     if depth.get("tickers_lt_500_bars") not in (None, 0, "0"):
         next_action = "Next build target: complete historical OHLCV depth before trusting walk-forward OOS; keep any shallow-depth strategy output watch-only."
-    if any(row.get("name") == "trend_volume_vol_regime" and row.get("status") != "approved" for row in strategy_rows if isinstance(row, dict)):
+    if any(row.get("name") == "sector_cross_sectional_momentum" and row.get("status") == "candidate" for row in strategy_rows if isinstance(row, dict)):
+        next_action = "Next decision target: review sector_cross_sectional_momentum candidate evidence. OOS survived, but IS Sharpe/max drawdown must be challenged before any human approval."
+    elif any(row.get("name") == "trend_volume_vol_regime" and row.get("status") != "approved" for row in strategy_rows if isinstance(row, dict)):
         next_action = "Next build target: improve trend_volume_vol_regime definition and walk-forward OOS validation; keep outputs watch-only until human approval."
     lines.extend(["", "## Next recommended action", f"- {next_action}"])
     if counts:
