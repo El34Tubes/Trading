@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 import sqlite3
 import subprocess
 
@@ -156,73 +157,37 @@ def claim_postgres_task(task: sqlite3.Row | None, source: sqlite3.Row | None) ->
 
 
 def main() -> None:
-    if not DB.exists():
-        print('Wolfy DB not initialized. Run /root/.hermes/wolfy/init_wolfy_db.py first.')
-        return
-
-    con = sqlite3.connect(DB)
-    con.row_factory = sqlite3.Row
-    now = datetime.now(timezone.utc).isoformat()
-    # Only queue fresh work here. Re-selecting stale SQLite ``in_progress`` rows
-    # creates a deduped/blocked Postgres task every Jonah cron tick after the
-    # original claim has already completed or blocked. Stale in-progress cleanup
-    # is owned by the coordination watchdog, not by the context generator.
-    task = con.execute(
-        "SELECT * FROM training_tasks WHERE status = 'queued' "
-        "ORDER BY priority ASC, COALESCE(last_attempt_at,'') ASC, id ASC LIMIT 1"
-    ).fetchone()
-    source = con.execute(
-        "SELECT * FROM knowledge_sources WHERE status = 'queued' "
-        "ORDER BY priority ASC, id ASC LIMIT 1"
-    ).fetchone()
-    counts = {t: con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in [
-        'knowledge_sources', 'knowledge_notes', 'strategy_rules', 'training_tasks',
-        'recommendations', 'paper_trades', 'scanner_runs', 'system_metrics'
-    ]}
-
-    topic_hint = None
-    if task:
-        topic_hint = str(task['task_name']).split()[0]
-    elif source:
-        topic_hint = str(source['title']).split()[0]
-
-    print('Jonah 15-minute knowledge-build context')
-    print(f'SQLite DB={DB}')
+    """Postgres-only Jonah context. SQLite is retired for live knowledge runs."""
+    print('Jonah knowledge-build context')
+    print('Wolfy DB=Postgres primary; SQLite retired for live Jonah context')
     print_eod_governance()
-    print('SQLite counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
-    print(maybe_sync_postgres())
-
-    claim_lines, claimed_task_id, run_id, _fingerprint = claim_postgres_task(task, source)
-    for line in claim_lines:
+    for line in postgres_context(None):
         print(line)
-
-    if claimed_task_id is not None:
-        if task:
-            con.execute("UPDATE training_tasks SET status='in_progress', last_attempt_at=? WHERE id=?", (now, task['id']))
-        if source:
-            con.execute("UPDATE knowledge_sources SET status='in_progress', updated_at=? WHERE id=?", (now, source['id']))
-        con.commit()
-    con.close()
-
-    for line in postgres_context(topic_hint):
-        print(line)
-    if task:
-        print(f"Next training task: id={task['id']} category={task['category']} name={task['task_name']} objective={task['objective']}")
-    else:
-        print('No queued training task found; create/refine strategy rules or grade recommendations.')
-    if source:
-        print(f"Next source/framework: id={source['id']} title={source['title']} author={source['author']} type={source['source_type']} ref={source['url_or_reference']}")
-        ref = source['url_or_reference'] or ''
-        if ref.startswith('/') and Path(ref).exists():
-            print(f'Instruction: this source is a user-provided local file. Read it directly before distilling knowledge: {ref}')
-        else:
-            print('Instruction: use public/legal summaries/interviews/course pages unless user has provided source text. Do not claim to have read a copyrighted book unless actual text/notes were provided.')
-    else:
-        print('No queued source found; add more public or user-provided materials. File inbox: /root/.hermes/wolfy/sources/inbox/; queue with python3 /root/.hermes/wolfy/queue_knowledge_source_files.py')
-    if claimed_task_id is None and (task or source):
-        print('Required output: no research spend this run; report blocked duplicate/already-claimed task and do not insert filler research.')
-    else:
-        print('Before writing: check prior artifacts above to avoid duplicate work. Required DB writes after reasoning: insert knowledge_notes and/or strategy_rules; update source/task status; optionally write a concise progress report to reports. Do not recommend trades, do not create numeric edge by LLM inference, and tag EOD-only/FACT-vs-JUDGMENT implications where relevant. Finish the Postgres agent_runs/agent_tasks rows with the command printed above.')
+    if os.environ.get('WOLFY_CONTEXT_SMOKE') == '1':
+        print('Postgres agent task claim: SMOKE=true; no task claimed and no agent_run opened.')
+        print('Instruction: smoke verification only; live Jonah cron may claim queued tasks normally.')
+        return
+    if connect is None or claim_next_task is None or start_agent_run is None:
+        print('Postgres agent task claim: helper unavailable; Jonah blocked, do not spend research tokens.')
+        return
+    with connect(PG_DSN) as conn:
+        claim = claim_next_task(conn, agent_name='Jonah', task_type='scanner_alpha_research')
+        if claim is None:
+            claim = claim_next_task(conn, agent_name='Jonah', task_type='research')
+        if claim is None:
+            run_id = start_agent_run(conn, agent_name='Jonah', role='research', job_id='jonah-20min', status='completed', summary='No queued Postgres Jonah task.')
+            finish_agent_run(conn, run_id, status='completed', summary='No queued Postgres Jonah task.', records_created=0)
+            print(f'Postgres agent run: AGENT_RUN_ID={run_id} status=completed no queued Jonah task.')
+            print('Instruction: stay quiet/minimal; no filler research when there is no claimed task.')
+            return
+        run_id = start_agent_run(conn, agent_name='Jonah', role='research', job_id='jonah-20min', task_id=claim.id, status='started', summary='Jonah Postgres task claimed before token spend.')
+    print('Postgres agent task claim: CLAIMED=true')
+    print(f'AGENT_TASK_ID={claim.id} CLAIM_TOKEN={claim.claim_token} SOURCE_FINGERPRINT={claim.source_fingerprint}')
+    print(f'AGENT_RUN_ID={run_id}')
+    print(f'Task: title={claim.title} type={claim.task_type}')
+    print('Instruction: write durable concise research to Postgres agent_artifacts/knowledge_chunks or complete/block the task; do not write SQLite.')
+    print(f'After successful Postgres writes, run: python3 {CLI} complete --task-id {claim.id} --run-id {run_id} --records-created <N> --summary "<what Jonah inserted>"')
+    print(f'If blocked, run: python3 {CLI} block --task-id {claim.id} --run-id {run_id} --reason "<specific blocker>"')
 
 
 if __name__ == '__main__':

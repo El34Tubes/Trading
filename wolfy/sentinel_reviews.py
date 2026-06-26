@@ -343,6 +343,76 @@ def _update_sqlite_statuses(db_path: str | Path, reviews: Iterable[Mapping[str, 
         con.close()
 
 
+
+def _pg_fetch_dicts(cur, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    cur.execute(sql, params)
+    cols = [d.name for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def pending_recommendations_postgres(pg_dsn: str = DEFAULT_PG_DSN, limit: int | None = None) -> list[dict[str, Any]]:
+    """Return pending_review recommendations from Postgres primary in FIFO order."""
+    if psycopg is None:
+        raise RuntimeError("psycopg is unavailable; cannot read Postgres recommendations")
+    sql = """
+        SELECT id, ticker, action, recommendation_type, thesis, setup_type,
+               entry_zone, entry_trigger, stop, target, risk_reward, confidence,
+               position_size_suggestion, holding_period, status, notes, created_at
+        FROM recommendations
+        WHERE lower(status) = 'pending_review'
+        ORDER BY created_at ASC, id ASC
+    """
+    params: tuple[Any, ...] = ()
+    if limit is not None:
+        sql += " LIMIT %s"
+        params = (int(limit),)
+    with psycopg.connect(pg_dsn) as conn, conn.cursor() as cur:
+        return _pg_fetch_dicts(cur, sql, params)
+
+
+def _active_position_count_postgres(pg_dsn: str = DEFAULT_PG_DSN) -> int | None:
+    if psycopg is None:
+        raise RuntimeError("psycopg is unavailable; cannot read Postgres paper_trades")
+    with psycopg.connect(pg_dsn) as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT COUNT(*) FROM paper_trades
+            WHERE lower(COALESCE(status,'')) IN ('open','pending','triggered','active')
+        """)
+        return int(cur.fetchone()[0])
+
+
+def _update_postgres_statuses(pg_dsn: str, reviews: Iterable[Mapping[str, Any]]) -> None:
+    if psycopg is None or Jsonb is None:
+        raise RuntimeError("psycopg is unavailable; cannot update Postgres recommendations")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with psycopg.connect(pg_dsn) as conn:
+        with conn.cursor() as cur:
+            for review in reviews:
+                rec_id = int(review["recommendation_id"])
+                cur.execute("SELECT notes FROM recommendations WHERE id=%s", (rec_id,))
+                row = cur.fetchone()
+                notes = row[0] if row and isinstance(row[0], dict) else _load_notes(row[0] if row else None)
+                notes["sentinel_review"] = {"reviewed_at": now, "decision": review["decision"], "constraint_check": review["constraint_check"], "review_notes": review["review_notes"], "source": "postgres-primary"}
+                cur.execute("UPDATE recommendations SET status=%s, notes=%s WHERE id=%s", (review["decision"], Jsonb(notes), rec_id))
+
+
+def review_pending_recommendations_postgres(*, pg_dsn: str = DEFAULT_PG_DSN, dry_run: bool = False, limit: int | None = None, pg_writer: PGReviewWriter | None = None) -> dict[str, Any]:
+    """Review Postgres-primary pending recommendations and update Postgres state."""
+    rows = pending_recommendations_postgres(pg_dsn, limit=limit)
+    active_positions = _active_position_count_postgres(pg_dsn)
+    reviews = [evaluate_recommendation(row, active_positions=active_positions) for row in rows]
+    if not dry_run and reviews:
+        writer = pg_writer or (lambda payload: _write_postgres_reviews(payload, pg_dsn=pg_dsn))
+        writer(reviews)
+        _update_postgres_statuses(pg_dsn, reviews)
+    return {
+        "source": "postgres",
+        "reviewed": len(reviews),
+        "dry_run": dry_run,
+        "decisions": {row["recommendation_id"]: row["decision"] for row in reviews},
+        "reviews": [{**row, "feasibility_score": float(row["feasibility_score"]), "risk_score": float(row["risk_score"])} for row in reviews],
+    }
+
 def review_pending_recommendations(
     db_path: str | Path = DEFAULT_DB,
     *,
@@ -385,9 +455,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite DB path")
     parser.add_argument("--pg-dsn", default=DEFAULT_PG_DSN, help="Postgres DSN for recommendation_reviews")
     parser.add_argument("--limit", type=int, help="Maximum pending recommendations to review")
-    parser.add_argument("--dry-run", action="store_true", help="Evaluate but do not write Postgres or update SQLite")
+    parser.add_argument("--dry-run", action="store_true", help="Evaluate but do not write sinks")
+    parser.add_argument("--source", choices=["sqlite", "postgres"], default="sqlite", help="Recommendation source/status sink")
     args = parser.parse_args(argv)
-    result = review_pending_recommendations(args.db, pg_dsn=args.pg_dsn, dry_run=args.dry_run, limit=args.limit)
+    if args.source == "postgres":
+        result = review_pending_recommendations_postgres(pg_dsn=args.pg_dsn, dry_run=args.dry_run, limit=args.limit)
+    else:
+        result = review_pending_recommendations(args.db, pg_dsn=args.pg_dsn, dry_run=args.dry_run, limit=args.limit)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

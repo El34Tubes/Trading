@@ -576,6 +576,8 @@ Then create/connect the GitHub remote and push. If a token-bearing API call is b
 
 When the user asks to put the whole Hermes operations layer under version control — not just one agent — use a private monorepo rooted at the Hermes home and aggressively ignore secrets/runtime state. See `references/hermes-ops-source-version-control.md` for the proven bootstrap pattern, `.gitignore` categories, staged secret-scan requirement, and the fine-grained PAT repo-creation pitfall.
 
+For this user's Hermes/Wolfy setup, the canonical remote is the Trading repo: `/root/.hermes` -> `https://github.com/El34Tubes/Trading.git` on `main`. If the repo was accidentally pointed at another remote, retarget origin, fetch Trading, preserve any existing Trading bootstrap commit with `git merge --allow-unrelated-histories --no-edit origin/main` when appropriate, then push. See `references/hermes-ops-trading-remote-correction.md`.
+
 ## Quick Reference Table
 
 | Action | gh | git + curl |

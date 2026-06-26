@@ -35,7 +35,7 @@ def main() -> int:
     run('hermes doctor', ['hermes', 'doctor'])
     run('postgres requirements guard', [str(ROOT / 'check_postgres_requirements.py')])
     run('postgres schema/counts', ['psql', '-d', 'wolfy', '-c', "SELECT 'agent_tasks' AS table, status, count(*) FROM agent_tasks GROUP BY status UNION ALL SELECT 'agent_runs', status, count(*) FROM agent_runs GROUP BY status ORDER BY 1,2; SELECT count(*) AS knowledge_chunks, count(embedding) AS embedded_chunks FROM knowledge_chunks;"])
-    run('agent coordination smoke tests', ['python3', '-m', 'pytest', '-q', 'test_agent_coordination_smoke.py'], cwd=str(ROOT))
+    run('agent coordination read-only smoke', ['psql', '-d', 'wolfy', '-v', 'ON_ERROR_STOP=1', '-c', "SELECT count(*) AS stale_started_runs FROM agent_runs WHERE status='started' AND started_at < now() - interval '2 hours'; SELECT count(*) AS synthetic_blocked_tasks FROM agent_tasks WHERE status='blocked' AND title='Smoke blocked task' AND source_fingerprint LIKE 'smoke-block-%'; SELECT count(*) AS duplicate_claim_noise FROM agent_runs WHERE status='blocked' AND error_message='duplicate-or-already-claimed' AND started_at > now() - interval '24 hours';"])
     run('embedding sync smoke', ['python3', str(ROOT / 'embed_knowledge_chunks.py')])
     run('stale coordination cleanup smoke', ['python3', str(ROOT / 'cleanup_stale_agent_coordination.py')])
     run('usage snapshot smoke', ['python3', str(ROOT / 'capture_usage_snapshot.py')])

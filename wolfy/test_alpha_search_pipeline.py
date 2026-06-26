@@ -1,5 +1,7 @@
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 from alpha_search_pipeline import (
@@ -123,3 +125,11 @@ def test_evidence_quality_rewards_multiple_relevant_sourced_items():
     assert count == 2
     assert score > 0.7
     assert max_q == 0.9
+
+
+def test_cli_without_subcommand_is_non_mutating_status_smoke():
+    script = Path(__file__).with_name("alpha_search_pipeline.py")
+    proc = subprocess.run([sys.executable, str(script)], text=True, capture_output=True, check=True)
+    data = json.loads(proc.stdout)
+    assert "counts" in data
+    assert "required_sections" in data

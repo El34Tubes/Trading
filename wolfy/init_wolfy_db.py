@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS knowledge_sources (
   author TEXT,
   source_type TEXT NOT NULL,
   url_or_reference TEXT,
+  -- Compatibility aliases for diagnostics/prompts that ask for path/url.
+  path TEXT,
+  url TEXT,
   access_mode TEXT NOT NULL DEFAULT 'public_or_user_provided',
   copyright_status TEXT DEFAULT 'unknown',
   priority INTEGER NOT NULL DEFAULT 50,
@@ -53,8 +56,69 @@ CREATE TABLE IF NOT EXISTS knowledge_notes (
   application_to_wolfy TEXT NOT NULL,
   tags TEXT,
   confidence REAL DEFAULT 0.5,
+  -- Compatibility aliases for LLM/generated diagnostics and older scripts that
+  -- query title/category/note/content even though the canonical schema uses
+  -- topic/tags/summary. Keep nullable and mirrored non-destructively.
+  title TEXT,
+  category TEXT,
+  note TEXT,
+  content TEXT,
+  note_type TEXT,
+  source_type TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TRIGGER IF NOT EXISTS trg_knowledge_sources_path_after_insert
+AFTER INSERT ON knowledge_sources
+FOR EACH ROW
+WHEN NEW.path IS NULL OR NEW.url IS NULL
+BEGIN
+  UPDATE knowledge_sources
+  SET path=COALESCE(NEW.path, NEW.url_or_reference),
+      url=COALESCE(NEW.url, NEW.url_or_reference)
+  WHERE id=NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_knowledge_sources_path_after_update
+AFTER UPDATE OF url_or_reference, path, url ON knowledge_sources
+FOR EACH ROW
+WHEN NEW.path IS NULL OR NEW.url IS NULL
+BEGIN
+  UPDATE knowledge_sources
+  SET path=COALESCE(NEW.path, NEW.url_or_reference),
+      url=COALESCE(NEW.url, NEW.url_or_reference)
+  WHERE id=NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_knowledge_notes_alias_after_insert
+AFTER INSERT ON knowledge_notes
+FOR EACH ROW
+WHEN NEW.title IS NULL OR NEW.category IS NULL OR NEW.note IS NULL OR NEW.content IS NULL OR NEW.note_type IS NULL OR NEW.source_type IS NULL
+BEGIN
+  UPDATE knowledge_notes
+  SET title=COALESCE(NEW.title, NEW.topic),
+      category=COALESCE(NEW.category, NEW.tags),
+      note=COALESCE(NEW.note, NEW.summary),
+      content=COALESCE(NEW.content, NEW.summary),
+      note_type=COALESCE(NEW.note_type, NEW.category, NEW.tags),
+      source_type=COALESCE(NEW.source_type, NEW.note_type, NEW.category, NEW.tags)
+  WHERE id=NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_knowledge_notes_alias_after_update
+AFTER UPDATE OF topic, tags, summary, title, category, note, content, note_type, source_type ON knowledge_notes
+FOR EACH ROW
+WHEN NEW.title IS NULL OR NEW.category IS NULL OR NEW.note IS NULL OR NEW.content IS NULL OR NEW.note_type IS NULL OR NEW.source_type IS NULL
+BEGIN
+  UPDATE knowledge_notes
+  SET title=COALESCE(NEW.title, NEW.topic),
+      category=COALESCE(NEW.category, NEW.tags),
+      note=COALESCE(NEW.note, NEW.summary),
+      content=COALESCE(NEW.content, NEW.summary),
+      note_type=COALESCE(NEW.note_type, NEW.category, NEW.tags),
+      source_type=COALESCE(NEW.source_type, NEW.note_type, NEW.category, NEW.tags)
+  WHERE id=NEW.id;
+END;
 
 CREATE TABLE IF NOT EXISTS strategy_rules (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +133,10 @@ CREATE TABLE IF NOT EXISTS strategy_rules (
   name TEXT,
   status TEXT DEFAULT 'active',
   asset_class TEXT DEFAULT 'equity_etf_process',
+  category TEXT,
+  source_id TEXT,
+  rule_text TEXT,
+  is_active INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -121,6 +189,7 @@ CREATE TABLE IF NOT EXISTS scanner_results (
   low20 REAL,
   extension_penalty REAL,
   liquidity_pass INTEGER,
+  notes_json TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_scanner_results_ticker ON scanner_results(ticker);
@@ -465,38 +534,57 @@ RULES = [
 def ensure_strategy_rule_compat(con: sqlite3.Connection) -> None:
     """Keep non-destructive alias columns available on older Wolfy DBs."""
     cols = {row[1] for row in con.execute("PRAGMA table_info(strategy_rules)").fetchall()}
-    if 'name' not in cols:
-        con.execute("ALTER TABLE strategy_rules ADD COLUMN name TEXT")
-    if 'status' not in cols:
-        con.execute("ALTER TABLE strategy_rules ADD COLUMN status TEXT DEFAULT 'active'")
-    if 'asset_class' not in cols:
-        con.execute("ALTER TABLE strategy_rules ADD COLUMN asset_class TEXT DEFAULT 'equity_etf_process'")
+    for name, ddl in [
+        ('name', 'TEXT'),
+        ('status', "TEXT DEFAULT 'active'"),
+        ('asset_class', "TEXT DEFAULT 'equity_etf_process'"),
+        ('category', 'TEXT'),
+        ('source_id', 'TEXT'),
+        ('rule_text', 'TEXT'),
+        ('is_active', 'INTEGER'),
+    ]:
+        if name not in cols:
+            con.execute(f"ALTER TABLE strategy_rules ADD COLUMN {name} {ddl}")
     con.execute(
         """
         UPDATE strategy_rules
         SET name = COALESCE(name, rule_name),
-            status = COALESCE(status, CASE WHEN enabled=1 THEN 'active' ELSE 'inactive' END),
-            asset_class = COALESCE(asset_class, 'equity_etf_process')
+            status = COALESCE(status, implementation_status, CASE WHEN enabled=1 THEN 'active' ELSE 'inactive' END),
+            asset_class = COALESCE(asset_class, 'equity_etf_process'),
+            category = COALESCE(category, rule_type),
+            source_id = COALESCE(source_id, source_basis),
+            rule_text = COALESCE(rule_text, description),
+            is_active = COALESCE(is_active, enabled)
         """
     )
     con.executescript(
         """
+        DROP TRIGGER IF EXISTS trg_strategy_rules_alias_insert;
+        DROP TRIGGER IF EXISTS trg_strategy_rules_alias_update;
         CREATE TRIGGER IF NOT EXISTS trg_strategy_rules_alias_insert
         AFTER INSERT ON strategy_rules
         BEGIN
           UPDATE strategy_rules
           SET name = COALESCE(NEW.name, NEW.rule_name),
-              status = COALESCE(NEW.status, CASE WHEN NEW.enabled=1 THEN 'active' ELSE 'inactive' END),
-              asset_class = COALESCE(NEW.asset_class, 'equity_etf_process')
+              status = COALESCE(NEW.status, NEW.implementation_status, CASE WHEN NEW.enabled=1 THEN 'active' ELSE 'inactive' END),
+              asset_class = COALESCE(NEW.asset_class, 'equity_etf_process'),
+              category = COALESCE(NEW.category, NEW.rule_type),
+              source_id = COALESCE(NEW.source_id, NEW.source_basis),
+              rule_text = COALESCE(NEW.rule_text, NEW.description),
+              is_active = COALESCE(NEW.is_active, NEW.enabled)
           WHERE id = NEW.id;
         END;
         CREATE TRIGGER IF NOT EXISTS trg_strategy_rules_alias_update
-        AFTER UPDATE OF rule_name, enabled, name, status, asset_class ON strategy_rules
+        AFTER UPDATE OF rule_name, rule_type, description, source_basis, implementation_status, enabled, name, status, asset_class, category, source_id, rule_text, is_active ON strategy_rules
         BEGIN
           UPDATE strategy_rules
           SET name = COALESCE(NEW.name, NEW.rule_name),
-              status = COALESCE(NEW.status, CASE WHEN NEW.enabled=1 THEN 'active' ELSE 'inactive' END),
-              asset_class = COALESCE(NEW.asset_class, 'equity_etf_process')
+              status = COALESCE(NEW.status, NEW.implementation_status, CASE WHEN NEW.enabled=1 THEN 'active' ELSE 'inactive' END),
+              asset_class = COALESCE(NEW.asset_class, 'equity_etf_process'),
+              category = COALESCE(NEW.category, NEW.rule_type),
+              source_id = COALESCE(NEW.source_id, NEW.source_basis),
+              rule_text = COALESCE(NEW.rule_text, NEW.description),
+              is_active = COALESCE(NEW.is_active, NEW.enabled)
           WHERE id = NEW.id;
         END;
         """

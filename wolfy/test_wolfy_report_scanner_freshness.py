@@ -119,3 +119,72 @@ def test_format_scanner_freshness_context_contains_no_trade_gate():
     assert 'status=scanner_stale' in line
     assert 'action_gate=no_trade' in line
     assert 'Wolfy must not create actionable recommendations' in line
+
+
+def test_format_promotion_gate_result_requires_no_trade_when_no_complete_ticket():
+    from wolfy_report_context import format_promotion_gate_result
+
+    result = {
+        'summary': {'evaluated': 2, 'pending_review': 0, 'watch_only': 2, 'live_writes': 0, 'dry_run': True},
+        'decisions': [
+            {'lead_id': 1, 'ticker': 'AAPL', 'classification': 'watchlist_only', 'validation_notes': ['technical setup/trigger missing']},
+            {'lead_id': 2, 'ticker': 'MSFT', 'classification': 'watchlist_only', 'validation_notes': ['scanner data is stale', 'risk/reward missing']},
+        ],
+    }
+
+    lines = format_promotion_gate_result(result)
+
+    assert any('Promotion gate dry-run: evaluated=2 pending_review=0 watch_only=2 live_writes=0' in line for line in lines)
+    assert any('Promotion gate: no complete ticket/no-trade' in line for line in lines)
+    assert any('AAPL watchlist_only reasons=technical setup/trigger missing' in line for line in lines)
+    assert any('MSFT watchlist_only reasons=scanner data is stale; risk/reward missing' in line for line in lines)
+
+
+def test_recommendation_buckets_separate_pending_approved_and_watch_only():
+    from wolfy_report_context import get_recommendation_buckets, format_recommendation_bucket
+
+    con = make_db()
+    con.executescript(
+        """
+        CREATE TABLE recommendations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp TEXT NOT NULL,
+          ticker TEXT NOT NULL,
+          action TEXT NOT NULL,
+          recommendation_type TEXT NOT NULL,
+          thesis TEXT,
+          setup_type TEXT,
+          entry_zone TEXT,
+          entry_trigger TEXT,
+          stop TEXT,
+          target TEXT,
+          risk_reward TEXT,
+          confidence TEXT,
+          position_size_suggestion TEXT,
+          holding_period TEXT,
+          status TEXT NOT NULL,
+          notes TEXT
+        );
+        """
+    )
+    rows = [
+        ('2026-06-01T21:00:00+00:00', 'AAPL', 'buy', 'equity', 'pending thesis', 'breakout', 'above 100', 'close > 101', '96', '112', '2.4R', 'medium', '$37.50 risk', '2-6 weeks', 'pending_review', '{}'),
+        ('2026-06-01T22:00:00+00:00', 'MSFT', 'buy', 'equity', 'approved thesis', 'pullback', 'near 400', 'close > 405', '390', '430', '2.1R', 'medium', '$37.50 risk', '2-6 weeks', 'approved', '{}'),
+        ('2026-06-01T23:00:00+00:00', 'NVDA', 'watch', 'watchlist', 'watch thesis', '', '', '', '', '', '', 'low', '', '', 'watching', '{}'),
+    ]
+    con.executemany(
+        """
+        INSERT INTO recommendations(timestamp,ticker,action,recommendation_type,thesis,setup_type,entry_zone,entry_trigger,stop,target,risk_reward,confidence,position_size_suggestion,holding_period,status,notes)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        rows,
+    )
+
+    buckets = get_recommendation_buckets(con, limit_per_bucket=5)
+
+    assert [row['ticker'] for row in buckets['pending_review']] == ['AAPL']
+    assert [row['ticker'] for row in buckets['sentinel_approved']] == ['MSFT']
+    assert [row['ticker'] for row in buckets['watch_only']] == ['NVDA']
+    assert 'Pending_review candidates awaiting Sentinel:' in format_recommendation_bucket('pending_review', buckets['pending_review'])[0]
+    assert 'Sentinel-approved paper candidates:' in format_recommendation_bucket('sentinel_approved', buckets['sentinel_approved'])[0]
+    assert 'Watch-only ideas:' in format_recommendation_bucket('watch_only', buckets['watch_only'])[0]

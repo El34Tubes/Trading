@@ -4,25 +4,25 @@
     "created_at": "2026-05-31T03:34:43.018010+00:00",
     "created_by": "agent",
     "last_patched_at": "2026-05-31T03:56:34.964563+00:00",
-    "last_used_at": "2026-06-03T00:55:53.096850+00:00",
-    "last_viewed_at": "2026-06-02T08:29:33.979179+00:00",
+    "last_used_at": "2026-06-26T00:20:57.620713+00:00",
+    "last_viewed_at": "2026-06-25T16:11:12.428184+00:00",
     "patch_count": 8,
     "pinned": false,
     "state": "active",
-    "use_count": 33,
-    "view_count": 8
+    "use_count": 141,
+    "view_count": 18
   },
   "scheduled-market-research-reports": {
     "archived_at": null,
     "created_at": "2026-05-31T04:16:02.905518+00:00",
     "created_by": "agent",
     "last_patched_at": "2026-05-31T21:15:07.332696+00:00",
-    "last_used_at": "2026-06-03T00:55:53.108590+00:00",
-    "last_viewed_at": "2026-05-31T21:54:52.954571+00:00",
+    "last_used_at": "2026-06-26T00:20:57.633326+00:00",
+    "last_viewed_at": "2026-06-12T01:10:59.753912+00:00",
     "patch_count": 21,
     "pinned": false,
     "state": "active",
-    "use_count": 43,
-    "view_count": 16
+    "use_count": 142,
+    "view_count": 17
   }
 }

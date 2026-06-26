@@ -611,6 +611,7 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 - **Use `hermes chat -q` for fire-and-forget** — no PTY needed
 - **Use tmux for interactive sessions** — raw PTY mode has `\r` vs `\n` issues with prompt_toolkit
 - **For scheduled tasks**, use the `cronjob` tool instead of spawning — handles delivery and retry
+- **When updating a skill's main `SKILL.md` with `skill_manage`, use `action='patch'` or `action='edit'` and omit `file_path`; `write_file`/`remove_file` are only for supporting files under `references/`, `templates/`, `scripts/`, or `assets/`. Do not pass `file_path='SKILL.md'`.
 
 ---
 

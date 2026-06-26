@@ -22,6 +22,7 @@ from suspicious_activity import (
     evaluate_recommendation_suspicion,
     persist_suspicious_flags,
 )
+from wolfy_postgres_pipeline import persist_recommendation as persist_recommendation_postgres
 
 BASE = Path("/root/.hermes/wolfy")
 DEFAULT_DB = BASE / "wolfy.db"
@@ -249,6 +250,9 @@ def log_recommendation(db_path: str | Path, idea: Mapping[str, Any]) -> dict[str
         },
     }
 
+    postgres_id = persist_recommendation_postgres(ticket, validation, notes)
+    notes["postgres_recommendation_id"] = postgres_id
+
     con = sqlite3.connect(db_path)
     try:
         cur = con.execute(
@@ -289,6 +293,9 @@ def log_recommendation(db_path: str | Path, idea: Mapping[str, Any]) -> dict[str
 
     return {
         "recommendation_id": cur.lastrowid,
+        "postgres_recommendation_id": postgres_id,
+        "postgres_primary": True,
+        "sqlite_compatibility": True,
         "ticker": ticket["ticker"],
         "status": validation["status"],
         "classification": validation["classification"],

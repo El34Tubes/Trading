@@ -12,7 +12,7 @@ import json
 import os
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
 DEFAULT_STRATEGIES = (
@@ -111,6 +111,29 @@ def ensure_signal_schema(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_setups_for_session_status ON setups(for_session, status, rank)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_setups_ticker_created ON setups(ticker, created_dt DESC)")
     conn.execute("ALTER TABLE features ADD COLUMN IF NOT EXISTS liquidity boolean")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS config (
+          key text PRIMARY KEY,
+          value jsonb NOT NULL,
+          updated_at timestamptz DEFAULT now()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS positions (
+          id serial PRIMARY KEY,
+          ticker text,
+          opened date,
+          structure jsonb,
+          risk_amount numeric,
+          invalidation numeric,
+          status text
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_status_ticker ON positions(status, ticker)")
 
 
 def seed_default_strategies(conn) -> dict:
@@ -299,8 +322,186 @@ def _raw_value(raw: object, key: str, default: object = None) -> object:
     return default
 
 
-def propose_approved_setups(conn, *, signal_dt: date, for_session: date, tickers: Sequence[str] | None = None, max_setups: int = 10) -> dict:
+def _as_decimal(value: Any, default: Decimal) -> Decimal:
+    if value is None:
+        return default
+    return Decimal(str(value))
+
+
+def _money(value: Decimal) -> str:
+    return str(value.quantize(Decimal("0.01")))
+
+
+def _config_values(conn) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT key, value
+        FROM config
+        WHERE key IN ('risk_per_trade','max_portfolio_heat','max_name_weight','max_drawdown_killswitch','max_adv_frac')
+        """
+    ).fetchall()
+    return {str(key): value for key, value in rows}
+
+
+def _config_fraction(config: Mapping[str, Any], key: str, nested_key: str, default: str) -> Decimal:
+    value = config.get(key)
+    if isinstance(value, str):
+        value = json.loads(value)
+    if isinstance(value, Mapping):
+        return _as_decimal(value.get(nested_key), Decimal(default))
+    return Decimal(default)
+
+
+def _event_landmines(conn, ticker: str, *, start: date, horizon_days: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT event_dt, session, confirmed
+        FROM earnings_calendar
+        WHERE ticker=%s AND event_dt >= %s AND event_dt <= %s
+        ORDER BY event_dt
+        """,
+        (ticker, start, start + timedelta(days=horizon_days)),
+    ).fetchall()
+    return [{"event_dt": row[0], "session": row[1], "confirmed": row[2]} for row in rows]
+
+
+def _open_position_risk(conn) -> tuple[int, Decimal, dict[str, Decimal]]:
+    rows = conn.execute(
+        """
+        SELECT ticker, risk_amount
+        FROM positions
+        WHERE lower(coalesce(status,'')) IN ('open','taken','active')
+        """
+    ).fetchall()
+    by_ticker: dict[str, Decimal] = {}
+    total = Decimal("0")
+    for ticker, risk_amount in rows:
+        risk = _as_decimal(risk_amount, Decimal("0"))
+        total += risk
+        by_ticker[str(ticker).upper()] = by_ticker.get(str(ticker).upper(), Decimal("0")) + risk
+    return len(rows), total, by_ticker
+
+
+def _instrument_context(screening_context: Mapping[str, Any], ticker: str) -> Mapping[str, Any]:
+    instruments = screening_context.get("instruments", {}) if isinstance(screening_context, Mapping) else {}
+    if isinstance(instruments, Mapping):
+        item = instruments.get(ticker.upper()) or instruments.get(ticker) or {}
+        if isinstance(item, Mapping):
+            return item
+    return {}
+
+
+def _build_screened_setup(
+    *,
+    ticker: str,
+    direction: str,
+    raw: Any,
+    strategy_id: int,
+    strategy_name: str,
+    close: Any,
+    atr: Any,
+    liquidity: Any,
+    dollar_vol: Any,
+    config: Mapping[str, Any],
+    screening_context: Mapping[str, Any],
+    signal_dt: date,
+    for_session: date,
+    current_open_positions: int,
+    current_heat: Decimal,
+) -> tuple[dict[str, Any], list[str]]:
+    reasons: list[str] = []
+    close_dec = Decimal(str(close))
+    atr_dec = Decimal(str(atr)) if atr is not None else close_dec * Decimal("0.03")
+    invalidation = close_dec - (atr_dec * Decimal("2"))
+    risk_per_share = max(close_dec - invalidation, Decimal("0.01"))
+
+    account_equity = _as_decimal(screening_context.get("account_equity_usd"), Decimal("5000"))
+    risk_fraction = _config_fraction(config, "risk_per_trade", "fraction_of_equity", "0.01")
+    max_heat_fraction = _config_fraction(config, "max_portfolio_heat", "fraction_of_equity", "0.03")
+    max_name_fraction = _config_fraction(config, "max_name_weight", "fraction_of_equity", "0.20")
+    max_drawdown_fraction = _config_fraction(config, "max_drawdown_killswitch", "fraction_of_equity", "0.10")
+    max_adv_fraction = _config_fraction(config, "max_adv_frac", "fraction_of_average_daily_volume", "0.02")
+    max_positions = int(screening_context.get("max_concurrent_positions", 3))
+
+    risk_amount = account_equity * risk_fraction
+    qty = risk_amount / risk_per_share
+    notional = qty * close_dec
+    avg_dollar_vol = _as_decimal(dollar_vol, Decimal("0"))
+    avg_volume = avg_dollar_vol / close_dec if close_dec else Decimal("0")
+
+    if liquidity is False:
+        reasons.append("liquidity gate failed")
+    if avg_dollar_vol and qty > (avg_volume * max_adv_fraction):
+        reasons.append("ADV fraction gate failed")
+
+    events = _event_landmines(screening_context["conn"], ticker, start=for_session, horizon_days=int(screening_context.get("event_horizon_days", 1)))
+    if events:
+        reasons.append("event landmine inside setup horizon")
+
+    drawdown = _as_decimal(screening_context.get("current_drawdown_fraction"), Decimal("0"))
+    if drawdown >= max_drawdown_fraction:
+        reasons.append("drawdown kill switch active")
+    if current_open_positions >= max_positions:
+        reasons.append("max concurrent positions breaker active")
+    if current_heat + risk_amount > account_equity * max_heat_fraction:
+        reasons.append("max portfolio heat breaker active")
+    if notional > account_equity * max_name_fraction:
+        reasons.append("max name weight breaker active")
+
+    instrument = _instrument_context(screening_context, ticker)
+    instrument_type = str(instrument.get("instrument_type", "equity")).lower()
+    option_structure = {"instrument_type": instrument_type, "allowed": "defined_risk_only", "selected": None}
+    iv_view = instrument.get("iv_view", {"source": "not_evaluated", "action": "do_not_infer_iv"})
+    if instrument_type in {"option", "options", "call", "put"}:
+        if instrument.get("option_liquidity_ok") is not True:
+            reasons.append("option liquidity gate failed")
+        if instrument.get("defined_risk") is not True:
+            reasons.append("defined-risk option structure required")
+        if isinstance(iv_view, Mapping) and iv_view.get("aligned") is not True:
+            reasons.append("IV-vs-view gate failed")
+        option_structure.update({"selected": instrument.get("structure"), "defined_risk": bool(instrument.get("defined_risk"))})
+
+    size = {
+        "paper_account_usd": _money(account_equity),
+        "risk_fraction": str(risk_fraction),
+        "risk_amount_usd": _money(risk_amount),
+        "estimated_qty": str(qty.quantize(Decimal("0.0001"))),
+        "notional_usd": _money(notional),
+        "max_concurrent_positions": max_positions,
+    }
+    setup = {
+        "ticker": ticker,
+        "strategy_id": strategy_id,
+        "strategy_name": strategy_name,
+        "direction": direction,
+        "liquidity_ok": bool(liquidity) if liquidity is not None else True,
+        "event_flag": str(_raw_value(raw, "strategy", strategy_name)),
+        "option_structure": option_structure,
+        "iv_view": iv_view,
+        "size": size,
+        "invalidation": str(invalidation.quantize(Decimal("0.01"))),
+        "confidence": Decimal("0.55"),
+        "thesis": f"{ticker} has an approved deterministic EOD signal from {strategy_name}; FACT: signal_dt={signal_dt}, close={close}, strategy_status=approved, risk_amount={size['risk_amount_usd']}. JUDGMENT: pending_review setup for next-session human/Sentinel review after all deterministic gates pass.",
+        "falsification": "Invalidate if the next-session price breaks the ATR-based stop or any deterministic EOD risk gate fails before execution.",
+        "score": Decimal("0.55"),
+    }
+    return setup, reasons
+
+
+def propose_approved_setups(
+    conn,
+    *,
+    signal_dt: date,
+    for_session: date,
+    tickers: Sequence[str] | None = None,
+    max_setups: int = 10,
+    dry_run: bool = False,
+    screening_context: Mapping[str, Any] | None = None,
+) -> dict:
     ensure_signal_schema(conn)
+    context: dict[str, Any] = dict(screening_context or {})
+    context["conn"] = conn
+    config = _config_values(conn)
     params: list[object] = [signal_dt]
     ticker_clause = ""
     if tickers is not None:
@@ -308,7 +509,7 @@ def propose_approved_setups(conn, *, signal_dt: date, for_session: date, tickers
         params.append([t.upper() for t in tickers])
     rows = conn.execute(
         f"""
-        SELECT s.ticker, s.direction, s.raw, st.id, st.name, st.status, p.close, f.atr, f.liquidity
+        SELECT s.ticker, s.direction, s.raw, st.id, st.name, st.status, p.close, f.atr, f.liquidity, f.dollar_vol
         FROM signals s
         JOIN strategies st ON st.id=s.strategy_id
         JOIN prices p ON p.ticker=s.ticker AND p.dt=s.dt
@@ -320,45 +521,82 @@ def propose_approved_setups(conn, *, signal_dt: date, for_session: date, tickers
         params,
     ).fetchall()
     created = 0
-    blocked = 0
-    rank = 1
-    for ticker, direction, raw, strategy_id, strategy_name, status, close, atr, liquidity in rows:
+    blocked_by_strategy_status = 0
+    ranked_setups: list[dict[str, Any]] = []
+    blocked_setups: list[dict[str, Any]] = []
+    current_open_positions, current_heat, _risk_by_ticker = _open_position_risk(conn)
+    for ticker, direction, raw, strategy_id, strategy_name, status, close, atr, liquidity, dollar_vol in rows:
         if status != "approved":
-            blocked += 1
+            blocked_by_strategy_status += 1
             continue
-        if created >= max_setups:
-            break
-        close_dec = Decimal(str(close))
-        atr_dec = Decimal(str(atr)) if atr is not None else close_dec * Decimal("0.03")
-        invalidation = close_dec - (atr_dec * Decimal("2"))
-        thesis = f"{ticker} has an approved deterministic EOD signal from {strategy_name}; FACT: signal_dt={signal_dt}, close={close}, strategy_status=approved. JUDGMENT: pending_review setup for next-session human/Sentinel review."
-        falsification = "Invalidate if the next-session price breaks the ATR-based stop or deterministic EOD signal/risk gates fail before execution."
-        conn.execute(
-            """
-            INSERT INTO setups(created_dt, for_session, ticker, strategy_id, direction, liquidity_ok, event_flag, option_structure, iv_view, size, invalidation, thesis, falsification, confidence, rank, status)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,'pending_review')
-            """,
-            (
-                signal_dt,
-                for_session,
-                ticker,
-                strategy_id,
-                direction,
-                bool(liquidity) if liquidity is not None else True,
-                str(_raw_value(raw, "strategy", strategy_name)),
-                _json({"allowed": "defined_risk_only", "selected": None}),
-                _json({"source": "not_evaluated", "action": "do_not_infer_iv"}),
-                _json({"paper_account_usd": 5000, "risk_fraction": "0.01", "max_concurrent_positions": 3}),
-                invalidation,
-                thesis,
-                falsification,
-                Decimal("0.55"),
-                rank,
-            ),
+        setup, reasons = _build_screened_setup(
+            ticker=ticker,
+            direction=direction,
+            raw=raw,
+            strategy_id=int(strategy_id),
+            strategy_name=str(strategy_name),
+            close=close,
+            atr=atr,
+            liquidity=liquidity,
+            dollar_vol=dollar_vol,
+            config=config,
+            screening_context=context,
+            signal_dt=signal_dt,
+            for_session=for_session,
+            current_open_positions=current_open_positions,
+            current_heat=current_heat,
         )
-        created += 1
-        rank += 1
-    return {"signal_dt": signal_dt.isoformat(), "for_session": for_session.isoformat(), "setups_created": created, "blocked_by_strategy_status": blocked}
+        if reasons:
+            blocked_setups.append({"ticker": ticker, "strategy_name": strategy_name, "reasons": reasons})
+            continue
+        ranked_setups.append(setup)
+        current_open_positions += 1
+        current_heat += Decimal(setup["size"]["risk_amount_usd"])
+    ranked_setups.sort(key=lambda item: (item["score"], item["ticker"]), reverse=True)
+    ranked_setups = ranked_setups[: max(0, max_setups)]
+
+    if not dry_run:
+        for rank, setup in enumerate(ranked_setups, start=1):
+            conn.execute(
+                """
+                INSERT INTO setups(created_dt, for_session, ticker, strategy_id, direction, liquidity_ok, event_flag, option_structure, iv_view, size, invalidation, thesis, falsification, confidence, rank, status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,'pending_review')
+                """,
+                (
+                    signal_dt,
+                    for_session,
+                    setup["ticker"],
+                    setup["strategy_id"],
+                    setup["direction"],
+                    setup["liquidity_ok"],
+                    setup["event_flag"],
+                    _json(setup["option_structure"]),
+                    _json(setup["iv_view"]),
+                    _json(setup["size"]),
+                    Decimal(setup["invalidation"]),
+                    setup["thesis"],
+                    setup["falsification"],
+                    setup["confidence"],
+                    rank,
+                ),
+            )
+            created += 1
+
+    serializable_ranked = [
+        {k: (str(v) if isinstance(v, Decimal) else v) for k, v in setup.items() if k != "score"}
+        for setup in ranked_setups
+    ]
+    return {
+        "signal_dt": signal_dt.isoformat(),
+        "for_session": for_session.isoformat(),
+        "dry_run": dry_run,
+        "setups_created": created,
+        "setups_ranked": len(ranked_setups),
+        "quiet_night": len(ranked_setups) == 0,
+        "blocked_by_strategy_status": blocked_by_strategy_status,
+        "blocked_setups": blocked_setups,
+        "ranked_setups": serializable_ranked,
+    }
 
 
 def _parse_date(value: str) -> date:

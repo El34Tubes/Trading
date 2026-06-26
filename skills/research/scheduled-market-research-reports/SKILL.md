@@ -7,6 +7,7 @@ license: MIT
 metadata:
   hermes:
     tags: [stocks, trading, market-research, swing-trading, cron, email, token-saving]
+    related_skills: [hermes-runtime-operations]
 ---
 
 # Scheduled Market Research Reports
@@ -109,6 +110,18 @@ Use a concise recurring structure:
 8. Model-learning/progress note.
 9. Risk disclaimer and next verification steps.
 
+### Visible progress / “where are we at” status shape
+
+When this user is frustrated about not seeing Wolfy progress, answer with measurable state changes instead of reassurance. Keep it compact and concrete:
+
+- What changed in durable systems: DB rows/date ranges, scripts, tests, strategy statuses, cron/job state.
+- What still blocks visible setups: no approved strategy, stale data, failed OOS validation, missing earnings/calendar data, or pending human approval.
+- What is in progress next: one implementation target, not a broad roadmap.
+
+Prefer a short table for strategy gates: `Strategy | Status | OOS result | Gate result | Next action`. Under Hermes-EOD, explicitly say `candidate is not approved` when relevant.
+
+See `references/wolfy-eod-historical-depth-and-strategy-gates-2026-06-18.md` for a concrete historical-depth/backfill/strategy-gate audit pattern.
+
 ### Tabular formatting preference
 
 For this user's Wolfy reports, use Markdown tables anywhere comparison, ranking, status, or trade-level data is clearer than prose. This is especially useful for scanner/lead rankings, pending recommendations, account/risk controls, Sentinel decisions, Yang technical levels, and Clerky/Kanban/DB status snapshots. Keep narrative short below each table.
@@ -132,6 +145,7 @@ Do not force every paragraph into a table; use tables where they improve legibil
 - Batch source extraction and summarize into compact JSON/CSV before synthesis.
 - Use weekly deep research and daily lightweight updates.
 - Keep final reports templated and compact unless anomalies require deeper discussion.
+- For this user, default to brief bullets/tables, avoid filler sentences, continue working silently when no user decision is needed, challenge weak assumptions, and recommend the strongest forward path instead of neutrally listing every option.
 
 ## User-specific Wolfy operating mode
 
@@ -154,6 +168,9 @@ If the user references the newer Hermes-EOD goals/constitution/framework, treat 
 - **No auto-execution:** no broker authority, no money movement, no live order placement.
 - **Human-gated strategy deployment:** strategies move `research_only -> candidate -> approved -> retired`; agents may mark `candidate` after walk-forward OOS validation, but only the human can mark `approved`.
 - **Approved-strategy gate:** actionable setup proposals require deterministic signal rows tied to `strategies.status='approved'`. Research-only/candidate signals can be reported as research/watch-only, not capital setups.
+- **Historical-depth gate:** before treating EOD backtests or walk-forward OOS results as meaningful, verify daily OHLCV depth per ticker and date range. Shallow windows (for example ~60-90 days) must be fixed before strategy tuning. For this user's swing/EOD framework, prefer at least ~730 calendar days when the data source supports it, then backfill deterministic features/signals before revalidating.
+- **Regression-test ingest defaults:** when a shallow-history ingest default is discovered, add a wrapper-level test asserting the live/default run requests the intended history depth, then patch the wrapper and rerun the test.
+- **Candidate is not approved:** walk-forward validation can promote a strategy to `candidate`, but that still cannot generate capital/paper setup proposals until the human explicitly marks it `approved`.
 - **Risk circuit breakers are code gates:** enforce risk-per-trade, portfolio heat, max name weight, ADV fraction, drawdown kill switch, slippage/cost assumptions, and event/liquidity exclusions before proposing new risk.
 - **Quiet nights are valid:** prefer no setup over forced trades.
 - **FACT vs JUDGMENT:** every rationale should distinguish measured/filed/database facts from inference.
@@ -204,7 +221,7 @@ When the user asks whether LLM usage limits are being hit or whether to increase
    - Hermes logs for quota/rate-limit/429/credit/exhaustion warnings.
 2. Distinguish total Hermes usage from cron/agent usage. Cron tokens are the relevant budget for autonomous jobs.
 3. Prefer shifting tokens from low-value status chatter into Jonah/research work before increasing all jobs.
-4. Add or keep a `no_agent=True` usage-limit watchdog that emits only on new quota/rate/credit events; avoid an LLM-driven watchdog for limit detection.
+4. Add or keep a `no_agent=True` usage-limit watchdog that emits only on new quota/rate/credit events; avoid an LLM-driven watchdog for limit detection. For this user's current Wolfy setup, `/root/.hermes/scripts/wolfy_usage_limit_watchdog.py` should scope auth checks to the active production model provider (for example `hermes --profile default auth list openai-codex`), not a bare all-provider auth listing that can probe unrelated Copilot/GitHub credentials and create false-positive ops noise. When `usage_limit_reached`/429/rate-limit is active, it auto-pauses LLM-driven Wolfy/Mike cron jobs to stop repeated Discord quota spam while leaving script-only scanners/watchdogs running, then auto-resumes those LLM jobs when the provider limit clears.
 5. Track per-agent usage in `agent_runs` when available: agent name, job id, status, input/output/total tokens, estimated cost, rows created, and blockers. For Wolfy's Postgres-backed desk, sync Hermes cron sessions from `~/.hermes/state.db.sessions` into `agent_runs` by parsing `cron_<job_id>_<timestamp>` session IDs, joining job names from `hermes --profile default cron list --all`, and upserting by `session_id`; see `references/wolfy-cron-usage-agent-runs-sync-2026-05-31.md`.
 6. Keep usage accounting/watchdog jobs script-only and quiet: capture helper stdout so normal runs emit nothing; only print when thresholds, quota/rate-limit events, or actual errors require user attention.
 7. If a limit triggers, alert the user and recommend: pause or reduce Jonah cadence, keep script-only watchdogs running, wait for provider reset, or switch model/provider if configured. Record zero-token analytical cron sessions as blocked usage-limit/startup evidence rather than claiming the underlying market-analysis scripts are broken.
@@ -245,19 +262,54 @@ Do not ask for or print normal mailbox passwords. Prefer app passwords or OAuth-
 
 ## Progress audits and knowledge-base honesty
 
-When the user asks what Wolfy did overnight or whether the knowledge base was updated:
+When the user asks what Wolfy did overnight, whether the knowledge base was updated, "where are we at," or signals frustration that they are not seeing progress:
 
-1. Inspect scheduled-job outputs, cron status, and session history before answering; do not rely on memory or assumptions.
-2. Report activity by hour in the user's timezone when possible, separating infrastructure/status checks from actual research/model improvements.
-3. Be explicit about what did **not** happen. If no books, PDFs, filings, or materials were ingested, say so plainly instead of implying learning occurred.
-4. Distinguish durable learning artifacts from ordinary reports:
-   - Durable artifacts: scanner scripts, cached datasets, paper ledgers, knowledge-base notes, references files, strategy documents.
+1. Inspect scheduled-job outputs, cron status, session history, and database state before answering; do not rely on memory or assumptions.
+2. Split the audit into two layers:
+   - **Visible LLM/report layer:** Wolfy, Jonah, Alpha Search, Clerky, Sentinel, Yang, and Mike LLM cron jobs.
+   - **Silent script-only backend:** usage/storage watchdogs, embeddings sync, stale cleanup, safe autorepair, intraday scanner snapshots, EOD ingest/features/signals, pre-open monitor, and revalidation jobs.
+3. Check the usage-limit watchdog state before concluding work stopped. If LLM jobs are paused due to a now-expired provider/rate limit, run the watchdog/resume path and verify jobs are enabled again before reporting back.
+4. Report activity by hour in the user's timezone when possible, separating infrastructure/status checks from actual research/model improvements.
+5. Be explicit about what did **not** happen. If no books, PDFs, filings, or materials were ingested, say so plainly instead of implying learning occurred.
+6. Distinguish durable learning artifacts from ordinary reports:
+   - Durable artifacts: scanner scripts, cached datasets, paper ledgers, knowledge-base notes, references files, strategy documents, Postgres rows for prices/features/signals/tasks/runs.
    - Non-durable artifacts: a one-off market brief, a cron status message, or a watchlist generated from current bars.
-5. If a knowledge-base gap is discovered, make the next build step concrete: create a structured knowledge base, ingest cited materials, and connect those principles to scanner/report logic.
+7. For Hermes-EOD, treat `0 setups` as a valid gated outcome when strategies are still `research_only` or deterministic/approved-strategy gates block capital ideas. Report `NO SETUP / WATCHLIST ONLY` with the gate reason rather than implying the pipeline failed.
+8. If a knowledge-base or visibility gap is discovered, make the next build step concrete: create/repair the structured knowledge base, ingest cited materials, connect principles to scanner/report logic, or add a clearer progress notification.
+
+See `references/wolfy-visible-progress-audit-2026-06-18.md` for the concrete audit/resume sequence from the session where LLM jobs were paused while script-only EOD ingest/signals continued.
+
+### Daily optimization planner / visible ledger pattern
+
+For the daily Wolfy optimization planner, treat visibility itself as a safe high-value optimization when broader strategy/ledger migrations are too risky for the run. After the required cron/process/git conflict snapshot, maintain `/root/.hermes/wolfy/optimization_todo.md` with candidate impact plans, then prefer bounded read-only helpers such as a `visible_progress_ledger.py` that reports Postgres/cron facts: price/feature freshness, historical OHLCV depth, scanner freshness, signals/setups, strategy gate status, open positions, blockers, and one next action. Keep it deterministic, Markdown-table friendly, and explicit that `candidate` is not `approved`; it must not write DB rows, approve strategies, create setups, or imply live trading.
+
+When strategy/backtest readiness is in scope, include a historical-depth gate in the visible ledger before running or trusting walk-forward OOS results: aggregate `prices` by ticker for first/last date and bar counts, report min/median bars and count above/below the practical threshold, and choose a business-day threshold that matches the actual data calendar (for example a two-calendar-year U.S. daily history may be ~500 bars, not 504+). This lets the optimizer safely surface whether the universe is ready for validation without launching long data jobs during cron windows.
+
+When backlog hygiene is in scope but allocator/stale-cleanup jobs are active or due soon, do **not** mutate `agent_tasks`/Kanban state from the daily optimizer. Instead, add/maintain a read-only backlog-hygiene snapshot in the visible ledger: queued/ready, in-progress, blocked, stale in-progress over a conservative threshold, and duplicate active `source_fingerprint` counts. Use those facts to choose the next bounded hygiene pass after worker/cleanup jobs are idle. This preserves active claims and avoids creating task-state races while still giving the user visible progress.
+
+When strategy/backtest readiness is in scope but strategy edits or OOS runs are too broad for the daily throttle, add/maintain a read-only deterministic strategy-readiness section in the visible ledger. Join `strategies`, `signals`, and `setups` to report each strategy's status, latest signal date/count, total signals, latest setup date, open/pending setup count, and a gate note. Explicitly label non-approved strategies as research/watch-only (`candidate is not approved`) even when deterministic signals exist. This is a safe precursor to `trend_volume_vol_regime` definition/OOS work and avoids implying actionable setups.
+
+When `paper-postgres` or accountability visibility is in scope but true paper-ledger migration is too broad for the daily throttle, add/maintain a read-only paper/accountability gate in the visible ledger. Query Postgres `paper_trades` and `recommendations` only; report total/open paper trades, open trades missing stops, closed PnL total, latest paper trade date, total/pending recommendations, and pending recommendations missing stops. Render an explicit gate note such as `paper/accountability only; no live trading or auto-execution`. This advances the paper-ledger migration trail by exposing facts without schema changes, consumer rewrites, setup creation, or any trading action.
+
+Verification pitfall: avoid `python script.py | python3 -c ...` or similar output-truncation pipes into interpreters; Tirith may block them as pipe-to-interpreter. Prefer full output, temp files, or script-level compact flags.
+
+See `references/wolfy-daily-optimization-ledger-2026-06-19.md` for the concrete initial sequence, `references/wolfy-visible-progress-historical-depth-gate-2026-06-20.md` for the historical-depth gate pattern, `references/wolfy-visible-progress-backlog-hygiene-snapshot-2026-06-21.md` for the read-only backlog-hygiene snapshot pattern and verification notes, `references/wolfy-visible-progress-strategy-readiness-2026-06-22.md` for the deterministic strategy-readiness ledger pattern, and `references/wolfy-visible-progress-paper-accountability-gate-2026-06-25.md` for the read-only paper/accountability gate pattern.
 
 ## Wolfy durable DB workflow
 
-For this user's Wolfy setup, the active direction is **Postgres-primary**: migrate operational Wolfy state to PostgreSQL and keep `/root/.hermes/wolfy/wolfy.db` only as a compatibility/fallback store until each consumer is migrated and verified. Do not destructively remove SQLite tables yet; inventory direct SQLite consumers, migrate scripts/cron contexts to Postgres-first helpers, and explicitly warn when a report falls back to SQLite. The installed SQLite CLI remains available as `sqlite3` for legacy inspection.
+For this user's Wolfy setup, the active direction is **Postgres-only for live operations**: PostgreSQL is the operational source of truth. Do not route live cron/report/scanner/recommendation paths through `/root/.hermes/wolfy/wolfy.db`; SQLite may remain only as an archival/legacy-test artifact until explicitly deleted. If a live component still needs SQLite, treat it as a migration bug, not an acceptable fallback. The installed SQLite CLI remains available as `sqlite3` only for legacy inspection.
+
+### SQLite retirement / Postgres-only migration protocol
+
+When the user asks to retire SQLite or finish migrating Wolfy to Postgres:
+
+1. Inventory all live consumers before editing: global/profile cron job prompts, wrapper scripts under `/root/.hermes/scripts/`, Wolfy scripts under `/root/.hermes/wolfy/`, and context generators for Wolfy/Jonah/Sentinel/Yang/Clerky/Mike.
+2. Treat SQLite use in live scanner/report/recommendation/alpha/context paths as a migration bug. Patch those paths to use Postgres, fail clearly when Postgres is unavailable, or mark the component as legacy-only.
+3. Keep token costs low during rate-limit periods: script-only checks first, concise status tables/bullets only, no large narrative reports unless a real anomaly or user decision requires it.
+4. Verify with real smoke outputs before claiming completion: Python compile checks, Postgres row counts for migrated tables, representative context-script execution, and cron prompt validation.
+5. Do **not** immediately delete the old SQLite DB just because live paths were migrated. Best practice is to leave it as a small legacy archive for a few clean cron cycles, then archive/delete with backup after explicit user approval.
+
+See `references/wolfy-sqlite-retirement-postgres-only-2026-06-07.md` for the concrete migration/verification pattern from the Postgres-only cutover session.
 
 Core files:
 
@@ -365,6 +417,8 @@ Operational helper files now installed under `/root/.hermes/wolfy/`:
 
 Coordination pitfall: context generators should claim only fresh queued work, not stale local `in_progress` rows. Re-selecting stale SQLite `in_progress` work can create repeated Postgres `agent_runs.status='blocked'` rows with `duplicate-or-already-claimed` every cron tick. Leave stale `in_progress` cleanup to `wolfy_cleanup_stale_agent_coordination.py` and verify post-fix with a duplicate-count query. See `references/wolfy-jonah-coordination-noise-2026-06-02.md`.
 
+Autorepair pitfall: recurring Mike/safe-autorepair jobs must not run DB-mutating smoke tests such as `test_agent_coordination_smoke.py`; repeated production cron runs can create synthetic blocked tasks (for example `Sentinel / Smoke blocked task`) that pollute the queue. Keep frequent autorepair checks idempotent/read-only or explicitly productive, run DB-mutating smoke tests manually/CI only, sync patched wrappers across global/Wolfy/profile script copies, and clear proven synthetic blockers by marking them completed with an explanatory note rather than deleting rows. See `references/wolfy-autorepair-nonmutating-health-checks-2026-06-11.md`.
+
 Use this chain for auditable trade ideas: Jonah research note -> strategy rule -> scanner result -> Wolfy recommendation -> Sentinel review -> paper trade/watchlist status -> outcome grading.
 
 Scanner acceleration pattern for this user: when asked to "get more in there sooner," improve deterministic coverage before increasing LLM work. Add/refresh a liquid U.S. universe cache, compute volume/breakout/squeeze/relative-strength/liquidity factors, run script-only intraday scanner snapshots, and auto-create structured alpha-lead handoffs from top anomalies. Treat scanner outputs as leads, not recommendations, until they pass promotion, Sentinel, Yang/technical review, and paper-ledger gates. A scanner freshness gate should run before decision reports; stale data means no actionable recommendation.
@@ -399,3 +453,5 @@ See `references/wolfy-accountability-loop-kanban-plan-2026-06-01.md` for the con
 - `references/wolfy-report-tables-scanner-scaleup-2026-06-01.md` — report-format and scanner scale-up pattern: Markdown tables for legible Wolfy/Sentinel/Yang/Clerky outputs, scanner freshness gates, broader liquid universe, deterministic factors, intraday no-agent snapshots, and alpha-lead handoffs before recommendations.
 - `references/wolfy-source-file-inbox-2026-06-01.md` — source-file inbox pattern for user-provided semi-structured material: drop files under `/root/.hermes/wolfy/sources/inbox/`, queue with `queue_knowledge_source_files.py`, optional `.source.json` sidecars, and Jonah local-file reading instruction.
 - `references/wolfy-postgres-primary-optimization-2026-06-02.md` — Postgres-primary migration direction, Kanban card graph, verification commands, and wording correction: optimize role alignment/distribution, do not say “metabolize.”
+- `references/wolfy-visible-progress-audit-2026-06-18.md` — user-visible progress audit pattern: distinguish paused LLM/report jobs from still-running script-only backend jobs, inspect usage-limit watchdog state, resume if limits cleared, and report EOD gates/DB counts plainly.
+- `references/wolfy-eod-historical-depth-and-strategy-gates-2026-06-18.md` — EOD historical depth and validation-gate pattern: verify/extend OHLCV depth, regression-test ingest defaults, backfill features/signals, keep candidate strategies non-actionable until human approval, and report concrete progress when the user cannot see activity.

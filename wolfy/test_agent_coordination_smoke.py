@@ -125,6 +125,10 @@ def test_agent_task_block_adds_reason_and_status():
         with conn.cursor() as cur:
             cur.execute("SELECT status, description FROM agent_tasks WHERE id = %s", (task.id,))
             status, description = cur.fetchone()
+        # Keep this live-DB smoke non-polluting for recurring ops probes: the
+        # assertion proves block_task(), then the synthetic blocker is closed so
+        # production queues do not accumulate fake Sentinel work.
+        complete_task(conn, task.id, summary="cleared synthetic smoke blocked task")
 
     assert status == "blocked"
     assert "Original description" in description

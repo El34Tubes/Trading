@@ -218,10 +218,12 @@ def block_task(conn, task_id: int, *, reason: str) -> None:
         cur.execute(
             """
             UPDATE agent_tasks
-            SET status='blocked', updated_at=now(), description=concat_ws(E'\n', description, %s::text)
+            SET status='blocked', updated_at=now(),
+                description=concat_ws(E'\n', description, %s::text),
+                error_message=COALESCE(error_message, %s::text)
             WHERE id=%s
             """,
-            (f"Blocked: {reason}", task_id),
+            (f"Blocked: {reason}", reason, task_id),
         )
 
 
