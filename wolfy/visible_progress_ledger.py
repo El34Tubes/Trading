@@ -16,15 +16,31 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
+# Practical two-calendar-year daily-bar readiness threshold for Massive free-tier
+# backfills. Some symbols return 499 bars because of trading-calendar boundaries;
+# using 495 avoids false "needs backfill" loops while still preserving depth gates.
+DEPTH_READY_BARS = 495
 
 
 def _connect(dsn: str):
-    import psycopg
-    from psycopg.rows import dict_row
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
 
-    # psycopg's runtime accepts dict_row here; some bundled pyright stubs are
-    # overly narrow for generic Connection typing.
-    return psycopg.connect(dsn, row_factory=dict_row)  # type: ignore[arg-type]
+        # psycopg's runtime accepts dict_row here; some bundled pyright stubs are
+        # overly narrow for generic Connection typing.
+        return psycopg.connect(dsn, row_factory=dict_row)  # type: ignore[arg-type]
+    except ModuleNotFoundError as exc:
+        if exc.name != "psycopg":
+            raise
+
+    import psycopg2
+    import psycopg2.extras
+
+    # System python on this host has psycopg2 but not psycopg3. Cron/Hermes
+    # venvs may have psycopg3, so keep both paths to make the read-only ledger
+    # runnable from manual shell checks and scheduled contexts.
+    return psycopg2.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 def _one(cur, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any]:
@@ -118,10 +134,11 @@ def collect_progress(dsn: str = DEFAULT_DSN) -> dict[str, Any]:
                            max(last_dt)::text AS latest_last_dt,
                            min(bar_count)::int AS min_bars,
                            percentile_cont(0.5) WITHIN GROUP (ORDER BY bar_count)::int AS median_bars,
-                           count(*) FILTER (WHERE bar_count >= 500)::int AS tickers_ge_500_bars,
-                           count(*) FILTER (WHERE bar_count < 500)::int AS tickers_lt_500_bars
+                           count(*) FILTER (WHERE bar_count >= %s)::int AS tickers_ge_500_bars,
+                           count(*) FILTER (WHERE bar_count < %s)::int AS tickers_lt_500_bars
                     FROM per_ticker
                     """,
+                    (DEPTH_READY_BARS, DEPTH_READY_BARS),
                 )
                 data["postgres"]["scanner_freshness"] = _safe_query(
                     cur,
@@ -132,6 +149,8 @@ def collect_progress(dsn: str = DEFAULT_DSN) -> dict[str, Any]:
                            count(res.id) AS candidate_count
                     FROM scanner_runs sr
                     LEFT JOIN scanner_results res ON res.run_id = sr.id
+                    WHERE sr.universe = 'expanded'
+                      AND position('pytest' in lower(coalesce(sr.notes, ''))) = 0
                     GROUP BY sr.id, sr.run_time
                     ORDER BY sr.run_time DESC, sr.id DESC
                     LIMIT 1
@@ -271,6 +290,44 @@ def collect_progress(dsn: str = DEFAULT_DSN) -> dict[str, Any]:
                     FROM active
                     """,
                 )
+                data["postgres"]["data_load_status"] = _safe_all(
+                    cur,
+                    """
+                    WITH per_ticker AS (
+                        SELECT ticker, max(dt) AS latest_dt, count(*)::int AS bar_count
+                        FROM prices
+                        GROUP BY ticker
+                    ), universe_rows AS (
+                        SELECT symbol,
+                               coalesce(nullif(wolfy_tier, ''), nullif(tier, ''), 'unassigned') AS tier,
+                               coalesce(active, true) AS active,
+                               coalesce(enabled, true) AS enabled,
+                               coalesce(backfill_enabled, true) AS backfill_enabled
+                        FROM universe
+                    )
+                    SELECT tier,
+                           count(*)::int AS universe_tickers,
+                           count(*) FILTER (WHERE active AND enabled)::int AS active_enabled_tickers,
+                           count(p.ticker)::int AS tickers_with_prices,
+                           count(*) FILTER (WHERE p.bar_count >= %s)::int AS tickers_ge_500_bars,
+                           count(*) FILTER (WHERE active AND enabled AND p.ticker IS NULL)::int AS active_enabled_missing_prices,
+                           count(*) FILTER (WHERE active AND enabled AND backfill_enabled AND (p.ticker IS NULL OR p.bar_count < %s))::int AS backfill_attention_tickers,
+                           min(p.bar_count)::int AS min_bars,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY p.bar_count)::int AS median_bars,
+                           max(p.latest_dt)::text AS latest_price_dt
+                    FROM universe_rows u
+                    LEFT JOIN per_ticker p ON p.ticker = u.symbol
+                    GROUP BY tier
+                    ORDER BY min(CASE tier
+                        WHEN 'blue_chip' THEN 1
+                        WHEN 'etf_core' THEN 2
+                        WHEN 'large_cap' THEN 3
+                        WHEN 'mid_cap' THEN 4
+                        WHEN 'small_cap' THEN 5
+                        ELSE 99 END), tier
+                    """,
+                    (DEPTH_READY_BARS, DEPTH_READY_BARS),
+                )
                 data["postgres"]["recent_blockers"] = _safe_all(
                     cur,
                     """
@@ -328,6 +385,7 @@ def render_markdown(data: dict[str, Any], blocker_limit: int | None = None) -> s
     positions = pg.get("positions", {}) or {}
     paper = pg.get("paper_ledger", {}) or {}
     backlog = pg.get("backlog_hygiene", {}) or {}
+    data_load_rows = pg.get("data_load_status") or []
     cron = data.get("cron", {}) or {}
 
     lines = [
@@ -341,7 +399,7 @@ def render_markdown(data: dict[str, Any], blocker_limit: int | None = None) -> s
             ["Area", "Fact"],
             [
                 ["Prices/features", f"latest_price_dt={freshness.get('latest_price_dt')} tickers={freshness.get('latest_price_tickers')} | latest_feature_dt={freshness.get('latest_feature_dt')} tickers={freshness.get('latest_feature_tickers')}"] ,
-                ["Historical depth", f"tickers={depth.get('tickers_with_prices')} median_bars={depth.get('median_bars')} min_bars={depth.get('min_bars')} ge_500_bars={depth.get('tickers_ge_500_bars')} lt_500_bars={depth.get('tickers_lt_500_bars')} span={depth.get('earliest_first_dt')}→{depth.get('latest_last_dt')}"] ,
+                ["Historical depth", f"tickers={depth.get('tickers_with_prices')} median_bars={depth.get('median_bars')} min_bars={depth.get('min_bars')} ge_{DEPTH_READY_BARS}_bars={depth.get('tickers_ge_500_bars')} lt_{DEPTH_READY_BARS}_bars={depth.get('tickers_lt_500_bars')} span={depth.get('earliest_first_dt')}→{depth.get('latest_last_dt')}"] ,
                 ["Scanner", f"latest_run_id={scanner.get('latest_run_id')} latest_data_date={scanner.get('latest_data_date')} candidates={scanner.get('candidate_count')}"] ,
                 ["Signals", f"latest_signal_dt={signals.get('latest_signal_dt')} latest_count={signals.get('latest_signal_count')} seven_day_count={signals.get('seven_day_signal_count')}"] ,
                 ["Setups", f"total={setups.get('total')} open_or_pending={setups.get('open_or_pending')} latest_created_dt={setups.get('latest_created_dt')}"] ,
@@ -351,9 +409,33 @@ def render_markdown(data: dict[str, Any], blocker_limit: int | None = None) -> s
                 ["Cron", f"active={cron.get('active_count')} paused={cron.get('paused_count')} usage_limit_seen={cron.get('recent_usage_limit_seen')}"],
             ],
         ),
-        "",
-        "## Strategy gates",
     ]
+
+    lines.extend(["", "## Data load status by tier"])
+    if data_load_rows and "error" not in data_load_rows[0]:
+        lines.append(
+            _md_table(
+                ["Tier", "Universe", "Active+Enabled", "With Prices", f">={DEPTH_READY_BARS} Bars", "Missing Prices", "Backfill Attention", "Median/Min Bars", "Latest Price"],
+                [
+                    [
+                        row.get("tier"),
+                        row.get("universe_tickers"),
+                        row.get("active_enabled_tickers"),
+                        row.get("tickers_with_prices"),
+                        row.get("tickers_ge_500_bars"),
+                        row.get("active_enabled_missing_prices"),
+                        row.get("backfill_attention_tickers"),
+                        f"{row.get('median_bars')}/{row.get('min_bars')}",
+                        row.get("latest_price_dt"),
+                    ]
+                    for row in data_load_rows
+                ],
+            )
+        )
+    else:
+        lines.append(f"Data-load tier status unavailable: {data_load_rows}")
+
+    lines.extend(["", "## Strategy gates"])
     strategy_rows = pg.get("strategies") or []
     if strategy_rows and "error" not in strategy_rows[0]:
         lines.append(
@@ -469,6 +551,8 @@ def render_markdown(data: dict[str, Any], blocker_limit: int | None = None) -> s
         next_action = "Next decision target: review sector_cross_sectional_momentum candidate evidence. OOS survived, but IS Sharpe/max drawdown must be challenged before any human approval."
     elif any(row.get("name") == "trend_volume_vol_regime" and row.get("status") != "approved" for row in strategy_rows if isinstance(row, dict)):
         next_action = "Next build target: improve trend_volume_vol_regime definition and walk-forward OOS validation; keep outputs watch-only until human approval."
+    if any(row.get("backfill_attention_tickers") not in (None, 0, "0") for row in data_load_rows if isinstance(row, dict)):
+        next_action = "Next build target: finish tiered EOD price coverage/backfill for active enabled tickers before expanding OOS validation; keep outputs watch-only."
     lines.extend(["", "## Next recommended action", f"- {next_action}"])
     if counts:
         lines.extend(["", "## Table counts", json.dumps(counts, sort_keys=True)])

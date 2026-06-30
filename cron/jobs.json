@@ -20,15 +20,15 @@
       "schedule_display": "35 17 * * 1-5",
       "repeat": {
         "times": null,
-        "completed": 18
+        "completed": 19
       },
-      "enabled": true,
-      "state": "scheduled",
-      "paused_at": null,
+      "enabled": false,
+      "state": "paused",
+      "paused_at": "2026-06-27T09:45:45.278208-04:00",
       "paused_reason": null,
       "created_at": "2026-05-31T04:30:34.510987+00:00",
-      "next_run_at": "2026-06-26T17:35:00-04:00",
-      "last_run_at": "2026-06-25T17:35:50.875647-04:00",
+      "next_run_at": "2026-06-29T17:35:00-04:00",
+      "last_run_at": "2026-06-26T17:35:51.172849-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -64,15 +64,15 @@
       "schedule_display": "0 */4 * * *",
       "repeat": {
         "times": null,
-        "completed": 80
+        "completed": 89
       },
-      "enabled": true,
-      "state": "scheduled",
-      "paused_at": null,
+      "enabled": false,
+      "state": "paused",
+      "paused_at": "2026-06-27T09:45:45.623639-04:00",
       "paused_reason": null,
       "created_at": "2026-05-31T04:30:56.188385+00:00",
-      "next_run_at": "2026-06-26T00:00:00-04:00",
-      "last_run_at": "2026-06-25T20:00:45.242470-04:00",
+      "next_run_at": "2026-06-27T12:00:00-04:00",
+      "last_run_at": "2026-06-27T08:01:18.278150-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -107,17 +107,17 @@
       "schedule_display": "*/20 * * * *",
       "repeat": {
         "times": 1000000,
-        "completed": 801
+        "completed": 911
       },
-      "enabled": true,
-      "state": "scheduled",
-      "paused_at": null,
+      "enabled": false,
+      "state": "paused",
+      "paused_at": "2026-06-27T09:45:45.954849-04:00",
       "paused_reason": null,
       "created_at": "2026-05-31T15:27:21.771162+00:00",
-      "next_run_at": "2026-06-25T21:20:00-04:00",
-      "last_run_at": "2026-06-25T21:00:28.751784-04:00",
-      "last_status": "ok",
-      "last_error": null,
+      "next_run_at": "2026-06-27T10:00:00-04:00",
+      "last_run_at": "2026-06-27T09:40:44.362914-04:00",
+      "last_status": "error",
+      "last_error": "RuntimeError: HTTP 429: The usage limit has been reached",
       "last_delivery_error": null,
       "deliver": "local",
       "origin": {
@@ -155,15 +155,15 @@
       "schedule_display": "30 * * * *",
       "repeat": {
         "times": 9999,
-        "completed": 611
+        "completed": 709
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-05-31T15:27:27.903764+00:00",
-      "next_run_at": "2026-06-25T21:30:00-04:00",
-      "last_run_at": "2026-06-25T20:30:17.080525-04:00",
+      "next_run_at": "2026-06-29T23:30:00-04:00",
+      "last_run_at": "2026-06-29T22:30:48.662820-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -198,15 +198,15 @@
       "schedule_display": "*/15 * * * *",
       "repeat": {
         "times": null,
-        "completed": 2428
+        "completed": 2818
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-05-31T18:17:57.561483+00:00",
-      "next_run_at": "2026-06-25T21:15:00-04:00",
-      "last_run_at": "2026-06-25T21:00:26.908547-04:00",
+      "next_run_at": "2026-06-29T22:45:00-04:00",
+      "last_run_at": "2026-06-29T22:30:49.738983-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -241,15 +241,15 @@
       "schedule_display": "*/30 * * * *",
       "repeat": {
         "times": null,
-        "completed": 1215
+        "completed": 1410
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-05-31T18:27:22.133902+00:00",
-      "next_run_at": "2026-06-25T21:30:00-04:00",
-      "last_run_at": "2026-06-25T21:00:26.531872-04:00",
+      "next_run_at": "2026-06-29T23:00:00-04:00",
+      "last_run_at": "2026-06-29T22:30:48.207470-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -284,15 +284,15 @@
       "schedule_display": "45 17 * * 1-5",
       "repeat": {
         "times": null,
-        "completed": 15
+        "completed": 16
       },
-      "enabled": true,
-      "state": "scheduled",
-      "paused_at": null,
+      "enabled": false,
+      "state": "paused",
+      "paused_at": "2026-06-27T09:45:46.271311-04:00",
       "paused_reason": null,
       "created_at": "2026-05-31T18:27:58.468783+00:00",
-      "next_run_at": "2026-06-26T17:45:00-04:00",
-      "last_run_at": "2026-06-25T17:46:05.443985-04:00",
+      "next_run_at": "2026-06-29T17:45:00-04:00",
+      "last_run_at": "2026-06-26T17:46:07.496959-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -330,15 +330,15 @@
       "schedule_display": "55 17 * * 1-5",
       "repeat": {
         "times": null,
-        "completed": 15
+        "completed": 16
       },
-      "enabled": true,
-      "state": "scheduled",
-      "paused_at": null,
+      "enabled": false,
+      "state": "paused",
+      "paused_at": "2026-06-27T09:45:46.589516-04:00",
       "paused_reason": null,
       "created_at": "2026-05-31T20:49:26.985782+00:00",
-      "next_run_at": "2026-06-26T17:55:00-04:00",
-      "last_run_at": "2026-06-25T17:55:11.277112-04:00",
+      "next_run_at": "2026-06-29T17:55:00-04:00",
+      "last_run_at": "2026-06-26T17:56:15.834522-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -377,17 +377,17 @@
       "schedule_display": "30 11 * * 1-5",
       "repeat": {
         "times": null,
-        "completed": 8
+        "completed": 9
       },
-      "enabled": true,
-      "state": "scheduled",
-      "paused_at": null,
+      "enabled": false,
+      "state": "paused",
+      "paused_at": "2026-06-27T09:45:46.925633-04:00",
       "paused_reason": null,
       "created_at": "2026-05-31T20:49:34.605341+00:00",
-      "next_run_at": "2026-06-26T11:30:00-04:00",
-      "last_run_at": "2026-06-25T11:34:22.149594-04:00",
-      "last_status": "error",
-      "last_error": "RuntimeError: Non-streaming API call timed out after 90s with no response (threshold: 90s). Codex backend appears to be silently rejecting 'gpt-5.5' on chatgpt.com/backend-api/codex (no stream events, no error). This is a known backend-side pattern that has affected ChatGPT Plus accounts intermittently. Workaround: try `gpt-5.4` on the same OAuth profile, or `gpt-5.3-codex`, or switch to a different model/provider in your fallback chain. Some ChatGPT Codex accounts do not support `gpt-5.4-codex`. See hermes-a",
+      "next_run_at": "2026-06-29T11:30:00-04:00",
+      "last_run_at": "2026-06-26T11:34:19.048614-04:00",
+      "last_status": "ok",
+      "last_error": null,
       "last_delivery_error": null,
       "deliver": "discord",
       "origin": {
@@ -424,15 +424,15 @@
       "schedule_display": "every 120m",
       "repeat": {
         "times": null,
-        "completed": 300
+        "completed": 349
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-05-31T20:50:55.101700+00:00",
-      "next_run_at": "2026-06-25T21:09:10.649508-04:00",
-      "last_run_at": "2026-06-25T19:09:10.649508-04:00",
+      "next_run_at": "2026-06-29T23:49:40.116184-04:00",
+      "last_run_at": "2026-06-29T21:49:40.116184-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -467,15 +467,15 @@
       "schedule_display": "every 30m",
       "repeat": {
         "times": null,
-        "completed": 1193
+        "completed": 1385
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-05-31T17:12:57.087602-04:00",
-      "next_run_at": "2026-06-25T21:29:26.179382-04:00",
-      "last_run_at": "2026-06-25T20:59:26.179382-04:00",
+      "next_run_at": "2026-06-29T22:49:45.743357-04:00",
+      "last_run_at": "2026-06-29T22:19:45.743357-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -510,15 +510,15 @@
       "schedule_display": "0 */4 * * *",
       "repeat": {
         "times": null,
-        "completed": 152
+        "completed": 176
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-05-31T17:14:23.140224-04:00",
-      "next_run_at": "2026-06-26T00:00:00-04:00",
-      "last_run_at": "2026-06-25T20:00:46.910025-04:00",
+      "next_run_at": "2026-06-30T00:00:00-04:00",
+      "last_run_at": "2026-06-29T20:00:19.442789-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -557,15 +557,15 @@
       "schedule_display": "every 120m",
       "repeat": {
         "times": null,
-        "completed": 122
+        "completed": 140
       },
-      "enabled": true,
-      "state": "scheduled",
-      "paused_at": null,
+      "enabled": false,
+      "state": "paused",
+      "paused_at": "2026-06-27T09:45:47.260327-04:00",
       "paused_reason": null,
       "created_at": "2026-05-31T19:43:04.633371-04:00",
-      "next_run_at": "2026-06-25T22:22:11.742876-04:00",
-      "last_run_at": "2026-06-25T20:22:11.742876-04:00",
+      "next_run_at": "2026-06-27T11:39:34.673052-04:00",
+      "last_run_at": "2026-06-27T09:39:34.673052-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -606,15 +606,15 @@
       "schedule_display": "every 30m",
       "repeat": {
         "times": null,
-        "completed": 1189
+        "completed": 1381
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-05-31T19:45:21.203706-04:00",
-      "next_run_at": "2026-06-25T21:32:31.229000-04:00",
-      "last_run_at": "2026-06-25T21:02:31.229000-04:00",
+      "next_run_at": "2026-06-29T22:49:47.962373-04:00",
+      "last_run_at": "2026-06-29T22:19:47.962373-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -649,15 +649,15 @@
       "schedule_display": "0 10-16/2 * * 1-5",
       "repeat": {
         "times": 9999,
-        "completed": 61
+        "completed": 69
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-06-04T14:41:40.500075-04:00",
-      "next_run_at": "2026-06-26T10:00:00-04:00",
-      "last_run_at": "2026-06-25T16:00:51.961657-04:00",
+      "next_run_at": "2026-06-30T10:00:00-04:00",
+      "last_run_at": "2026-06-29T16:00:50.440845-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -669,14 +669,14 @@
     },
     {
       "id": "1d70b58dae32",
-      "name": "Wolfy EOD after-close price ingest and features",
-      "prompt": "Script-only Wolfy EOD after-close delayed daily price ingest and deterministic feature computation. Idempotent Postgres writes; no LLM.",
+      "name": "Wolfy EOD price ingest shard 1/5",
+      "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 1/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
       "skills": [],
       "skill": null,
       "model": null,
       "provider": null,
       "base_url": null,
-      "script": "wolfy_eod_after_close_ingest.py",
+      "script": "wolfy_eod_after_close_ingest_shard_1.py",
       "no_agent": true,
       "context_from": null,
       "schedule": {
@@ -687,15 +687,15 @@
       "schedule_display": "30 16 * * 1-5",
       "repeat": {
         "times": null,
-        "completed": 9
+        "completed": 12
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-06-15T01:25:03.360508-04:00",
-      "next_run_at": "2026-06-26T16:30:00-04:00",
-      "last_run_at": "2026-06-25T16:30:23.736449-04:00",
+      "next_run_at": "2026-06-30T16:30:00-04:00",
+      "last_run_at": "2026-06-29T21:27:36.372972-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -725,15 +725,15 @@
       "schedule_display": "5 17 * * 1-5",
       "repeat": {
         "times": null,
-        "completed": 9
+        "completed": 11
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-06-15T01:25:03.683650-04:00",
-      "next_run_at": "2026-06-26T17:05:00-04:00",
-      "last_run_at": "2026-06-25T17:05:34.205614-04:00",
+      "next_run_at": "2026-06-30T17:05:00-04:00",
+      "last_run_at": "2026-06-29T17:05:57.429524-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -763,15 +763,15 @@
       "schedule_display": "0 8 * * 1-5",
       "repeat": {
         "times": null,
-        "completed": 9
+        "completed": 11
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-06-15T01:25:04.048432-04:00",
-      "next_run_at": "2026-06-26T08:00:00-04:00",
-      "last_run_at": "2026-06-25T08:00:54.943023-04:00",
+      "next_run_at": "2026-06-30T08:00:00-04:00",
+      "last_run_at": "2026-06-29T08:00:24.927327-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -801,15 +801,15 @@
       "schedule_display": "30 18 * * 5",
       "repeat": {
         "times": null,
-        "completed": 1
+        "completed": 2
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-06-15T01:25:04.388628-04:00",
-      "next_run_at": "2026-06-26T18:30:00-04:00",
-      "last_run_at": "2026-06-19T18:31:16.182909-04:00",
+      "next_run_at": "2026-07-03T18:30:00-04:00",
+      "last_run_at": "2026-06-26T18:31:08.345692-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -839,15 +839,15 @@
       "schedule_display": "0 8 1-7 * 1",
       "repeat": {
         "times": null,
-        "completed": 2
+        "completed": 3
       },
       "enabled": true,
       "state": "scheduled",
       "paused_at": null,
       "paused_reason": null,
       "created_at": "2026-06-15T01:25:04.756209-04:00",
-      "next_run_at": "2026-06-29T08:00:00-04:00",
-      "last_run_at": "2026-06-22T08:00:41.960879-04:00",
+      "next_run_at": "2026-07-01T08:00:00-04:00",
+      "last_run_at": "2026-06-29T08:00:24.614905-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -860,7 +860,7 @@
     {
       "id": "92f31b95fccc",
       "name": "Wolfy daily optimization planner and implementer",
-      "prompt": "You are Wolfy's daily optimization planner/implementer. Mission: once per day, identify one or two high-value Wolfy/Hermes trading-research optimizations, add them to the active/durable TODO trail, plan the impacts, verify there are no scheduling/process/file conflicts with other jobs, then implement only safe bounded changes and verify them.\n\nNon-negotiable operating constraints:\n- Do not step on other jobs. Before touching files or running heavy commands, list existing cron jobs and inspect current process/background activity. Avoid market-report windows and active ingestion/report jobs. If there is any conflict, record the optimization as TODO and defer implementation.\n- EOD-only constitution: Wolfy actionable decisions must use closing data only and a deterministic signal/risk-gate framework. No auto-execution or money movement. No live trading. Human approval required before any strategy becomes approved/actionable.\n- Preserve user constraints: Robinhood-tradable U.S. stocks/ETFs only, no shorts, options allowed, max 3 concurrent positions, stops required, paper-trading orientation, avoid foreign/government-interference/manipulation-risk names.\n- Plan before execution. For each candidate optimization, write a brief impact plan covering files/tables/jobs affected, expected benefit, risk, rollback path, tests/validation, and conflict check result. Implement only if impact is low/medium and bounded.\n- Prefer scripts/data/cache first and LLM only for synthesis. Keep token use low.\n- Do not modify other Hermes profiles' memories/skills/plugins/cron unless explicitly required and safe. Do not pause/remove/update existing jobs unless necessary to avoid direct conflict, and explain if you do.\n- Use guarded Postgres maintenance rules: run /root/.hermes/wolfy/check_postgres_requirements.py before Postgres schema or database maintenance. Do not perform major Postgres upgrades.\n\nDaily starting TODO context from the user's active list:\n1. trend-volume-strategy — Improve the trend-volume-vol-regime strategy definition and run walk-forward OOS backtests.\n2. paper-postgres — Migrate paper portfolio / paper trade ledger fully to Postgres; remove live SQLite dependence.\n3. backlog-hygiene — Clean stale/duplicate Jonah/Sentinel/Yang backlog and prioritize current high-value research tasks.\n4. visible-progress-ledger — Add a concise daily visible Wolfy progress ledger covering data freshness, signals, setups, validation, blockers, and next action.\n\nRequired run sequence:\n1. Load any relevant skills if available (especially Hermes cron/config skills and any Wolfy/market-report skills).\n2. Snapshot current state: date/time, git status for /root/.hermes, existing cron jobs, current running jobs/processes relevant to Wolfy/Hermes, and recent cron output failures.\n3. Maintain a durable optimization TODO ledger at /root/.hermes/wolfy/optimization_todo.md. Create it if missing. Add new optimization candidates there with status, owner/job name, impact plan, and conflict-check notes. Also use the todo tool inside the run for the current day's plan.\n4. Select at most TWO optimizations for implementation, prioritizing the user's active TODO list and anything blocking report quality/visibility/safety.\n5. Before implementation, produce the impact plan in your working notes and check for conflicts. If conflict or high risk: do not implement; mark deferred with reason.\n6. Implement bounded changes only. Prefer small script/test additions. Avoid broad refactors. Do not run long market data jobs during active market/report windows.\n7. Verify with real command output: tests, dry runs, syntax checks, database checks, or script output as appropriate.\n8. Commit nothing unless explicitly instructed by the user. Leave a clear git status summary.\n9. Final response must be concise and include: selected optimizations, conflict-check summary, files changed, verification output, deferred items, and next recommended action. If nothing was safe to change, say that and provide the updated TODO ledger path.\n\nSafety throttle:\n- Max implementation scope per run: two files changed or one database migration plus tests. If more is needed, plan it and defer.\n- Max runtime target: under 20 minutes. If work is not complete, leave TODO entries and stop cleanly.\n- Never fabricate outputs. If data/tools are unavailable, report the blocker and update the TODO ledger.",
+      "prompt": "You are Wolfy's daily optimization planner/implementer. Mission: once per day, identify one or two high-value Wolfy/Hermes trading-research optimizations, add them to the active/durable TODO trail, plan the impacts, verify there are no scheduling/process/file conflicts with other jobs, then implement only safe bounded changes and verify them.\n\nNon-negotiable operating constraints:\n- Do not step on other jobs. Before touching files or running heavy commands, list existing cron jobs and inspect current process/background activity. Avoid market-report windows and active ingestion/report jobs. If there is any conflict, record the optimization as TODO and defer implementation.\n- EOD-only constitution: Wolfy actionable decisions must use closing data only and a deterministic signal/risk-gate framework. No auto-execution or money movement. No live trading. Human approval required before any strategy becomes approved/actionable.\n- Preserve user constraints: Robinhood-tradable U.S. stocks/ETFs only, no shorts, options allowed, max 3 concurrent positions, stops required, paper-trading orientation, avoid foreign/government-interference/manipulation-risk names.\n- Plan before execution. For each candidate optimization, write a brief impact plan covering files/tables/jobs affected, expected benefit, risk, rollback path, tests/validation, and conflict check result. Implement only if impact is low/medium and bounded.\n- Prefer scripts/data/cache first and LLM only for synthesis. Keep token use low.\n- Do not modify other Hermes profiles' memories/skills/plugins/cron unless explicitly required and safe. Do not pause/remove/update existing jobs unless necessary to avoid direct conflict, and explain if you do.\n- Use guarded Postgres maintenance rules: run /root/.hermes/wolfy/check_postgres_requirements.py before Postgres schema or database maintenance. Do not perform major Postgres upgrades.\n\nDaily starting TODO context from the user's active list:\n1. trend-volume-strategy \u2014 Improve the trend-volume-vol-regime strategy definition and run walk-forward OOS backtests.\n2. paper-postgres \u2014 Migrate paper portfolio / paper trade ledger fully to Postgres; remove live SQLite dependence.\n3. backlog-hygiene \u2014 Clean stale/duplicate Jonah/Sentinel/Yang backlog and prioritize current high-value research tasks.\n4. visible-progress-ledger \u2014 Add a concise daily visible Wolfy progress ledger covering data freshness, signals, setups, validation, blockers, and next action.\n\nRequired run sequence:\n1. Load any relevant skills if available (especially Hermes cron/config skills and any Wolfy/market-report skills).\n2. Snapshot current state: date/time, git status for /root/.hermes, existing cron jobs, current running jobs/processes relevant to Wolfy/Hermes, and recent cron output failures.\n3. Maintain a durable optimization TODO ledger at /root/.hermes/wolfy/optimization_todo.md. Create it if missing. Add new optimization candidates there with status, owner/job name, impact plan, and conflict-check notes. Also use the todo tool inside the run for the current day's plan.\n4. Select at most TWO optimizations for implementation, prioritizing the user's active TODO list and anything blocking report quality/visibility/safety.\n5. Before implementation, produce the impact plan in your working notes and check for conflicts. If conflict or high risk: do not implement; mark deferred with reason.\n6. Implement bounded changes only. Prefer small script/test additions. Avoid broad refactors. Do not run long market data jobs during active market/report windows.\n7. Verify with real command output: tests, dry runs, syntax checks, database checks, or script output as appropriate.\n8. Commit nothing unless explicitly instructed by the user. Leave a clear git status summary.\n9. Final response must be concise and include: selected optimizations, conflict-check summary, files changed, verification output, deferred items, and next recommended action. If nothing was safe to change, say that and provide the updated TODO ledger path.\n\nSafety throttle:\n- Max implementation scope per run: two files changed or one database migration plus tests. If more is needed, plan it and defer.\n- Max runtime target: under 20 minutes. If work is not complete, leave TODO entries and stop cleanly.\n- Never fabricate outputs. If data/tools are unavailable, report the blocker and update the TODO ledger.",
       "skills": [
         "hermes-agent"
       ],
@@ -879,15 +879,15 @@
       "schedule_display": "15 2 * * *",
       "repeat": {
         "times": 9999,
-        "completed": 7
+        "completed": 9
       },
-      "enabled": true,
-      "state": "scheduled",
-      "paused_at": null,
+      "enabled": false,
+      "state": "paused",
+      "paused_at": "2026-06-27T09:45:47.595797-04:00",
       "paused_reason": null,
       "created_at": "2026-06-18T19:28:36.873783-04:00",
-      "next_run_at": "2026-06-26T02:15:00-04:00",
-      "last_run_at": "2026-06-25T02:18:42.295009-04:00",
+      "next_run_at": "2026-06-28T02:15:00-04:00",
+      "last_run_at": "2026-06-27T02:20:12.775855-04:00",
       "last_status": "ok",
       "last_error": null,
       "last_delivery_error": null,
@@ -908,7 +908,222 @@
       ],
       "workdir": "/root/.hermes",
       "profile": null
+    },
+    {
+      "id": "886554b9a87e",
+      "name": "Wolfy EOD price ingest shard 2/5",
+      "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 2/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_eod_after_close_ingest_shard_2.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "35 16 * * 1-5",
+        "display": "35 16 * * 1-5"
+      },
+      "schedule_display": "35 16 * * 1-5",
+      "repeat": {
+        "times": null,
+        "completed": 0
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-06-29T21:25:30.245734-04:00",
+      "next_run_at": "2026-06-30T16:35:00-04:00",
+      "last_run_at": null,
+      "last_status": null,
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "0b1ae54fe4b5",
+      "name": "Wolfy EOD price ingest shard 3/5",
+      "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 3/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_eod_after_close_ingest_shard_3.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "40 16 * * 1-5",
+        "display": "40 16 * * 1-5"
+      },
+      "schedule_display": "40 16 * * 1-5",
+      "repeat": {
+        "times": null,
+        "completed": 0
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-06-29T21:25:31.250155-04:00",
+      "next_run_at": "2026-06-30T16:40:00-04:00",
+      "last_run_at": null,
+      "last_status": null,
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "aafdff5d2f32",
+      "name": "Wolfy EOD price ingest shard 4/5",
+      "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 4/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_eod_after_close_ingest_shard_4.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "45 16 * * 1-5",
+        "display": "45 16 * * 1-5"
+      },
+      "schedule_display": "45 16 * * 1-5",
+      "repeat": {
+        "times": null,
+        "completed": 0
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-06-29T21:25:32.255597-04:00",
+      "next_run_at": "2026-06-30T16:45:00-04:00",
+      "last_run_at": null,
+      "last_status": null,
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "9b4c89ba4b54",
+      "name": "Wolfy EOD price ingest shard 5/5",
+      "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 5/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_eod_after_close_ingest_shard_5.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "50 16 * * 1-5",
+        "display": "50 16 * * 1-5"
+      },
+      "schedule_display": "50 16 * * 1-5",
+      "repeat": {
+        "times": null,
+        "completed": 0
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-06-29T21:25:37.441345-04:00",
+      "next_run_at": "2026-06-30T16:50:00-04:00",
+      "last_run_at": null,
+      "last_status": null,
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    },
+    {
+      "id": "2bd5812cf748",
+      "name": "Wolfy bounded tiered EOD history backfill",
+      "prompt": "Script-only bounded Wolfy tiered EOD history backfill. Loads a few active/enabled large/mid/small-cap tickers per run using Massive adjusted daily bars, with a hard batch cap to stay under cron timeout. EOD-only research data; no setup approval, no trade execution.",
+      "skills": [],
+      "skill": null,
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": "wolfy_tiered_backfill_bounded.py",
+      "no_agent": true,
+      "context_from": null,
+      "schedule": {
+        "kind": "interval",
+        "minutes": 120,
+        "display": "every 120m"
+      },
+      "schedule_display": "every 120m",
+      "repeat": {
+        "times": null,
+        "completed": 0
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-06-29T21:49:50.919379-04:00",
+      "next_run_at": "2026-06-29T23:49:50.919415-04:00",
+      "last_run_at": null,
+      "last_status": null,
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": {
+        "platform": "discord",
+        "chat_id": "1510443116468109402",
+        "chat_name": "FatherSonTalk / #fathersontalk",
+        "thread_id": null
+      },
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
     }
   ],
-  "updated_at": "2026-06-25T21:02:31.229168-04:00"
+  "updated_at": "2026-06-29T22:30:49.739536-04:00"
 }

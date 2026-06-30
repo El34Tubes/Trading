@@ -630,3 +630,136 @@ DROP TRIGGER IF EXISTS trg_scanner_results_aliases_biu ON scanner_results;
 CREATE TRIGGER trg_scanner_results_aliases_biu
   BEFORE INSERT OR UPDATE OF run_id, scanner_run_id, liquidity_pass, status, notes, company_name, scanner_type, signal ON scanner_results
   FOR EACH ROW EXECUTE FUNCTION wolfy_sync_scanner_results_aliases();
+
+-- EOD run-ledger compatibility for read-only ops probes. Canonical EOD code
+-- uses runs.started/runs.finished; diagnostics often expect started_at /
+-- completed_at and a feature-run projection.
+CREATE TABLE IF NOT EXISTS runs (
+  id serial PRIMARY KEY,
+  job text,
+  started timestamptz,
+  finished timestamptz,
+  status text,
+  detail jsonb
+);
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+UPDATE runs
+SET started_at=COALESCE(started_at, started),
+    completed_at=COALESCE(completed_at, finished)
+WHERE started_at IS NULL OR completed_at IS NULL;
+
+CREATE OR REPLACE FUNCTION wolfy_sync_runs_aliases()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.started_at IS NULL THEN
+    NEW.started_at := NEW.started;
+  END IF;
+  IF NEW.completed_at IS NULL THEN
+    NEW.completed_at := NEW.finished;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_runs_aliases_biu ON runs;
+CREATE TRIGGER trg_runs_aliases_biu
+  BEFORE INSERT OR UPDATE OF started, finished, started_at, completed_at ON runs
+  FOR EACH ROW EXECUTE FUNCTION wolfy_sync_runs_aliases();
+
+DROP VIEW IF EXISTS eod_feature_runs;
+CREATE VIEW eod_feature_runs AS
+SELECT
+  id,
+  job,
+  started,
+  finished,
+  started_at,
+  completed_at,
+  status,
+  detail,
+  NULLIF(detail->>'bars_loaded', '')::integer AS bars_loaded,
+  NULLIF(detail->>'feature_rows_upserted', '')::integer AS feature_rows_upserted,
+  NULLIF(detail->>'tickers_processed', '')::integer AS tickers_processed
+FROM runs
+WHERE job LIKE 'eod-%' OR job LIKE 'feature%';
+
+-- Universe compatibility for read-only ops probes. Canonical tables are
+-- universe_symbols and universe_backfill_targets; diagnostics sometimes use
+-- shorter names/aliases such as universe.enabled or targets.enabled.
+ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS enabled BOOLEAN;
+ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS wolfy_tier TEXT;
+ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS tier_source TEXT;
+ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS backfill_priority INTEGER;
+ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS backfill_enabled BOOLEAN;
+UPDATE universe_backfill_targets
+SET enabled=active
+WHERE enabled IS NULL;
+UPDATE universe_backfill_targets
+SET wolfy_tier=tier
+WHERE wolfy_tier IS NULL;
+UPDATE universe_backfill_targets
+SET tier_source=source
+WHERE tier_source IS NULL;
+UPDATE universe_backfill_targets
+SET backfill_priority=priority
+WHERE backfill_priority IS NULL;
+UPDATE universe_backfill_targets
+SET backfill_enabled=COALESCE(enabled, active, true)
+WHERE backfill_enabled IS NULL;
+
+CREATE OR REPLACE FUNCTION wolfy_sync_universe_backfill_targets_aliases()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.enabled IS NULL THEN
+    NEW.enabled := COALESCE(NEW.active, true);
+  END IF;
+  IF NEW.active IS NULL THEN
+    NEW.active := COALESCE(NEW.enabled, true);
+  END IF;
+  IF NEW.wolfy_tier IS NULL THEN
+    NEW.wolfy_tier := NEW.tier;
+  END IF;
+  IF NEW.tier IS NULL THEN
+    NEW.tier := NEW.wolfy_tier;
+  END IF;
+  IF NEW.tier_source IS NULL THEN
+    NEW.tier_source := NEW.source;
+  END IF;
+  IF NEW.source IS NULL THEN
+    NEW.source := NEW.tier_source;
+  END IF;
+  IF NEW.backfill_priority IS NULL THEN
+    NEW.backfill_priority := NEW.priority;
+  END IF;
+  IF NEW.priority IS NULL THEN
+    NEW.priority := NEW.backfill_priority;
+  END IF;
+  IF NEW.backfill_enabled IS NULL THEN
+    NEW.backfill_enabled := COALESCE(NEW.enabled, NEW.active, true);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_universe_backfill_targets_aliases_biu ON universe_backfill_targets;
+CREATE TRIGGER trg_universe_backfill_targets_aliases_biu
+  BEFORE INSERT OR UPDATE OF active, enabled, tier, wolfy_tier, source, tier_source, priority, backfill_priority, backfill_enabled ON universe_backfill_targets
+  FOR EACH ROW EXECUTE FUNCTION wolfy_sync_universe_backfill_targets_aliases();
+
+DROP VIEW IF EXISTS universe;
+CREATE VIEW universe AS
+SELECT
+  symbol,
+  name,
+  source,
+  sector,
+  is_etf,
+  last_seen,
+  active,
+  active AS enabled,
+  wolfy_tier,
+  wolfy_tier AS tier,
+  tier_source,
+  backfill_priority,
+  backfill_enabled,
+  tier_notes
+FROM universe_symbols;

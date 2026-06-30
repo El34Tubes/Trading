@@ -10,6 +10,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
 from typing import Iterable, Sequence
 
 
@@ -19,6 +20,93 @@ DEFAULT_SMA_FAST_WINDOW = 20
 DEFAULT_SMA_SLOW_WINDOW = 50
 DEFAULT_VOLUME_WINDOW = 20
 DEFAULT_ATR_WINDOW = 14
+MASSIVE_BASE_URL = os.environ.get("MASSIVE_BASE_URL", "https://api.massive.com")
+EODHS_BASE_URL = os.environ.get("EODHS_BASE_URL", "https://eodhd.com")
+ENV_FILE = Path(os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env"))
+
+
+def _env_secret(*names: str) -> str | None:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text(errors="ignore").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            if key.strip() in names:
+                return value.strip().strip("\"'")
+    return None
+
+
+def _massive_api_key() -> str:
+    key = _env_secret("MASSIVE_API_KEY", "POLYGON_API_KEY")
+    if not key:
+        raise RuntimeError("MASSIVE_API_KEY is not set; add it to Hermes .env and reload before using Massive ingest")
+    return key
+
+
+def _massive_get_json(
+    path_or_url: str,
+    params: dict[str, object] | None = None,
+    *,
+    timeout: int = 30,
+    max_attempts: int = 3,
+    rate_limit_sleep_seconds: int = 65,
+) -> dict:
+    params = dict(params or {})
+    params.setdefault("apiKey", _massive_api_key())
+    if path_or_url.startswith("http"):
+        url = path_or_url
+        if "apiKey=" not in url:
+            sep = "&" if "?" in url else "?"
+            url = url + sep + urllib.parse.urlencode({"apiKey": params["apiKey"]})
+    else:
+        url = MASSIVE_BASE_URL.rstrip("/") + "/" + path_or_url.lstrip("/") + "?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, headers={"User-Agent": "Hermes-Wolfy-EOD/1.0"})
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")[:500]
+            if exc.code == 429 and attempt < max_attempts:
+                retry_after = exc.headers.get("Retry-After")
+                sleep_seconds = int(retry_after) if retry_after and retry_after.isdigit() else rate_limit_sleep_seconds
+                time.sleep(sleep_seconds)
+                continue
+            raise RuntimeError(f"Massive API HTTP {exc.code} for {path_or_url}: {body}") from exc
+        except urllib.error.URLError as exc:
+            if attempt < max_attempts:
+                time.sleep(min(5 * attempt, 15))
+                continue
+            raise RuntimeError(f"Massive API fetch failed for {path_or_url}: {exc}") from exc
+    raise RuntimeError(f"Massive API fetch failed for {path_or_url}: exhausted attempts")
+
+
+def _eodhs_api_key() -> str:
+    key = _env_secret("EODHS_API_KEY", "EODHD_API_KEY")
+    if not key:
+        raise RuntimeError("EODHS_API_KEY/EODHD_API_KEY is not set; add it to Hermes .env and reload before using EODHS/EODHD fallback")
+    return key
+
+
+def _eodhs_get_json(path: str, params: dict[str, object] | None = None, *, timeout: int = 30) -> list | dict:
+    params = dict(params or {})
+    params.setdefault("api_token", _eodhs_api_key())
+    params.setdefault("fmt", "json")
+    url = EODHS_BASE_URL.rstrip("/") + "/" + path.lstrip("/") + "?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, headers={"User-Agent": "Hermes-Wolfy-EOD/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"EODHS/EODHD API HTTP {exc.code} for {path}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"EODHS/EODHD API fetch failed for {path}: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -187,8 +275,90 @@ def ensure_eod_feature_schema(conn) -> None:
         )
         """
     )
+    # Compatibility aliases for read-only ops probes.  Canonical EOD code uses
+    # runs.started/runs.finished, but operational diagnostics often expect the
+    # agent-ledger names started_at/completed_at and a feature-run projection.
+    conn.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS started_at timestamptz")
+    conn.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS completed_at timestamptz")
+    conn.execute("UPDATE runs SET started_at=started WHERE started_at IS NULL AND started IS NOT NULL")
+    conn.execute("UPDATE runs SET completed_at=finished WHERE completed_at IS NULL AND finished IS NOT NULL")
+    conn.execute(
+        """
+        CREATE OR REPLACE FUNCTION wolfy_sync_runs_aliases()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.started_at IS NULL THEN
+            NEW.started_at := NEW.started;
+          END IF;
+          IF NEW.completed_at IS NULL THEN
+            NEW.completed_at := NEW.finished;
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+        """
+    )
+    conn.execute("DROP TRIGGER IF EXISTS trg_runs_aliases_biu ON runs")
+    conn.execute(
+        """
+        CREATE TRIGGER trg_runs_aliases_biu
+          BEFORE INSERT OR UPDATE OF started, finished, started_at, completed_at ON runs
+          FOR EACH ROW EXECUTE FUNCTION wolfy_sync_runs_aliases()
+        """
+    )
+    conn.execute(
+        """
+        DROP VIEW IF EXISTS eod_feature_runs;
+        CREATE VIEW eod_feature_runs AS
+        SELECT
+          id,
+          job,
+          started,
+          finished,
+          started_at,
+          completed_at,
+          status,
+          detail,
+          NULLIF(detail->>'bars_loaded', '')::integer AS bars_loaded,
+          NULLIF(detail->>'feature_rows_upserted', '')::integer AS feature_rows_upserted,
+          NULLIF(detail->>'tickers_processed', '')::integer AS tickers_processed
+        FROM runs
+        WHERE job LIKE 'eod-%' OR job LIKE 'feature%'
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_job_started ON runs(job, started DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_status_started ON runs(status, started DESC)")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS universe_symbols (
+          symbol text PRIMARY KEY,
+          name text,
+          source text NOT NULL,
+          sector text,
+          is_etf boolean NOT NULL DEFAULT false,
+          last_seen timestamptz NOT NULL DEFAULT now(),
+          active boolean NOT NULL DEFAULT true
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pg_universe_symbols_active_source ON universe_symbols(active, source)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pg_universe_symbols_etf ON universe_symbols(is_etf, active)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS price_data_quality_events (
+          id serial PRIMARY KEY,
+          run_at timestamptz NOT NULL DEFAULT now(),
+          as_of date NOT NULL,
+          ticker text,
+          severity text NOT NULL,
+          source text NOT NULL,
+          reason text NOT NULL,
+          detail jsonb NOT NULL DEFAULT '{}'::jsonb
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_price_data_quality_events_as_of ON price_data_quality_events(as_of, severity, ticker)")
 
 
 def _start_run(conn, job: str, detail: dict) -> int:
@@ -375,6 +545,355 @@ def fetch_yahoo_chart_bars(tickers: Sequence[str], *, days: int = 90) -> list[Pr
     return bars
 
 
+def fetch_massive_reference_symbols(*, types: Sequence[str] = ("CS", "ETF"), max_pages: int | None = None, page_limit: int = 1000) -> list[dict]:
+    """Fetch active U.S. stock/common-share and ETF reference records from Massive."""
+    records: list[dict] = []
+    page_count = 0
+    for ticker_type in types:
+        next_url: str | None = None
+        while True:
+            payload = _massive_get_json(
+                next_url or "/v3/reference/tickers",
+                {"market": "stocks", "active": "true", "type": ticker_type, "limit": page_limit, "sort": "ticker"},
+            )
+            records.extend(payload.get("results") or [])
+            page_count += 1
+            if max_pages is not None and page_count >= max_pages:
+                return records
+            next_url = payload.get("next_url")
+            if not next_url:
+                break
+    return records
+
+
+def store_massive_reference_symbols(conn, records: Sequence[dict], *, source: str = "massive-reference") -> int:
+    ensure_eod_feature_schema(conn)
+    upserted = 0
+    for rec in records:
+        symbol = str(rec.get("ticker") or "").upper().strip()
+        if not symbol:
+            continue
+        ticker_type = str(rec.get("type") or "").upper()
+        conn.execute(
+            """
+            INSERT INTO universe_symbols(symbol, name, source, sector, is_etf, last_seen, active)
+            VALUES (%s,%s,%s,%s,%s,now(),%s)
+            ON CONFLICT (symbol) DO UPDATE SET
+              name=COALESCE(EXCLUDED.name, universe_symbols.name),
+              source=CASE
+                WHEN position(EXCLUDED.source in universe_symbols.source) > 0 THEN universe_symbols.source
+                ELSE universe_symbols.source || ',' || EXCLUDED.source
+              END,
+              sector=COALESCE(EXCLUDED.sector, universe_symbols.sector),
+              is_etf=(universe_symbols.is_etf OR EXCLUDED.is_etf),
+              last_seen=now(),
+              active=EXCLUDED.active
+            """,
+            (symbol, rec.get("name"), source, rec.get("sic_description"), ticker_type == "ETF", bool(rec.get("active", True))),
+        )
+        upserted += 1
+    return upserted
+
+
+def refresh_massive_reference_universe(conn, *, types: Sequence[str] = ("CS", "ETF"), max_pages: int | None = None) -> dict:
+    records = fetch_massive_reference_symbols(types=types, max_pages=max_pages)
+    stored = store_massive_reference_symbols(conn, records)
+    return {"source": "massive-reference", "records_fetched": len(records), "records_upserted": stored, "types": list(types)}
+
+
+def fetch_massive_eod_bars(
+    tickers: Sequence[str],
+    *,
+    start_dt: date,
+    end_dt: date,
+    adjusted: bool = True,
+    pause_seconds: float = 0.0,
+) -> list[PriceBar]:
+    """Fetch adjusted daily aggregate bars from Massive for deterministic EOD ingest."""
+    bars: list[PriceBar] = []
+    for ticker in tickers:
+        symbol = ticker.upper().strip()
+        if not symbol:
+            continue
+        payload = _massive_get_json(
+            f"/v2/aggs/ticker/{urllib.parse.quote(symbol)}/range/1/day/{start_dt.isoformat()}/{end_dt.isoformat()}",
+            {"adjusted": str(adjusted).lower(), "sort": "asc", "limit": 50000},
+        )
+        for rec in payload.get("results") or []:
+            if not all(k in rec for k in ("t", "o", "h", "l", "c", "v")):
+                continue
+            bars.append(
+                PriceBar(
+                    symbol,
+                    datetime.fromtimestamp(int(rec["t"]) / 1000, tz=timezone.utc).date(),
+                    _q(Decimal(str(rec["o"])), "0.0001"),
+                    _q(Decimal(str(rec["h"])), "0.0001"),
+                    _q(Decimal(str(rec["l"])), "0.0001"),
+                    _q(Decimal(str(rec["c"])), "0.0001"),
+                    int(rec["v"]),
+                )
+            )
+        if pause_seconds:
+            time.sleep(pause_seconds)
+    return bars
+
+
+def fetch_eodhs_eod_bars(
+    tickers: Sequence[str],
+    *,
+    start_dt: date,
+    end_dt: date,
+    exchange_suffix: str = "US",
+    pause_seconds: float = 1.0,
+    max_tickers: int = 5,
+) -> list[PriceBar]:
+    """Fetch EODHS/EODHD daily bars as a conservative free-tier fallback.
+
+    This is intentionally capped; Massive remains the primary EOD source.
+    EODHS free tier is useful for small fallback/cross-check pulls, not bulk daily refreshes.
+    """
+    selected = [ticker.upper().strip() for ticker in tickers if ticker.strip()][:max_tickers]
+    bars: list[PriceBar] = []
+    for symbol in selected:
+        eod_symbol = symbol if "." in symbol else f"{symbol}.{exchange_suffix}"
+        payload = _eodhs_get_json(
+            f"/api/eod/{urllib.parse.quote(eod_symbol)}",
+            {"from": start_dt.isoformat(), "to": end_dt.isoformat(), "period": "d"},
+        )
+        if not isinstance(payload, list):
+            continue
+        for rec in payload:
+            if not all(k in rec for k in ("date", "open", "high", "low", "close", "volume")):
+                continue
+            # Prefer adjusted_close for close so split/dividend-adjusted trend checks are less distorted;
+            # OHLC remains vendor raw and this source is only fallback/cross-check.
+            close_value = rec.get("adjusted_close") or rec.get("close")
+            bars.append(
+                PriceBar(
+                    symbol,
+                    date.fromisoformat(str(rec["date"])),
+                    _q(Decimal(str(rec["open"])), "0.0001"),
+                    _q(Decimal(str(rec["high"])), "0.0001"),
+                    _q(Decimal(str(rec["low"])), "0.0001"),
+                    _q(Decimal(str(close_value)), "0.0001"),
+                    int(rec.get("volume") or 0),
+                )
+            )
+        if pause_seconds:
+            time.sleep(pause_seconds)
+    return bars
+
+
+def _massive_paginated_results(path: str, params: dict[str, object], *, max_pages: int | None = None) -> list[dict]:
+    results: list[dict] = []
+    next_url: str | None = None
+    pages = 0
+    while True:
+        payload = _massive_get_json(next_url or path, params)
+        results.extend(payload.get("results") or [])
+        pages += 1
+        if max_pages is not None and pages >= max_pages:
+            break
+        next_url = payload.get("next_url")
+        if not next_url:
+            break
+    return results
+
+
+def fetch_massive_corporate_actions(tickers: Sequence[str], *, since: date, until: date) -> dict[str, list[dict]]:
+    """Fetch recent corporate actions in bulk and map them to requested tickers."""
+    wanted = {ticker.upper() for ticker in tickers}
+    actions: dict[str, list[dict]] = {ticker: [] for ticker in wanted}
+    splits = _massive_paginated_results(
+        "/v3/reference/splits",
+        {"execution_date.gte": since.isoformat(), "execution_date.lte": until.isoformat(), "limit": 1000, "sort": "execution_date"},
+        max_pages=5,
+    )
+    dividends = _massive_paginated_results(
+        "/v3/reference/dividends",
+        {"ex_dividend_date.gte": since.isoformat(), "ex_dividend_date.lte": until.isoformat(), "limit": 1000, "sort": "ex_dividend_date"},
+        max_pages=5,
+    )
+    for row in splits:
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker in wanted:
+            actions[ticker].append({"kind": "split", **row})
+    for row in dividends:
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker in wanted:
+            actions[ticker].append({"kind": "dividend", **row})
+    return actions
+
+
+def validate_price_data_quality(
+    conn,
+    *,
+    tickers: Sequence[str],
+    source: str,
+    as_of: date | None = None,
+    max_stale_days: int = 5,
+    corporate_action_lookback_days: int = 45,
+    check_corporate_actions: bool = True,
+) -> dict:
+    ensure_eod_feature_schema(conn)
+    as_of = as_of or date.today()
+    ticker_list = [ticker.upper() for ticker in tickers]
+    rows = conn.execute(
+        """
+        SELECT ticker, max(dt) AS latest_dt, count(*) AS bars
+        FROM prices
+        WHERE ticker = ANY(%s)
+        GROUP BY ticker
+        """,
+        (ticker_list,),
+    ).fetchall()
+    by_ticker = {row[0]: {"latest_dt": row[1], "bars": row[2]} for row in rows}
+    events: list[dict] = []
+    for ticker in ticker_list:
+        info = by_ticker.get(ticker)
+        if not info:
+            events.append({"ticker": ticker, "severity": "blocker", "reason": "missing_price_history", "detail": {}})
+            continue
+        latest_dt = info["latest_dt"]
+        stale_days = (as_of - latest_dt).days
+        if stale_days > max_stale_days:
+            events.append({"ticker": ticker, "severity": "blocker", "reason": "stale_price_history", "detail": {"latest_dt": latest_dt.isoformat(), "stale_days": stale_days, "bars": int(info["bars"])}})
+    corporate_actions: dict[str, list[dict]] = {}
+    if check_corporate_actions and ticker_list:
+        since = as_of - timedelta(days=corporate_action_lookback_days)
+        corporate_actions = fetch_massive_corporate_actions(ticker_list, since=since, until=as_of)
+        for ticker, action_rows in corporate_actions.items():
+            splits = [row for row in action_rows if row.get("kind") == "split"]
+            if splits:
+                events.append({"ticker": ticker, "severity": "review", "reason": "recent_split_requires_adjustment_audit", "detail": {"splits": splits[:5]}})
+    for event in events:
+        conn.execute(
+            """
+            INSERT INTO price_data_quality_events(as_of, ticker, severity, source, reason, detail)
+            VALUES (%s,%s,%s,%s,%s,%s::jsonb)
+            """,
+            (as_of, event.get("ticker"), event["severity"], source, event["reason"], json.dumps(event.get("detail") or {}, sort_keys=True, default=str)),
+        )
+    return {
+        "as_of": as_of.isoformat(),
+        "source": source,
+        "tickers_checked": len(ticker_list),
+        "events_recorded": len(events),
+        "blockers": sum(1 for e in events if e["severity"] == "blocker"),
+        "reviews": sum(1 for e in events if e["severity"] == "review"),
+        "events": events,
+    }
+
+
+def _price_history_state(conn, tickers: Sequence[str]) -> dict[str, dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT ticker, max(dt) AS latest_dt, count(*) AS bars
+        FROM prices
+        WHERE ticker = ANY(%s)
+        GROUP BY ticker
+        """,
+        ([ticker.upper() for ticker in tickers],),
+    ).fetchall()
+    return {row[0]: {"latest_dt": row[1], "bars": int(row[2])} for row in rows}
+
+
+def _fetch_incremental_massive_bars(
+    conn,
+    *,
+    tickers: Sequence[str],
+    days: int,
+    adjusted: bool,
+    pause_seconds: float,
+    min_history_bars: int,
+) -> tuple[list[PriceBar], list[dict]]:
+    end_dt = date.today()
+    full_start_dt = end_dt - timedelta(days=days)
+    state = _price_history_state(conn, tickers)
+    bars: list[PriceBar] = []
+    fetch_plan: list[dict] = []
+    for ticker in [ticker.upper() for ticker in tickers]:
+        info = state.get(ticker)
+        if not info or int(info.get("bars") or 0) < min_history_bars:
+            start_dt = full_start_dt
+            reason = "bootstrap_or_insufficient_history"
+        else:
+            latest_dt = info.get("latest_dt")
+            start_dt = latest_dt + timedelta(days=1) if latest_dt else full_start_dt
+            reason = "incremental_missing_days"
+        if start_dt > end_dt:
+            fetch_plan.append({"ticker": ticker, "skipped": True, "reason": "already_current", "latest_dt": str(info.get("latest_dt")) if info else None})
+            continue
+        fetched = fetch_massive_eod_bars([ticker], start_dt=start_dt, end_dt=end_dt, adjusted=adjusted, pause_seconds=pause_seconds)
+        bars.extend(fetched)
+        fetch_plan.append({"ticker": ticker, "skipped": False, "reason": reason, "start_dt": start_dt.isoformat(), "end_dt": end_dt.isoformat(), "bars_fetched": len(fetched)})
+    return bars, fetch_plan
+
+
+def massive_ingest(
+    *,
+    tickers: Sequence[str],
+    days: int = 730,
+    dsn: str = DEFAULT_DSN,
+    min_dollar_vol: Decimal = DEFAULT_MIN_DOLLAR_VOL,
+    refresh_universe: bool = False,
+    validate: bool = True,
+    adjusted: bool = True,
+    pause_seconds: float = 0.0,
+    min_history_bars: int = 500,
+    eodhs_fallback_max_tickers: int = 0,
+) -> dict:
+    import psycopg
+
+    with psycopg.connect(dsn) as conn:
+        universe_result = refresh_massive_reference_universe(conn) if refresh_universe else None
+        bars, fetch_plan = _fetch_incremental_massive_bars(
+            conn,
+            tickers=tickers,
+            days=days,
+            adjusted=adjusted,
+            pause_seconds=pause_seconds,
+            min_history_bars=min_history_bars,
+        )
+        eodhs_fallback = None
+        if eodhs_fallback_max_tickers > 0:
+            missing = [item["ticker"] for item in fetch_plan if not item.get("skipped") and item.get("bars_fetched") == 0]
+            if missing:
+                end_dt = date.today()
+                fallback_bars = fetch_eodhs_eod_bars(
+                    missing,
+                    start_dt=end_dt - timedelta(days=min(days, 30)),
+                    end_dt=end_dt,
+                    max_tickers=eodhs_fallback_max_tickers,
+                )
+                bars.extend(fallback_bars)
+                eodhs_fallback = {"requested_tickers": missing[:eodhs_fallback_max_tickers], "bars_fetched": len(fallback_bars), "max_tickers": eodhs_fallback_max_tickers}
+        ingest_run = ingest_price_bars(conn, bars, source="massive-adjusted-eod" if adjusted else "massive-raw-eod") if bars else None
+        feature_run = compute_and_store_features(conn, tickers=tickers, min_dollar_vol=min_dollar_vol)
+        validation = validate_price_data_quality(conn, tickers=tickers, source="massive-adjusted-eod", check_corporate_actions=bool(bars)) if validate else None
+        latest = conn.execute(
+            """
+            SELECT ticker, max(dt) AS latest_dt, count(*) AS bars
+            FROM prices
+            WHERE ticker = ANY(%s)
+            GROUP BY ticker
+            ORDER BY ticker
+            """,
+            ([ticker.upper() for ticker in tickers],),
+        ).fetchall()
+    return {
+        "source": "massive-adjusted-eod" if adjusted else "massive-raw-eod",
+        "tickers": [ticker.upper() for ticker in tickers],
+        "bars_fetched": len(bars),
+        "fetch_plan": fetch_plan,
+        "ingest_run_id": ingest_run,
+        "feature_run_id": feature_run,
+        "universe_refresh": universe_result,
+        "eodhs_fallback": eodhs_fallback,
+        "validation": validation,
+        "latest": [{"ticker": row[0], "latest_dt": row[1].isoformat(), "bars": row[2]} for row in latest],
+    }
+
 def smoke_ingest(
     *,
     tickers: Sequence[str],
@@ -415,13 +934,39 @@ def _parse_date(value: str | None) -> date | None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Wolfy EOD price ingest and deterministic feature service")
     parser.add_argument("--tickers", default="SPY,QQQ,IWM", help="Comma-separated ticker universe")
-    parser.add_argument("--days", type=int, default=90, help="Yahoo delayed daily bars lookback")
+    parser.add_argument("--days", type=int, default=730, help="Daily bars lookback")
     parser.add_argument("--dsn", default=DEFAULT_DSN)
     parser.add_argument("--min-dollar-vol", default=str(DEFAULT_MIN_DOLLAR_VOL))
+    parser.add_argument("--source", choices=["massive", "eodhs", "yahoo"], default="massive", help="Preferred price source; yahoo/eodhs remain fallback/smoke only")
+    parser.add_argument("--refresh-universe", action="store_true", help="Refresh Massive active U.S. stock/ETF reference universe before ingest")
+    parser.add_argument("--no-validate", action="store_true", help="Skip freshness/corporate-action data-quality validation")
+    parser.add_argument("--raw", action="store_true", help="Request raw Massive bars instead of adjusted bars")
+    parser.add_argument("--pause-seconds", type=float, default=0.0, help="Optional pause between API ticker calls")
+    parser.add_argument("--min-history-bars", type=int, default=500, help="Only bootstrap full Massive history below this stored bar count; otherwise fetch missing days only")
+    parser.add_argument("--eodhs-fallback-max-tickers", type=int, default=0, help="Conservative EODHS fallback cap for Massive missing-ticker retries; 0 disables")
     args = parser.parse_args(argv)
     tickers = [ticker.strip().upper() for ticker in args.tickers.split(",") if ticker.strip()]
-    result = smoke_ingest(tickers=tickers, days=args.days, dsn=args.dsn, min_dollar_vol=Decimal(args.min_dollar_vol))
-    print(json.dumps(result, indent=2, sort_keys=True))
+    if args.source == "massive":
+        result = massive_ingest(
+            tickers=tickers,
+            days=args.days,
+            dsn=args.dsn,
+            min_dollar_vol=Decimal(args.min_dollar_vol),
+            refresh_universe=args.refresh_universe,
+            validate=not args.no_validate,
+            adjusted=not args.raw,
+            pause_seconds=args.pause_seconds,
+            min_history_bars=args.min_history_bars,
+            eodhs_fallback_max_tickers=args.eodhs_fallback_max_tickers,
+        )
+    elif args.source == "eodhs":
+        end_dt = date.today()
+        start_dt = end_dt - timedelta(days=args.days)
+        bars = fetch_eodhs_eod_bars(tickers, start_dt=start_dt, end_dt=end_dt, pause_seconds=args.pause_seconds, max_tickers=min(len(tickers), 5))
+        result = {"source": "eodhs-eod-fallback", "tickers": tickers[:5], "bars_fetched": len(bars), "writes": False, "note": "EODHS free-tier source is capped and does not write by default; Massive remains primary."}
+    else:
+        result = smoke_ingest(tickers=tickers, days=args.days, dsn=args.dsn, min_dollar_vol=Decimal(args.min_dollar_vol))
+    print(json.dumps(result, indent=2, sort_keys=True, default=str))
     return 0
 
 

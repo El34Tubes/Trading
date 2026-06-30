@@ -70,6 +70,21 @@ def sample_payload():
     }
 
 
+def test_alpha_search_context_builds_script_first_payload_with_required_sections():
+    import alpha_search_context
+
+    payload = alpha_search_context.build_script_first_payload(
+        counts={'alpha_leads': 2, 'scanner_results': 10},
+        candidates=[{'ticker': 'ABC', 'score': 12.3, 'data_date': '2026-06-25'}],
+        alpha_snapshot={'counts': {'alpha_leads': 2}, 'recent_leads': [{'ticker': 'ABC', 'lead_type': 'scanner', 'status': 'needs_research'}]},
+    )
+
+    assert payload['report']['source_job_id'] == 'wolfy-alpha-search-report-script-first'
+    assert set(alpha_search_context.REQUIRED_SECTIONS).issubset(payload['report']['sections'])
+    assert payload['report']['sections']['top_alpha_leads']
+    assert payload['leads'] == []
+
+
 def test_record_alpha_payload_persists_report_lead_evidence_and_handoffs(tmp_path):
     db = tmp_path / "wolfy.db"
     result = record_alpha_payload(sample_payload(), db_path=db, create_postgres_tasks=False)

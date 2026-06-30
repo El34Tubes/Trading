@@ -198,6 +198,15 @@ $GAPI gmail modify MESSAGE_ID --add-labels LABEL_ID
 $GAPI gmail modify MESSAGE_ID --remove-labels UNREAD
 ```
 
+#### Sending generated artifacts by email
+
+Before telling the user an artifact can be emailed, do a short delivery preflight:
+
+1. Check auth first with `setup.py --check`; if not authenticated, either complete OAuth setup or state plainly that Gmail is not configured yet.
+2. If the artifact is a local file, inspect its size and estimate email transfer size. Base64 attachment encoding adds roughly 33%, so a 25 MB file becomes about 33 MB over SMTP/Gmail and may exceed common limits.
+3. For oversized artifacts, prefer uploading to Drive and sharing a reader link, or split/compress the artifact and send parts through the active chat platform if email is not available.
+4. Emailing, Drive upload/share, and sending to third-party recipients are side effects: show recipient, subject, file/link, and size, then get explicit approval before sending.
+
 ### Calendar
 
 ```bash

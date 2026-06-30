@@ -12,6 +12,7 @@ import contextlib
 import io
 import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,8 @@ def run_snapshot(
     max_workers: int = 8,
     min_ranked: int = 1,
     max_failure_rate: float = 0.35,
+    as_of_date: str | None = None,
+    max_data_lag_days: int = 3,
     refresh_universe: bool = False,
 ) -> dict[str, Any]:
     """Run and persist one scanner snapshot, returning compact status.
@@ -86,6 +89,7 @@ def run_snapshot(
         'failure_count': failure_count,
         'failure_rate': failure_rate,
         'active_universe_count': _active_universe_count(db_path),
+        'latest_data_date': max((str(row.get('date')) for _score, _ticker, row in ranked if row.get('date')), default=None),
     }
     alerts = []
     if len(ranked) < min_ranked:
@@ -94,6 +98,16 @@ def run_snapshot(
         alerts.append(f"failure_rate={failure_rate:.2f} above max_failure_rate={max_failure_rate:.2f}")
     if not symbols:
         alerts.append('symbol_count=0; scanner universe is empty')
+    if as_of_date and status['latest_data_date']:
+        lag_days = (date.fromisoformat(as_of_date) - date.fromisoformat(status['latest_data_date'])).days
+        status['data_lag_days'] = lag_days
+        if lag_days > max_data_lag_days:
+            alerts.append(
+                f"latest_data_date={status['latest_data_date']} is stale versus as_of_date={as_of_date} "
+                f"lag_days={lag_days} max_data_lag_days={max_data_lag_days}"
+            )
+    elif as_of_date and ranked:
+        alerts.append('ranked scanner rows did not include data dates')
     if alerts:
         sample_failures = ', '.join(f'{k}: {v}' for k, v in list(failures.items())[:5])
         detail = '; '.join(alerts)
@@ -111,6 +125,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--max-workers', type=int, default=8)
     parser.add_argument('--min-ranked', type=int, default=1)
     parser.add_argument('--max-failure-rate', type=float, default=0.35)
+    parser.add_argument('--as-of-date', default=date.today().isoformat(), help='Expected current market date for scanner freshness checks')
+    parser.add_argument('--max-data-lag-days', type=int, default=3)
     parser.add_argument('--refresh-universe', action='store_true')
     return parser
 
@@ -125,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
             max_workers=args.max_workers,
             min_ranked=args.min_ranked,
             max_failure_rate=args.max_failure_rate,
+            as_of_date=args.as_of_date,
+            max_data_lag_days=args.max_data_lag_days,
             refresh_universe=args.refresh_universe,
         )
     except Exception as exc:

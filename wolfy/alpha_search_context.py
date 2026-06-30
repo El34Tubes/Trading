@@ -8,7 +8,7 @@ import os
 import psycopg
 
 from wolfy_agent_coordination import connect, start_agent_run
-from alpha_search_pipeline import status_snapshot
+from alpha_search_pipeline import REQUIRED_SECTIONS, record_alpha_payload, status_snapshot
 from eod_governance import print_eod_governance
 
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
@@ -20,6 +20,50 @@ def fetch_dicts(cur, sql: str, params: tuple = ()) -> list[dict]:
     cur.execute(sql, params)
     cols = [d.name for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def build_script_first_payload(*, counts: dict, candidates: list[dict], alpha_snapshot: dict) -> dict:
+    """Build a deterministic Alpha Search report payload before LLM synthesis.
+
+    This keeps the scheduled job useful even if the LLM call times out: Postgres
+    receives a compact factual report first; the LLM may then add narrative/leads
+    as a second optional layer.
+    """
+    recent_leads = alpha_snapshot.get('recent_leads', []) or []
+    top_candidates = candidates[:10]
+    sections = {section: '' for section in REQUIRED_SECTIONS}
+    sections.update({
+        'insider_buying': 'Script-first snapshot only: recent insider artifacts are listed in context below; no insider trigger is promoted without research.',
+        'filings_news_catalysts': 'Script-first snapshot only: catalysts require Jonah/source validation before promotion.',
+        'social_scanner': '; '.join(
+            f"{c.get('ticker')}: score={c.get('score')} date={c.get('data_date')}" for c in top_candidates
+        ) or 'No current scanner candidates in deterministic pre-persistence snapshot.',
+        'suspicious_activity': 'No trade approval. Stale, thin, promotional, or manipulation-risk leads remain rejected/watch-only.',
+        'top_alpha_leads': '; '.join(
+            f"{lead.get('ticker')}: {lead.get('lead_type')} status={lead.get('status')}" for lead in recent_leads[:10]
+        ) or 'No recent alpha leads available in pre-persistence snapshot.',
+        'deeper_research_needed': 'Jonah must validate public catalyst, liquidity, event risk, and strategy-rule fit before any lead moves forward.',
+        'yang_needs': 'Yang should only review technical levels after deterministic strategy and source-quality gates pass.',
+        'sentinel_challenges': 'Sentinel must reject stale scanner data, missing stops, excessive turnover/drawdown, no catalyst, or non-approved strategy use.',
+    })
+    return {
+        'report': {
+            'source_job_id': 'wolfy-alpha-search-report-script-first',
+            'title': 'Wolfy Alpha Search script-first persistence snapshot',
+            'summary': 'Deterministic pre-LLM Alpha Search snapshot persisted before optional narrative synthesis.',
+            'market_context': 'Lead generation only; no strategy approval, setup creation, paper trade, or live execution.',
+            'sections': sections,
+            'raw_counts': counts,
+        },
+        'leads': [],
+    }
+
+
+def persist_script_first_snapshot(*, counts: dict, candidates: list[dict], alpha_snapshot: dict, smoke_mode: bool) -> object | None:
+    if smoke_mode:
+        return None
+    payload = build_script_first_payload(counts=counts, candidates=candidates, alpha_snapshot=alpha_snapshot)
+    return record_alpha_payload(payload, create_postgres_tasks=False)
 
 
 def main() -> None:
@@ -60,6 +104,12 @@ def main() -> None:
     alpha_snapshot = status_snapshot()  # default path now uses Postgres for live status
 
     smoke_mode = os.getenv('WOLFY_CONTEXT_SMOKE') == '1'
+    script_first_result = persist_script_first_snapshot(
+        counts=counts,
+        candidates=candidates,
+        alpha_snapshot=alpha_snapshot,
+        smoke_mode=smoke_mode,
+    )
     run_id = None
     if not smoke_mode:
         with connect(PG_DSN) as conn:
@@ -75,7 +125,16 @@ def main() -> None:
         print(f'Postgres agent run: AGENT_RUN_ID={run_id}')
         print(f'After report/lead DB writes, run: python3 {CLI} run-finish --run-id {run_id} --status completed --records-created <N> --summary "<alpha leads/report summary>"')
         print(f'If blocked, run: python3 {CLI} run-finish --run-id {run_id} --status blocked --error-message "<specific blocker>" --summary "<specific blocker>"')
-    print(f'Persist Alpha Search JSON using `python3 {ALPHA_PIPELINE} template`, then `python3 {ALPHA_PIPELINE} record --json <payload.json>`. Live record writes Postgres only.')
+    if script_first_result is None:
+        print('Script-first Alpha Search persistence: skipped because WOLFY_CONTEXT_SMOKE=1')
+    else:
+        print(
+            'Script-first Alpha Search persistence: '
+            f'report_id={script_first_result.report_id} leads_seen={script_first_result.leads_seen} '
+            f'leads_upserted={script_first_result.leads_upserted} '
+            f'evidence_seen={script_first_result.evidence_rows_seen} handoffs_seen={script_first_result.handoffs_seen}'
+        )
+    print(f'Optional LLM enhancement may persist Alpha Search JSON using `python3 {ALPHA_PIPELINE} template`, then `python3 {ALPHA_PIPELINE} record --json <payload.json>`. Live record writes Postgres only.')
     print('Purpose: lead generation only. Do not approve trades. Be brief; no filler. Challenge weak leads and recommend no-trade when evidence is thin.')
     print('Required sections: insider buying, filings/news/catalysts, public social/free scanner status, suspicious-activity filters, top alpha leads, what Yang needs, what Sentinel must challenge.')
     print('Knowledge notes/rules relevant to this report:')

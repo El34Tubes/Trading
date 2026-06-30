@@ -31,6 +31,13 @@ def test_agent_context_scripts_emit_eod_governance():
         assert "print_eod_governance" in source, name
 
 
+def test_eod_screening_context_filters_synthetic_test_runs():
+    source = Path('/root/.hermes/scripts/wolfy_eod_screening_context.py').read_text()
+    assert "coalesce(detail->>'source', '') LIKE 'unit-%'" in source
+    assert "jsonb_array_elements_text" in source
+    assert "ticker.value LIKE 'ZZ%'" in source
+
+
 def test_cron_prompts_carry_eod_constitution_for_market_agents():
     jobs = json.loads(Path("/root/.hermes/cron/jobs.json").read_text())["jobs"]
     market_jobs = {

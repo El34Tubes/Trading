@@ -42,6 +42,38 @@ def test_snapshot_success_stays_silent_and_persists_scan(monkeypatch, tmp_path, 
     assert status['symbol_count'] == 3
 
 
+def test_snapshot_alerts_when_scanner_data_is_stale(monkeypatch, tmp_path):
+    db = tmp_path / 'wolfy.db'
+    con = sqlite3.connect(db)
+    snapshot.wolfy_scanner.ensure_universe_tables(con)
+    snapshot.wolfy_scanner.refresh_universe_cache(
+        con,
+        source_records={'core': [
+            {'symbol': 'SPY', 'name': 'SPY', 'source': 'core_etf', 'sector': 'ETF', 'is_etf': 1},
+            {'symbol': 'QQQ', 'name': 'QQQ', 'source': 'core_etf', 'sector': 'ETF', 'is_etf': 1},
+            {'symbol': 'STALE', 'name': 'Stale Inc', 'source': 'core', 'sector': 'Technology', 'is_etf': 0},
+        ]},
+        now='2026-06-26T14:30:00+00:00',
+    )
+    con.close()
+    monkeypatch.setattr(
+        snapshot.wolfy_scanner,
+        'run_scan',
+        lambda *args, **kwargs: ([(5.0, 'STALE', {'date': '2026-06-01'})], {}),
+    )
+
+    with pytest.raises(snapshot.SnapshotAlert) as excinfo:
+        snapshot.run_snapshot(
+            db_path=db,
+            universe='core',
+            min_ranked=1,
+            as_of_date='2026-06-26',
+            max_data_lag_days=5,
+        )
+
+    assert 'latest_data_date=2026-06-01 is stale versus as_of_date=2026-06-26' in str(excinfo.value)
+
+
 def test_snapshot_alerts_when_ranked_rows_below_threshold(monkeypatch, tmp_path):
     db = tmp_path / 'wolfy.db'
     con = sqlite3.connect(db)
