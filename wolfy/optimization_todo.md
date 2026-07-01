@@ -381,3 +381,14 @@ Snapshot/conflict check:
 - Expected benefit: one source of truth for core universe, EOD shard groups, default source, default lookback, and practical readiness threshold; lower scheduler drift and less manual wrapper/profile sync risk.
 - Verification: Python compile passed for config, runner, after-close wrapper, five shard wrappers, and features/signals wrapper; `/root/.hermes/wolfy/test_eod_after_close_ingest_wrapper.py` passed with 2 tests; dry-run Yahoo ingest returned 3 SPY bars and no writes; dry-run features/signals returned no-write approved-gate JSON; shard import/monkeypatch smoke confirmed all five ticker groups and exit code 0.
 - Trading boundary: no DB writes from smoke dry-runs except read-only Postgres signal-gate reads; no setup creation, no strategy approval, no broker access, no trading action.
+
+## 2026-06-30 one-time orchestration bootstrap
+
+- FACT: Paused seven token-heavy LLM cron jobs: Jonah `07253dc09350`, Clerky `a739dac0d264`, Wolfy EOD `ba183091b5c0`, Sentinel `ce017fe2f3fb`, Yang `de6f05f10cb5`, Alpha Search `4452bdae4553`, Mike repair loop `fdfd5b53b5d5`. Optimizer `92f31b95fccc` remained active for 2026-07-01 02:15 ET.
+- OWS-1 complete: added deterministic `wolfy/guardian/budget_gate.py`. Verified over-cap simulation produced `BUDGET=block` with exit 1; under-cap simulation produced `BUDGET=ok` with exit 0; real state blocks on `codex_usage_limited`. Commit: `87043a2`.
+- OWS-2 complete: added deterministic `wolfy/guardian/config_guardian.py` and `wolfy/test_config_guardian.py`. Test passed: broken config + expired probation restores known-good and logs rollback. Real restore proof succeeded: deliberately broken `/root/.hermes/config.yaml` was restored from `/root/.hermes/wolfy/guardian/known_good/20260701T012552Z`; `hermes cron list` then exited 0. Commit: `59b8214`.
+- OWS-3 partial/installed on probation: set `cron.max_parallel_jobs=1` and `kanban.max_in_progress_per_profile=1` using self-modification protocol. Snapshot: `/root/.hermes/wolfy/guardian/known_good/20260701T012621Z`. Probation expires `2026-07-01T06:30:00Z`, after the next optimizer run. Commit: `7f4b39a`.
+- DECISION: left all seven heavy LLM jobs paused because the real budget gate currently reports `BUDGET=block codex_usage_limited`; re-enabling would immediately risk another 429. Do not restore Jonah to `*/20`.
+- KPIs recorded to `loop_metrics`: `usage_headroom_pct`, `tokens_today`, `gateway_healthy`, `config_rollbacks`, `parallel_jobs_cap`.
+- LESSON: proactive gates and rollback proof must exist before schedule/config autonomy; current budget status says no LLM re-enable yet.
+- NEXT ACTION: daily optimizer should confirm OWS-3 probation after its 02:15 run, then wire paused LLM jobs to consult `budget_gate.py` and re-enable only low-frequency jobs while Jonah remains paused or hourly.
