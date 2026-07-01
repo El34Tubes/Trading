@@ -392,3 +392,4 @@ Snapshot/conflict check:
 - KPIs recorded to `loop_metrics`: `usage_headroom_pct`, `tokens_today`, `gateway_healthy`, `config_rollbacks`, `parallel_jobs_cap`.
 - LESSON: proactive gates and rollback proof must exist before schedule/config autonomy; current budget status says no LLM re-enable yet.
 - NEXT ACTION: daily optimizer should confirm OWS-3 probation after its 02:15 run, then wire paused LLM jobs to consult `budget_gate.py` and re-enable only low-frequency jobs while Jonah remains paused or hourly.
+- OWS-2 operationalized: added no-agent cron `e55c9cc39d8d` (`Wolfy config guardian auto-restore`) via `scripts/wolfy_config_guardian.sh`, scheduled every 15m, verified script exit 0 with `GUARDIAN=ok ... probation_active`.
