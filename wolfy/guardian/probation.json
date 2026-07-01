@@ -1,0 +1,6 @@
+{
+  "change": "OWS-3 concurrency governor: cron.max_parallel_jobs=1; kanban.max_in_progress_per_profile=1",
+  "snapshot_path": "/root/.hermes/wolfy/guardian/known_good/20260701T012621Z",
+  "expires_at": "2026-07-01T06:30:00Z",
+  "created_at": "2026-07-01T01:26:21.531414Z"
+}
