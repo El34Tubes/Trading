@@ -1,0 +1,7 @@
+{
+  "hashes": {
+    "config.yaml": "f9ef9e00cb366d844cbf9a9605c933e3a9529efadfe8303ac24014f2e34fb577",
+    "cron/jobs.json": "d742ef23d3276ae978284be5371befe9892586e1440dae5419dabf61a61c03dc"
+  },
+  "latest_snapshot": "/root/.hermes/wolfy/guardian/known_good/20260701T012514Z"
+}
