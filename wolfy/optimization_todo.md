@@ -10,6 +10,7 @@ Durable trail for the daily Wolfy/Hermes optimization planner. Items here are pl
 - Max 3 concurrent positions, stops/invalidation required, no shorts, no auto-execution.
 - Avoid foreign/government-interference/manipulation-risk names.
 - Postgres is live source of truth; run `/root/.hermes/wolfy/check_postgres_requirements.py` before Postgres package/schema maintenance.
+- Daily optimization runs should send a short completion report when done: what changed, verification, commit/KPI, blockers/next action only.
 
 ## 2026-06-19 daily run
 
@@ -393,3 +394,12 @@ Snapshot/conflict check:
 - LESSON: proactive gates and rollback proof must exist before schedule/config autonomy; current budget status says no LLM re-enable yet.
 - NEXT ACTION: daily optimizer should confirm OWS-3 probation after its 02:15 run, then wire paused LLM jobs to consult `budget_gate.py` and re-enable only low-frequency jobs while Jonah remains paused or hourly.
 - OWS-2 operationalized: added no-agent cron `e55c9cc39d8d` (`Wolfy config guardian auto-restore`) via `scripts/wolfy_config_guardian.sh`, scheduled every 15m, verified script exit 0 with `GUARDIAN=ok ... probation_active`.
+
+## 2026-07-01 daily optimizer plan-only run
+
+- Time: 2026-07-01 02:15 ET / 06:15 UTC.
+- Budget gate: `python wolfy/guardian/budget_gate.py` returned `BUDGET=block codex_usage_limited` (exit 1), so this run followed the PLAN-ONLY rule: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian: `python wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;probation_active` (exit 0). Full `hermes cron list` also exited 0.
+- OWS-3 probation remains active until `2026-07-01T06:30:00Z`; config values were read as `cron.max_parallel_jobs=1` and `kanban.max_in_progress_per_profile=1`. Do not make a second orchestration/config change until probation is resolved by a later run/guardian cycle.
+- State: created/claimed task `3171` and run `194909`; recorded `jobs_skipped_by_budget=1`, `parallel_jobs_cap=1`, `human_approval_pending`, and recent `config_rollbacks` metrics.
+- NEXT ACTION: after budget recovers and OWS-3 probation clears, implement the next bounded control-plane slice: wire/review paused LLM job wrappers for budget-gate no-op behavior and only then consider low-frequency re-enable; keep Jonah off `*/20` or move to hourly per OWS-4.
