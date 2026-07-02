@@ -565,3 +565,12 @@ Snapshot/conflict check:
 - JUDGMENT: Top current risks are (1) split-adjustment basis corruption before DQ-1, (2) empty earnings calendar causing event-safety false clears before DQ-2, and (3) quota watchdog stale-log/self-feedback false positives corrupting budget orchestration before WATCH-1/WATCH-2/WATCH-4.
 - RECOMMENDATIONS FOR HUMAN: expect Tier B asks from R-1 point-in-time constituents, R-2 earnings/events source if the current data plan lacks it, R-3 fallback LLM provider/API key, and any new package/vendor for R-4 backtester validation; options paper support should likely defer until equity strategies have approved evidence.
 - NEXT ACTION: the daily optimizer's next implementation task is DQ-1 unless Priority-1 data health is broken; WATCH-1 should run before or alongside it if quota state regresses.
+
+## 2026-07-02 daily optimizer plan-only run
+
+- Time: 2026-07-02 02:15 ET / 06:15 UTC.
+- Budget gate: `python wolfy/guardian/budget_gate.py` returned `BUDGET=block token_cap_exceeded tokens_today=840644 cap=200000`; per optimizer rules this run did review/state/KPI updates only and made no code/config/cron implementation change.
+- Guardian: `python wolfy/guardian/config_guardian.py` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;hermes_cron_list_ok;no_probation`; no probation marker existed.
+- Review finding: OWS-1 is not fully wired despite `budget_gate.py` existing. `cron/jobs.json` search showed optimizer prompt mentions the gate, but Jonah and other non-`no_agent` LLM jobs do not contain `budget_gate`/`skipped: budget`; Jonah continued running every 20 minutes while the budget gate was over cap.
+- State: created Postgres `agent_tasks` id `3243` (`Complete OWS-1 budget gate wiring for LLM cron jobs`) and `agent_runs` id `195339`; recorded `jobs_skipped_by_budget=1`, `parallel_jobs_cap=1`, `max_turns=90`, `gateway_healthy=1`, `config_rollbacks=0`, `human_approval_pending=0` metrics.
+- NEXT ACTION: once budget headroom is OK, complete OWS-1 before OWS-4/OWS-5: snapshot config/jobs, wire Jonah and remaining LLM cron jobs to consult `wolfy/guardian/budget_gate.py` and print `skipped: budget` before any LLM spend, verify simulated over-cap no-ops, then validate `hermes cron list` and set probation if jobs/config changed.
