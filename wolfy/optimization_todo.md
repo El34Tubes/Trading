@@ -12,6 +12,157 @@ Durable trail for the daily Wolfy/Hermes optimization planner. Items here are pl
 - Postgres is live source of truth; run `/root/.hermes/wolfy/check_postgres_requirements.py` before Postgres package/schema maintenance.
 - Daily optimization runs should send a short completion report when done: what changed, verification, commit/KPI, blockers/next action only.
 
+## Data & Learning Backlog (DQ/VAL/LRN) — user-approved 2026-07-01
+
+Standing backlog for the daily optimizer: consume these as Phase 2 planning candidates alongside the
+embedded WS/OWS items, in the sequencing given at the bottom. Tier S = implement in bounded slices with
+a machine-checkable Definition of Done; Tier B = recommend and wait. Direction ratchet applies: numeric
+gates below may only tighten without human review.
+
+## P0 — SILENT CORRECTNESS BUGS (fix before trusting any signal or backtest)
+
+### DQ-1 — Split-safe ingest: re-fetch full history on corporate actions  [Tier S]
+Problem: incremental ingest fetches only latest_dt+1 forward. After a split, the provider re-adjusts ALL
+history, but Wolfy keeps stale pre-split-adjusted bars and appends new ones — the prices table mixes
+adjustment bases; features/signals/backtests on that ticker are silently wrong. The validator only tags
+recent_split_requires_adjustment_audit (severity review); nothing acts on it, and the 45-day lookback
+never audits older splits.
+Fix (slices): (a) when corporate actions show a split for a ticker since its earliest stored bar, force
+a FULL re-fetch (start_dt = full_start_dt) and upsert-replace its history; (b) escalate unresolved split
+audits from review to blocker after one ingest cycle; (c) one-time repair: scan splits over the full
+stored window for all tracked tickers and queue full re-fetches for any affected.
+DoD: unit test simulating a split yields a fetch plan with reason=corporate_action_refetch and
+start_dt=full_start_dt; after re-ingest, price_data_quality_events has no unresolved split audits;
+second run idempotent (0 new rows); suite 0 regressions.
+
+### DQ-2 — Populate `earnings_calendar` (read by 4 modules, written by none)  [Tier S]
+Problem: PEAD signals, event-landmine checks, monitoring, and the promotion gate all query
+earnings_calendar, but no ingest populates it. PEAD emits nothing and the "don't hold through earnings"
+safety check silently passes on an empty table.
+Fix: deterministic wolfy/earnings_calendar_ingest.py + no_agent cron wrapper pulling upcoming/recent
+earnings dates for tracked tickers from the primary provider's reference endpoints if available on the
+current plan. If the plan lacks an earnings endpoint, file a Tier B recommendation naming the exact
+source/key needed and meanwhile make the landmine check FAIL-CLOSED: a ticker with no earnings coverage
+returns state earnings_unknown on the ticket instead of implying safety.
+DoD: count of future earnings rows covers ≥90% of tier-1/2 tickers (or the Tier B rec is filed and
+fail-closed behavior is tested); PEAD on a fixture produces ≥1 signal; landmine check on an uncovered
+ticker returns earnings_unknown; ledger gains earnings_coverage_pct.
+
+### DQ-3 — Bar-level sanity gates on ingest  [Tier S]
+Problem: only missing-history and >5-day staleness are validated. No OHLC integrity, outlier, duplicate,
+or zero checks; None bars are skipped silently and uncounted.
+Fix: extend validation (or a pre-store gate) to record events for: high<low; high<max(open,close);
+low>min(open,close); price ≤ 0; volume < 0; duplicate (ticker,dt); |1-day close move| > 40% with NO
+corporate action (severity review); zero-volume streaks ≥3 days on tier-1/2. Count and report
+skipped-None bars per run. Tighten max_stale_days for tier-1/2 to 2 (blocker), keep 5 for lower tiers.
+DoD: fixture with each malformed-bar class produces exactly the expected quality events; clean fixture
+produces 0; skipped-None count in ingest summary; ledger freshness gate reflects the tighter threshold.
+
+## P1 — VALIDATION STATISTICS (stop weak strategies from reaching candidate)
+
+### VAL-1 — Minimum OOS evidence before `survives_oos`  [Tier S]
+Problem: survives_oos passes on OOS Sharpe alone — a single OOS trade can promote to candidate; no
+trade-count floor exists.
+Fix: add min_oos_trades (default 20) and min_is_trades (default 60) as governed config with the same
+"may only increase without human review" ratchet used for costs. Record oos_trades/is_trades in the
+verdict reason on failure.
+DoD: fixture with 5 OOS trades and high Sharpe → survives_oos=false, reason insufficient_oos_trades;
+fixture with ≥20 passes; ratchet tested; suite green.
+
+### VAL-2 — Rolling walk-forward instead of single terminal holdout  [Tier S, sliced]
+Problem: OOS = last 63 exit dates once; one favorable terminal regime can pass a fragile strategy.
+Fix: k anchored expanding-window folds (e.g. 4×63d). survives_oos requires pooled OOS Sharpe ≥ threshold
+AND ≥3/4 folds individually non-negative. Persist per-fold results in the backtest report JSON.
+DoD: fixture where only fold 4 is strong → fails; uniform-edge fixture passes; per-fold array present;
+existing single-holdout callers migrated.
+
+### VAL-3 — Multiple-testing discipline  [Tier S]
+Problem: nothing tracks how many strategy/param variants were tried; some will pass OOS by luck.
+Fix: strategy_trials counter table incremented per backtest per family; trials-per-family in the ledger;
+deterministic deflation rule (e.g. min_oos_sharpe + 0.1×log2(trials)), configurable and ratcheted.
+DoD: families with 1 vs 32 trials face measurably different thresholds in a test; counter increments
+exactly once per run (idempotent re-run doesn't double).
+
+### VAL-4 — Survivorship-bias containment  [Tier S now, Tier B for point-in-time data]
+Problem: universe seeds from CURRENT index membership; backtests only see survivors; results inflated.
+Fix now: stamp every backtest report with universe_asof + survivorship_bias=true; never delete a
+removed ticker's price history; ledger discloses the caveat so Sentinel/Yang see it on every candidate.
+Fix later (Tier B rec): point-in-time constituent data source with exact vendor/dataset/cost.
+DoD: new backtests carry the stamp; removed-ticker fixture retains history after universe refresh;
+Tier B recommendation filed with concrete options.
+
+## P2 — CLOSE THE LEARNING LOOP (this is "gets better over time")
+
+### LRN-1 — Track MAE + entry/exit efficiency in the paper ledger  [Tier S]
+Problem: max_favorable_excursion exists but max ADVERSE excursion does not — stop quality (the most
+learnable parameter) cannot be evaluated; no exit-efficiency measure.
+Fix: add max_adverse_excursion, exit_efficiency (realized/MFE), stop_distance_atr columns
+(non-destructive ADD COLUMN) to paper trades in Postgres; compute daily from EOD bars.
+DoD: columns exist; fixture trade's MAE/MFE/exit_efficiency computed correctly against known bars;
+recompute idempotent; scorecard displays all three.
+
+### LRN-2 — Wire `rule_changes_needed` / `jonah_research_priorities` to consumers  [Tier S]
+Problem: weekly_scorecard generates lessons and research priorities that NOTHING consumes — the
+learning loop is open.
+Fix: (a) persist them to a lessons table (id, week, kind, text, status open/adopted/rejected, evidence);
+(b) the daily optimizer reads open lessons in Phase 2 as planning candidates; (c) Jonah's deterministic
+context script includes current jonah_research_priorities; (d) adopting/rejecting requires recorded
+evidence.
+DoD: scorecard run yields lessons rows; optimizer report provably lists open lessons among candidates;
+Jonah context emits the priorities block; status transitions tested.
+
+### LRN-3 — Expectation-vs-reality reconciliation  [Tier S]
+Problem: paper outcomes are never compared to the backtest stats that justified the strategy; drift
+between promised and realized edge is invisible.
+Fix: nightly deterministic job comparing per-strategy realized paper metrics (win rate, avg R,
+expectancy, realized slippage vs the assumed bps) against latest backtest OOS stats; write
+strategy_drift rows; breach of a governed tolerance (e.g. realized expectancy < 50% of OOS over ≥20
+trades) auto-demotes approved → candidate via the EXISTING monitoring demotion path, recording why.
+DoD: drift fixture → demotion event with reason expectation_drift; within-tolerance fixture → no
+action; realized-vs-assumed slippage reported.
+
+### LRN-4 — Regime tagging for context, not prediction  [Tier S, later]
+Deterministic regime labels (SPY 200-day trend up/down, realized-vol tercile) stamped on every
+signal/setup/paper trade so the scorecard can slice performance by regime. LLMs may INTERPRET slices;
+they never generate numeric edge.
+DoD: labels computed deterministically from stored bars; every new setup row carries them; scorecard
+groups by regime; recompute idempotent.
+
+## P3 — SOURCE ROBUSTNESS
+
+### DQ-4 — Cross-source close reconciliation  [Tier S]
+Problem: multiple price sources exist but are never compared; a bad primary print flows through.
+Fix: weekly no_agent job sampling N tier-1/2 tickers × last 5 closes across primary vs fallback
+(respecting the fallback request budget); mismatch > 25bps → quality event severity review; persistent
+mismatch → blocker.
+DoD: injected-mismatch fixture produces the event; agreement fixture none; per-week request cap
+respected in test; results in ledger.
+
+### DQ-5 — Source failover policy + coverage metric  [Tier S config; any new vendor = Tier B]
+Problem: fallback is disabled by default (max_tickers 0) and only 30-day; a primary outage stalls
+freshness silently until the 5-day blocker.
+Fix: enable bounded fallback for tier-1/2 (e.g. max 25 tickers/day) via governed config; ledger gains
+ingest_source_mix (bars by source, fallback activations); report line on any fallback day. A paid
+second source, if warranted, is a Tier B rec with vendor/plan/cost.
+DoD: simulated primary failure → fallback fetches within cap and ledger shows source mix; cap tested.
+
+### DQ-6 — Ledger truthfulness upgrades  [Tier S]
+Add to the visible progress ledger: earnings_coverage_pct (DQ-2), unresolved_split_audits (DQ-1),
+bar_quality_events_7d by severity (DQ-3), ingest_source_mix (DQ-5), survivorship_disclosure (VAL-4),
+lessons_open (LRN-2), strategy_drift_flags (LRN-3). The ledger is the loop's memory — these make the
+new rails visible and gradeable.
+DoD: --json emits every new field correctly on fixtures; markdown renders them; optimizer KPI emission
+includes them in loop_metrics.
+
+## SEQUENCING & METRIC TARGETS (feed loop_metrics)
+Order: DQ-1 → DQ-2 → DQ-3 → VAL-1 → LRN-1 → LRN-2 → VAL-2 → LRN-3 → DQ-4 → DQ-5 → VAL-3 → VAL-4 →
+LRN-4 → DQ-6 (interleave DQ-6 fields as their producers land).
+Targets: unresolved_split_audits=0; earnings_coverage_pct≥90 (tier 1/2); bar_quality_blockers_7d=0;
+min_oos_trades_gate=on; lessons_open trending consumed (adopted+rejected > open); strategy_drift_flags
+acted on within 1 cycle; ingest_source_mix shows fallback exercised ≥1×/month.
+Reminder: no numeric thresholds above may be LOOSENED without human review (direction ratchet), and
+none of this authorizes trade execution or strategy approval — those remain human-only.
+
 ## 2026-06-19 daily run
 
 Snapshot/conflict check:
