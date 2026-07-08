@@ -36,6 +36,38 @@ DB = Path('/root/.hermes/wolfy/wolfy.db')
 SYNC = Path('/root/.hermes/wolfy/sync_sqlite_to_postgres.py')
 CLI = Path('/root/.hermes/wolfy/wolfy_agent_cli.py')
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
+BUDGET_GATE = Path('/root/.hermes/wolfy/guardian/budget_gate.py')
+
+
+def budget_wake_gate() -> bool:
+    """Return False after emitting a cron wakeAgent=false gate when budget blocks."""
+    if os.environ.get('WOLFY_SKIP_BUDGET_GATE') == '1':
+        return True
+    if not BUDGET_GATE.exists():
+        print('Budget gate: missing; Jonah blocked, do not spend research tokens.')
+        print('{"wakeAgent": false, "reason": "budget_gate_missing"}')
+        return False
+    try:
+        proc = subprocess.run(
+            ['python3', str(BUDGET_GATE), '--no-record'],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+            check=False,
+        )
+    except Exception as exc:
+        print(f'Budget gate: error {type(exc).__name__}: {exc}; Jonah blocked, do not spend research tokens.')
+        print('{"wakeAgent": false, "reason": "budget_gate_error"}')
+        return False
+    gate_output = ' '.join((proc.stdout or '').split())
+    if proc.returncode == 0 and gate_output.startswith('BUDGET=ok'):
+        print(f'Budget gate: {gate_output}')
+        return True
+    reason = gate_output or f'exit={proc.returncode}'
+    print(f'skipped: budget {reason}')
+    print('{"wakeAgent": false, "reason": "budget"}')
+    return False
 
 
 def maybe_sync_postgres() -> str:
@@ -158,6 +190,8 @@ def claim_postgres_task(task: sqlite3.Row | None, source: sqlite3.Row | None) ->
 
 def main() -> None:
     """Postgres-only Jonah context. SQLite is retired for live knowledge runs."""
+    if not budget_wake_gate():
+        return
     print('Jonah knowledge-build context')
     print('Wolfy DB=Postgres primary; SQLite retired for live Jonah context')
     print_eod_governance()

@@ -1,16 +1,16 @@
 {
-  "change": "OWS-1 bounded slice: Jonah cron wrapper budget wake gate",
-  "snapshot_path": "/root/.hermes/wolfy/guardian/known_good/20260707T061742Z",
+  "change": "OWS-1 Jonah context budget wake gate after 20260708 rollback",
+  "snapshot_path": "/root/.hermes/wolfy/guardian/known_good/20260708T061822Z",
   "touched_files": [
-    "/root/.hermes/scripts/wolfy_hourly_knowledge_context.py"
+    "/root/.hermes/wolfy/hourly_knowledge_context.py"
   ],
   "validation": [
-    "python -m py_compile scripts/wolfy_hourly_knowledge_context.py",
-    "simulated over-cap wrapper run -> skipped: budget + wakeAgent=false, exit 0",
-    "normal smoke wrapper run -> context emitted, exit 0",
+    "python3 -m py_compile wolfy/hourly_knowledge_context.py scripts/wolfy_hourly_knowledge_context.py",
+    "WOLFY_BUDGET_SIMULATED_TOKENS_TODAY=999999 WOLFY_BUDGET_IGNORE_AUTH=1 python3 scripts/wolfy_hourly_knowledge_context.py -> skipped: budget + wakeAgent=false, exit 0",
+    "WOLFY_CONTEXT_SMOKE=1 WOLFY_BUDGET_IGNORE_AUTH=1 python3 scripts/wolfy_hourly_knowledge_context.py -> Budget ok + Jonah context + SMOKE=true, exit 0",
     "config.yaml YAML parse + cron/jobs.json JSON parse",
     "hermes cron list"
   ],
-  "created_at": "2026-07-07T06:21:00Z",
-  "expires_at": "2026-07-08T06:15:00Z"
+  "created_at": "2026-07-08T06:20:00Z",
+  "expires_at": "2026-07-09T06:15:00Z"
 }
