@@ -12,6 +12,16 @@ Durable trail for the daily Wolfy/Hermes optimization planner. Items here are pl
 - Postgres is live source of truth; run `/root/.hermes/wolfy/check_postgres_requirements.py` before Postgres package/schema maintenance.
 - Daily optimization runs should send a short completion report when done: what changed, verification, commit/KPI, blockers/next action only.
 
+## Explicit user-directed data-load control TODO — 2026-07-02
+
+### ONE-TIME Massive 2-year history bootstrap; daily ingest must stay incremental-only
+
+- Status: queued in Postgres `agent_tasks` as task `3281` with fingerprint `one-time-massive-history-bootstrap-incremental-daily-20260702`.
+- Requirement: the initial two-calendar-year Massive OHLCV history load is a bootstrap/backfill task only. Normal daily EOD pipelines must not re-pull two years every day.
+- Current code guard to preserve: `/root/.hermes/wolfy/eod_price_features.py` uses `_fetch_incremental_massive_bars()`: full `days=730` is only used when a ticker is missing/under `min_history_bars`; otherwise the fetch starts at `latest_dt + 1` or skips as `already_current`.
+- Required cleanup: make the bounded tiered history backfill job visibly one-time/run-until-complete and auto-disable/no-op once active targets reach `DEPTH_READY_BARS`/`min_history_bars=495`; keep daily shards focused on current/missing-day ingest.
+- DoD: coverage query shows completed/remaining bootstrap universe; backfill job completion behavior is verified; daily shard test/dry-run proves already-loaded tickers do not fetch full 730-day history; visible ledger separates `bootstrap_remaining` from daily freshness.
+
 ## Data & Learning Backlog (DQ/VAL/LRN) — user-approved 2026-07-01
 
 Standing backlog for the daily optimizer: consume these as Phase 2 planning candidates alongside the
@@ -566,6 +576,17 @@ Snapshot/conflict check:
 - RECOMMENDATIONS FOR HUMAN: expect Tier B asks from R-1 point-in-time constituents, R-2 earnings/events source if the current data plan lacks it, R-3 fallback LLM provider/API key, and any new package/vendor for R-4 backtester validation; options paper support should likely defer until equity strategies have approved evidence.
 - NEXT ACTION: the daily optimizer's next implementation task is DQ-1 unless Priority-1 data health is broken; WATCH-1 should run before or alongside it if quota state regresses.
 
+## 2026-07-08 daily optimizer implementation run
+
+- Time: 2026-07-08 02:15 ET / 06:15 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py` returned `BUDGET=ok tokens_today=85746 cap=200000 headroom_pct=57.13`, so implementation was allowed.
+- Review finding: the prior probation `OWS-1 bounded slice: Jonah cron wrapper budget wake gate` expired and `config_guardian.py` restored known-good config/jobs at 2026-07-08T06:16:31Z. Treat that exact wrapper-only attempt as a failed pattern; do not retry it identically.
+- Implemented replacement bounded slice: added the budget wake gate inside `/root/.hermes/wolfy/hourly_knowledge_context.py` before Jonah context/task-claim output. When `budget_gate.py` blocks, Jonah now prints `skipped: budget ...` and the final JSON line `{"wakeAgent": false, "reason": "budget"}`, which Hermes cron parses to skip the LLM run with exit 0.
+- Snapshot for self-modification protocol: `/root/.hermes/wolfy/guardian/known_good/20260708T061822Z`.
+- Validation: py_compile passed; simulated over-cap wrapper run emitted `skipped: budget` + `wakeAgent=false` and exited 0; normal smoke wrapper emitted `Budget gate: BUDGET=ok`, Jonah context, and `SMOKE=true`; config YAML and cron JSON parsed; `hermes cron list` succeeded; `config_guardian.py` returned `GUARDIAN=ok ... probation_active`.
+- Probation: `/root/.hermes/wolfy/guardian/probation.json` expires at 2026-07-09T06:15:00Z.
+- NEXT ACTION: next optimizer run should confirm the probation if Jonah/optimizer schedule stayed healthy; if so, continue OWS-1 wiring for remaining LLM jobs or OWS-4 cadence reduction, one reversible change at a time.
+
 ## 2026-07-02 daily optimizer plan-only run
 
 - Time: 2026-07-02 02:15 ET / 06:15 UTC.
@@ -574,3 +595,12 @@ Snapshot/conflict check:
 - Review finding: OWS-1 is not fully wired despite `budget_gate.py` existing. `cron/jobs.json` search showed optimizer prompt mentions the gate, but Jonah and other non-`no_agent` LLM jobs do not contain `budget_gate`/`skipped: budget`; Jonah continued running every 20 minutes while the budget gate was over cap.
 - State: created Postgres `agent_tasks` id `3243` (`Complete OWS-1 budget gate wiring for LLM cron jobs`) and `agent_runs` id `195339`; recorded `jobs_skipped_by_budget=1`, `parallel_jobs_cap=1`, `max_turns=90`, `gateway_healthy=1`, `config_rollbacks=0`, `human_approval_pending=0` metrics.
 - NEXT ACTION: once budget headroom is OK, complete OWS-1 before OWS-4/OWS-5: snapshot config/jobs, wire Jonah and remaining LLM cron jobs to consult `wolfy/guardian/budget_gate.py` and print `skipped: budget` before any LLM spend, verify simulated over-cap no-ops, then validate `hermes cron list` and set probation if jobs/config changed.
+
+## 2026-07-09 daily optimizer plan-only run
+
+- Time: 2026-07-09 02:15 ET / 06:15 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py` returned `BUDGET=block token_cap_exceeded tokens_today=279759 cap=200000`; per optimizer rules this run made no code/config/cron implementation change.
+- Guardian/probation: the prior Jonah context budget gate probation expired at this run boundary. `config_guardian.py` restored the latest known-good snapshot `/root/.hermes/wolfy/guardian/known_good/20260709T060157Z` and cleared probation. The restored tree still contains the Jonah context budget gate; `python3 scripts/wolfy_hourly_knowledge_context.py` emitted `skipped: budget ...` and `{"wakeAgent": false, "reason": "budget"}` with exit 0.
+- State: recorded plan-only task/run in Postgres and KPI rows for budget skip, token headroom, gateway health, config rollback, max_turns, and concurrency cap.
+- LESSON: optimizer probation expiry equals scheduled start time, so a normal run can arrive after expiry and let the guardian clear probation first. Do not treat this specific restoration as functional regression because the protected Jonah gate remained present and verified.
+- NEXT ACTION: when budget recovers, continue OWS-1 wiring for remaining LLM jobs or choose OWS-4 Jonah cadence reduction, one reversible change at a time; consider a later bounded guardian improvement to add a small confirmation grace window if repeated false rollbacks occur.

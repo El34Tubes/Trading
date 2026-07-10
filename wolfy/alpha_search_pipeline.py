@@ -188,6 +188,7 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
           highest_source_quality NUMERIC(5,3) NOT NULL DEFAULT 0,
           suspicious_action TEXT NOT NULL DEFAULT 'clear',
           suspicious_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+          risk_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
           catalyst_window TEXT,
           social_context TEXT,
           filing_context TEXT,
@@ -204,6 +205,8 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_pg_alpha_leads_ticker_status ON alpha_leads(ticker, status, updated_at DESC)",
+        "ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS risk_flags JSONB NOT NULL DEFAULT '[]'",
+        "UPDATE alpha_leads SET risk_flags=COALESCE(NULLIF(risk_flags, '[]'::jsonb), raw_payload->'risk_flags', suspicious_flags, raw_payload->'suspicious_flags', '[]'::jsonb) WHERE risk_flags IS NULL OR risk_flags = '[]'::jsonb",
         "ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS evidence_quality NUMERIC(5,3)",
         "UPDATE alpha_leads SET evidence_quality=COALESCE(evidence_quality, evidence_quality_score) WHERE evidence_quality IS NULL",
         "ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS market_context JSONB",

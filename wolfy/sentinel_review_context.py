@@ -3,6 +3,14 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+WOLFY_DIR = Path('/root/.hermes/wolfy')
+if str(WOLFY_DIR) not in sys.path:
+    sys.path.insert(0, str(WOLFY_DIR))
+
+from budget_wake_gate import budget_wake_gate
 
 try:
     import psycopg
@@ -55,15 +63,15 @@ def start_sentinel_run(recs: list[dict]) -> tuple[int | None, int | None]:
             )
             claim = claim_next_task(conn, agent_name='Sentinel', task_type='recommendation_review', source_fingerprint=fingerprint)
             if claim is None:
-                if ensured.status == 'completed':
-                    summary = f'Sentinel review task already completed; no duplicate review work needed. task_id={ensured.id}'
+                if ensured.status in {'completed', 'blocked'}:
+                    summary = f'Sentinel review task already {ensured.status}; no duplicate review work needed. task_id={ensured.id}'
                     run_id = start_agent_run(conn, agent_name='Sentinel', role='risk_reviewer', job_id='sentinel-post-wolfy', task_id=ensured.id, status='completed', summary=summary)
                     if finish_agent_run is not None:
                         finish_agent_run(conn, run_id, status='completed', summary=summary, records_created=0)
                     print('Postgres agent task claim: CLAIMED=false')
                     print(f'AGENT_TASK_ID={ensured.id} TASK_STATUS={ensured.status} SOURCE_FINGERPRINT={fingerprint}')
                     print(f'AGENT_RUN_ID={run_id} STATUS=completed')
-                    print('Instruction: existing Sentinel review task is already completed; do not spend duplicate review tokens.')
+                    print(f'Instruction: existing Sentinel review task is already {ensured.status}; do not spend duplicate review tokens.')
                     return run_id, None
                 run_id = start_agent_run(conn, agent_name='Sentinel', role='risk_reviewer', job_id='sentinel-post-wolfy', task_id=ensured.id, status='blocked', summary=f'Duplicate/already claimed Sentinel review task; task status={ensured.status}.')
                 if finish_agent_run is not None:
@@ -92,6 +100,8 @@ def start_sentinel_run(recs: list[dict]) -> tuple[int | None, int | None]:
 
 
 def main() -> None:
+    if not budget_wake_gate(label='Sentinel'):
+        return
     print('Sentinel recommendation-review context')
     if psycopg is None:
         print('Postgres primary unavailable: psycopg import failed. Sentinel must block; do not fall back to SQLite for live review.')

@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import sys
 
 import psycopg
 
+WOLFY_DIR = Path('/root/.hermes/wolfy')
+if str(WOLFY_DIR) not in sys.path:
+    sys.path.insert(0, str(WOLFY_DIR))
+
+from budget_wake_gate import budget_wake_gate
 from wolfy_agent_coordination import connect, start_agent_run
 from alpha_search_pipeline import REQUIRED_SECTIONS, record_alpha_payload, status_snapshot
 from eod_governance import print_eod_governance
@@ -67,6 +73,8 @@ def persist_script_first_snapshot(*, counts: dict, candidates: list[dict], alpha
 
 
 def main() -> None:
+    if not budget_wake_gate(label='Alpha Search'):
+        return
     with psycopg.connect(PG_DSN) as pg, pg.cursor() as cur:
         notes = fetch_dicts(cur, """
             SELECT title AS topic, left(body, 300) AS summary, array_to_string(topic_tags, ',') AS tags

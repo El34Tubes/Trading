@@ -361,6 +361,8 @@ When the user asks to "commit everything" in an operational setup directory (Her
 
 Detailed checklist: `references/config-repo-snapshot-workflow.md`.
 
+For phone/mobile source-code handoff, prefer a verified safe GitHub snapshot over email or multipart chat attachments. If the user says they cannot see/download split files and asks how to get source to a phone, commit/push the safe source snapshot, verify remote `HEAD`, and send the repo URL plus commit SHA. See `references/mobile-source-handoff.md` for the exact handoff pattern and ZIP-splitting fallback.
+
 ## Useful PR Commands Reference
 
 | Action | gh | git + curl |

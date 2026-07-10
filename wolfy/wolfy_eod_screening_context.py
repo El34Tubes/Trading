@@ -12,12 +12,15 @@ WOLFY_DIR = Path('/root/.hermes/wolfy')
 sys.path.insert(0, str(WOLFY_DIR))
 
 from eod_governance import print_eod_governance  # noqa: E402
+from budget_wake_gate import budget_wake_gate  # noqa: E402
 
 DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
 NY = ZoneInfo('America/New_York')
 
 
 def main() -> int:
+    if not budget_wake_gate(label='Wolfy EOD screening'):
+        return 0
     import psycopg
     print_eod_governance()
     now = dt.datetime.now(NY)

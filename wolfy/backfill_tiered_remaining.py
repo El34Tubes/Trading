@@ -39,13 +39,21 @@ def remaining_tickers(conn, tier: str, limit: int, min_history_bars: int) -> lis
         SELECT t.symbol
         FROM universe_backfill_targets t
         LEFT JOIN (
-          SELECT ticker, count(*) AS bars
+          SELECT ticker, count(*) AS bars, max(dt) AS latest_dt
           FROM prices
           GROUP BY ticker
         ) p ON p.ticker = t.symbol
         WHERE t.active
           AND t.tier = %s
-          AND coalesce(p.bars, 0) < %s
+          AND coalesce(t.enabled, true)
+          AND coalesce(t.backfill_enabled, true)
+          AND (
+            coalesce(p.bars, 0) = 0
+            OR (
+              coalesce(p.bars, 0) < %s
+              AND coalesce(p.latest_dt, DATE '1900-01-01') < CURRENT_DATE - INTERVAL '5 days'
+            )
+          )
         ORDER BY t.priority, t.symbol
         LIMIT %s
         """,

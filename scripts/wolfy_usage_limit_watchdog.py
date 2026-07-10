@@ -18,6 +18,8 @@ HOME = Path('/root/.hermes')
 STATE_PATH = HOME / 'wolfy' / 'usage_limit_watchdog_state.json'
 LOG_DIR = HOME / 'logs'
 
+SEEN_LIMIT = 20000
+
 # LLM-driven Wolfy desk jobs are useful only while the provider can actually
 # answer. During a provider usage-limit window, let script-only scanners and
 # watchdogs keep collecting state, but pause these LLM jobs so Discord does not
@@ -36,8 +38,12 @@ LLM_JOBS_TO_GATE = {
 PAUSE_REASON = 'auto-paused by Wolfy usage-limit watchdog; script-only jobs continue'
 
 # Avoid bare "429" because timestamps/char counts can contain 429. Require actual error context.
+# Also avoid generic words like "exhausted" by themselves: Hermes logs
+# `credential pool: no available entries (all exhausted or empty)` during and
+# after provider issues, but that line alone is not reliable quota evidence and
+# can create noisy post-reset alerts.
 PATTERN = re.compile(
-    r'(insufficient[_ -]?quota|quota exceeded|daily limit|usage limit|rate limit|ratelimit|too many requests|http\s*429|status\s*429|error.*429|429.*error|exhausted|payment / credit error|credit error|billing error)',
+    r'(insufficient[_ -]?quota|quota exceeded|daily limit|usage limit|rate limit|ratelimit|too many requests|http\s*429|status\s*429|error.*429|429.*error|usage_limit_reached|payment / credit error|credit error|billing error)',
     re.I,
 )
 AUTH_LIMIT_PATTERN = re.compile(
@@ -78,6 +84,19 @@ def today_strings() -> list[str]:
     return [now.strftime('%Y-%m-%d'), now.strftime('%b %d'), now.strftime('%B %d')]
 
 
+def is_watchdog_relevant_log_line(line: str) -> bool:
+    """Return true only for system/provider limit evidence, not user text.
+
+    Discord/chat messages that say "rate limited" are logged in gateway and
+    conversation-turn records. Those should not retrigger the quota watchdog.
+    """
+    if 'gateway.run: inbound message:' in line:
+        return False
+    if 'conversation turn:' in line and ' msg=' in line:
+        return False
+    return bool(PATTERN.search(line))
+
+
 def scan_logs() -> list[str]:
     hits: list[str] = []
     today = today_strings()
@@ -89,7 +108,7 @@ def scan_logs() -> list[str]:
         except Exception:
             continue
         for line in lines:
-            if PATTERN.search(line) and (any(t in line for t in today) or not re.match(r'\d{4}-\d{2}-\d{2}', line)):
+            if is_watchdog_relevant_log_line(line) and (any(t in line for t in today) or not re.match(r'\d{4}-\d{2}-\d{2}', line)):
                 hits.append(f'{path.name}: {line[-500:]}')
     return hits
 
@@ -206,12 +225,19 @@ def gate_llm_jobs(state: dict, limited: bool, detail: str) -> list[str]:
 
 def main() -> None:
     state = load_state()
-    seen = set(state.get('seen', []))
+    # Preserve recency order. Do not sort before truncating: a lexicographic
+    # cutoff can immediately drop fresh low-valued digests and make the same
+    # old log lines alert every watchdog tick.
+    seen_order = list(dict.fromkeys(state.get('seen', [])))
+    seen = set(seen_order)
     new_hits = []
+    new_digests = []
     for hit in scan_logs():
         digest = hashlib.sha256(hit.encode()).hexdigest()[:16]
         if digest not in seen:
             seen.add(digest)
+            seen_order.append(digest)
+            new_digests.append(digest)
             new_hits.append(hit)
 
     limited, limit_detail = auth_limit_active()
@@ -219,7 +245,7 @@ def main() -> None:
         limited, limit_detail = log_limit_active()
     notices = gate_llm_jobs(state, limited, limit_detail)
 
-    state['seen'] = sorted(seen)[-5000:]
+    state['seen'] = seen_order[-SEEN_LIMIT:]
     state['last_checked_at'] = datetime.now().isoformat(timespec='seconds')
     save_state(state)
 

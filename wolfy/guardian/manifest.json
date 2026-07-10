@@ -1,7 +1,7 @@
 {
   "hashes": {
     "config.yaml": "e8291d9fc061939905c2ad7e7cd6307612b7119c40a47f6b630d7a982ce528d8",
-    "cron/jobs.json": "67e16003cc8e06e3308675e6416ba16e96bd0cc73b9e95cdc3ff00c6b3185269"
+    "cron/jobs.json": "3257c492d63056e54c22461e6bb6b37c586c24022cd8605664be58df65b0743b"
   },
-  "latest_snapshot": "/root/.hermes/wolfy/guardian/known_good/20260701T012759Z"
+  "latest_snapshot": "/root/.hermes/wolfy/guardian/known_good/20260710T015657Z"
 }

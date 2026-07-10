@@ -3,6 +3,14 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+WOLFY_DIR = Path('/root/.hermes/wolfy')
+if str(WOLFY_DIR) not in sys.path:
+    sys.path.insert(0, str(WOLFY_DIR))
+
+from budget_wake_gate import budget_wake_gate
 
 try:
     import psycopg
@@ -73,6 +81,8 @@ def start_yang_run(candidates: list[dict]) -> tuple[int, int | None]:
 
 
 def main() -> None:
+    if not budget_wake_gate(label='Yang'):
+        return
     print('Yang technical-analysis context')
     if psycopg is None:
         print('Postgres primary unavailable: psycopg import failed. Yang must block; do not fall back to SQLite for live technical context.')

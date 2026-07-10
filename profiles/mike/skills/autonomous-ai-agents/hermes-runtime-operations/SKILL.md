@@ -24,7 +24,7 @@ This is an operations/checklist skill, not a replacement for the bundled `hermes
    - Run quick direct probes for the items doctor complains about, e.g. `node --version`, `npm --version`, `rg --version`, or a Python import in the Hermes venv.
 
 2. Separate installable dependencies from credential/config gaps.
-   - Installable examples: `nodejs`, `npm`, `ripgrep`, optional Python packages such as `python-telegram-bot`.
+   - Installable examples: `nodejs`, `npm`, `ripgrep`, optional Python packages such as `python-telegram-bot` and data-analysis helpers such as `pandas` when agent/runtime scripts actually import them.
    - Credential/config examples: API keys, OAuth login, provider-specific tokens, Home Assistant/Spotify/Feishu setup, CDP endpoint configuration.
    - Do not describe unconfigured credentials as broken tools; report them as needing setup.
 
