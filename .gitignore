@@ -143,3 +143,6 @@ profiles/*/.skills_prompt_snapshot.json
 profiles/*/skills/.usage.json
 wolfy/guardian/manifest.json
 profiles/*/wolfy/guardian/manifest.json
+
+# Wolfy runtime backups
+wolfy/backups/

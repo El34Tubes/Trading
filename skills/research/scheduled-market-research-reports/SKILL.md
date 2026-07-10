@@ -228,8 +228,9 @@ When the user asks whether LLM usage limits are being hit or whether to increase
 5. Track per-agent usage in `agent_runs` when available: agent name, job id, status, input/output/total tokens, estimated cost, rows created, and blockers. For Wolfy's Postgres-backed desk, sync Hermes cron sessions from `~/.hermes/state.db.sessions` into `agent_runs` by parsing `cron_<job_id>_<timestamp>` session IDs, joining job names from `hermes --profile default cron list --all`, and upserting by `session_id`; see `references/wolfy-cron-usage-agent-runs-sync-2026-05-31.md`.
 6. Keep usage accounting/watchdog jobs script-only and quiet: capture helper stdout so normal runs emit nothing; only print when thresholds, quota/rate-limit events, or actual errors require user attention.
 7. If a limit/429 triggers, report it in the shortest useful form: event + timestamp only (user timezone when possible). Do **not** paste raw error logs, repeated matching lines, stack traces, or usage dashboards unless the user explicitly asks for detail. Then state the operational decision: which jobs remain paused/gated vs which script-only loops continue.
-8. Watchdog evidence must be fresh and anchored. Do not let undated historical traceback/payload lines count as today's active limit; do not echo raw quota-pattern substrings into watchdog output that will be rescanned next tick; reconcile `paused_llm_jobs` against actual cron job enabled/paused state before making claims. If watchdog state says limited but a minimal live provider probe succeeds, treat it as a stale-evidence repair path, not as proof the provider is down.
+8. Watchdog evidence must be fresh and anchored. Do not let undated historical traceback/payload lines count as today's active limit; trim or rotate stale 429/log evidence rather than repeatedly rescanning old raw payloads; do not echo raw quota-pattern substrings into watchdog output that will be rescanned next tick; reconcile `paused_llm_jobs` against actual cron job enabled/paused state before making claims. If watchdog state says limited but a minimal live provider probe succeeds, treat it as a stale-evidence repair path, not as proof the provider is down.
 9. If a limit triggers, alert the user and recommend: pause or reduce Jonah cadence, keep script-only watchdogs running, wait for provider reset, or switch model/provider if configured. Record zero-token analytical cron sessions as blocked usage-limit/startup evidence rather than claiming the underlying market-analysis scripts are broken.
+10. For regular GitHub checkpoints, commit source/config/docs/tests only after verification and leave runtime logs, caches, temp JSON, backups, known-good snapshots, and generated state ignored/untracked unless the user explicitly asks to version them. See `references/wolfy-knowledge-chunk-objective-audit-and-log-hygiene-2026-07-09.md` for the stale-429 hygiene and checkpoint report shape.
 
 Cadence rule of thumb for this user:
 
@@ -425,6 +426,13 @@ Postgres knowledge chunk verification pitfall:
   group by 1,2
   order by 3 desc;
   ```
+
+Knowledge/objective conflict-audit pattern:
+
+- When the user asks whether Wolfy's learning conflicts with the technical swing-trading objective, answer from database evidence, not vibes. Count technical setup chunks, EOD/research-only gate language, broader catalyst/fundamental/risk-context chunks, and potential conflict terms such as live/auto execution, intraday/day-trading instructions, crypto/forex/futures, shorts, and unapproved strategy recommendations.
+- Distinguish **direct conflict** from **retrieval dilution**. If conflict-looking terms appear as risk gates, provenance, SEC fields, or explicit no-action language, say they are context/gates rather than contrary instructions. If they appear as instructions to trade outside the constitution, recommend quarantine/relabeling.
+- Always report `strategies.status` and whether any strategy is `approved`; if none are approved, the correct conclusion is research/watch-only even if the knowledge base is useful.
+- See `references/wolfy-knowledge-chunk-objective-audit-and-log-hygiene-2026-07-09.md` for the compact audit table shape and wording.
 
 Guarded Postgres maintenance rule:
 

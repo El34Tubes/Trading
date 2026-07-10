@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -16,6 +17,38 @@ from psycopg.types.json import Jsonb
 
 SQLITE_DB = Path('/root/.hermes/wolfy/wolfy.db')
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
+
+# User policy, 2026-07-09: keep vector/token retrieval focused on technical
+# swing-trading strategy and standing guardrails. Fundamental/catalyst/filing
+# source rows may remain as audit/source data, but should not be reinserted into
+# knowledge_chunks where they consume retrieval context.
+TECH_RE = re.compile(
+    r"\b(technical|volume|trend|momentum|relative strength|moving average|\bSMA\b|\bEMA\b|\bATR\b|\bRSI\b|\bMACD\b|breakout|pullback|setup|trigger|stop|invalidation|support|resistance|volatility|consolidation|base|stage|Weinstein|Darvas|chart|gap|mean reversion|wedge|channel|entry|exit|risk/reward|position[- ]size|R multiple|sector rotation|market breadth|52[- ]week|high tight flag|vwap|trendline|trailing stop|Yang|Minervini)\b",
+    re.I,
+)
+CORE_GUARDRAIL_RE = re.compile(
+    r"\b(eod|end[- ]of[- ]day|no[-_ ]?(auto|trade|action|recommendation)|fact[-_ ]?vs[-_ ]?judgment|research[-_ ]only|risk control|data quality|backtest|evaluation|portfolio|universe|Robinhood|PDT|pattern day|long[- ]only|max three|human approval|guardrail|approved strategy|do not|must not|cannot|quality gate)\b",
+    re.I,
+)
+EXPLICIT_NONTECH_RE = re.compile(
+    r"\b(SEC|filing|10[- ]?K|10[- ]?Q|8[- ]?K|Form [A-Z0-9-]+|13F|13D|13G|Section 16|insider|ownership|shareholder|governance|compensation|accounting|financial statement|balance sheet|cash flow|cashflow|dcf|revenue|earnings|ARR|EBITDA|valuation|Graham|margin of safety|analyst|rating|price target|merger|acquisition|contract|guidance|gross margin|product|catalyst|dilution|warrant|offering|convertible|debt|covenant|auditor|legal proceedings|MD&A)\b",
+    re.I,
+)
+
+
+def keep_for_technical_retrieval(source_table: str, body: str) -> bool:
+    """Return whether a row belongs in knowledge_chunks retrieval.
+
+    Source tables remain intact; this only limits the vector/trigram retrieval
+    surface to technical setups and broad account/risk guardrails.
+    """
+    if source_table not in {'sqlite.knowledge_notes', 'sqlite.strategy_rules'}:
+        return False
+    is_technical = bool(TECH_RE.search(body))
+    is_guardrail = bool(CORE_GUARDRAIL_RE.search(body))
+    is_explicit_nontech = bool(EXPLICIT_NONTECH_RE.search(body))
+    protected_yang_technical = body.lstrip().startswith(('Rule: Yang', 'Topic: Yang')) and is_technical
+    return (is_technical or is_guardrail) and not (is_explicit_nontech and not protected_yang_technical)
 
 
 def fingerprint(*parts: object) -> str:
@@ -48,15 +81,21 @@ def main() -> None:
                     ('Jonah', 'knowledge_note', r['topic'], body, fp, [t.strip() for t in (r['tags'] or '').split(',') if t.strip()], r['confidence'] or 0.5, 'durable'),
                 )
                 artifact_id = cur.fetchone()[0]
-                cur.execute(
-                    """
-                    INSERT INTO knowledge_chunks (artifact_id, source_table, source_id, chunk_index, content, metadata)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (source_table, source_id, chunk_index)
-                    DO UPDATE SET content=EXCLUDED.content, metadata=EXCLUDED.metadata
-                    """,
-                    (artifact_id, 'sqlite.knowledge_notes', str(r['id']), 0, body, Jsonb({'source': 'sqlite', 'table': 'knowledge_notes'})),
-                )
+                if keep_for_technical_retrieval('sqlite.knowledge_notes', body):
+                    cur.execute(
+                        """
+                        INSERT INTO knowledge_chunks (artifact_id, source_table, source_id, chunk_index, content, metadata)
+                        VALUES (%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (source_table, source_id, chunk_index)
+                        DO UPDATE SET content=EXCLUDED.content, metadata=EXCLUDED.metadata
+                        """,
+                        (artifact_id, 'sqlite.knowledge_notes', str(r['id']), 0, body, Jsonb({'source': 'sqlite', 'table': 'knowledge_notes'})),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM knowledge_chunks WHERE source_table=%s AND source_id=%s",
+                        ('sqlite.knowledge_notes', str(r['id'])),
+                    )
                 inserted += 1
 
             rules = src.execute('SELECT * FROM strategy_rules ORDER BY id').fetchall()
@@ -75,15 +114,21 @@ def main() -> None:
                     ('Jonah', 'strategy_rule', r['rule_name'], body, fp, [r['rule_type']], 0.75, 'durable'),
                 )
                 artifact_id = cur.fetchone()[0]
-                cur.execute(
-                    """
-                    INSERT INTO knowledge_chunks (artifact_id, source_table, source_id, chunk_index, content, metadata)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (source_table, source_id, chunk_index)
-                    DO UPDATE SET content=EXCLUDED.content, metadata=EXCLUDED.metadata
-                    """,
-                    (artifact_id, 'sqlite.strategy_rules', str(r['id']), 0, body, Jsonb({'source': 'sqlite', 'table': 'strategy_rules'})),
-                )
+                if keep_for_technical_retrieval('sqlite.strategy_rules', body):
+                    cur.execute(
+                        """
+                        INSERT INTO knowledge_chunks (artifact_id, source_table, source_id, chunk_index, content, metadata)
+                        VALUES (%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (source_table, source_id, chunk_index)
+                        DO UPDATE SET content=EXCLUDED.content, metadata=EXCLUDED.metadata
+                        """,
+                        (artifact_id, 'sqlite.strategy_rules', str(r['id']), 0, body, Jsonb({'source': 'sqlite', 'table': 'strategy_rules'})),
+                    )
+                else:
+                    cur.execute(
+                        "DELETE FROM knowledge_chunks WHERE source_table=%s AND source_id=%s",
+                        ('sqlite.strategy_rules', str(r['id'])),
+                    )
                 inserted += 1
 
             try:
@@ -112,13 +157,8 @@ def main() -> None:
                 )
                 artifact_id = cur.fetchone()[0]
                 cur.execute(
-                    """
-                    INSERT INTO knowledge_chunks (artifact_id, source_table, source_id, chunk_index, content, metadata)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (source_table, source_id, chunk_index)
-                    DO UPDATE SET content=EXCLUDED.content, metadata=EXCLUDED.metadata
-                    """,
-                    (artifact_id, 'sqlite.insider_leads', str(r['id']), 0, body, Jsonb({'source': 'sqlite', 'table': 'insider_leads', 'ticker': r['ticker']})),
+                    "DELETE FROM knowledge_chunks WHERE source_table=%s AND source_id=%s",
+                    ('sqlite.insider_leads', str(r['id'])),
                 )
                 inserted += 1
             try:
@@ -149,13 +189,8 @@ def main() -> None:
                 )
                 artifact_id = cur.fetchone()[0]
                 cur.execute(
-                    """
-                    INSERT INTO knowledge_chunks (artifact_id, source_table, source_id, chunk_index, content, metadata)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (source_table, source_id, chunk_index)
-                    DO UPDATE SET content=EXCLUDED.content, metadata=EXCLUDED.metadata
-                    """,
-                    (artifact_id, 'sqlite.alpha_leads', str(r['id']), 0, body, Jsonb({'source': 'sqlite', 'table': 'alpha_leads', 'ticker': r['ticker']})),
+                    "DELETE FROM knowledge_chunks WHERE source_table=%s AND source_id=%s",
+                    ('sqlite.alpha_leads', str(r['id'])),
                 )
                 cur.execute(
                     """
