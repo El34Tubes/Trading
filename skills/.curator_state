@@ -1,9 +1,0 @@
-{
-  "last_report_path": "/root/.hermes/logs/curator/20260621-050652",
-  "last_run_at": "2026-06-21T05:06:52.565568+00:00",
-  "last_run_duration_seconds": 33.174409,
-  "last_run_summary": "auto: no changes; llm: Scanned the full candidate set and inspected both complete skill packages (SKILL.md plus support files):\n\n- `hermes-runtime-operations`\n  - Already a class-level umbrella for Hermes runtime validation, dependency repair, smoke tests, cron/p…",
-  "last_run_summary_shown_at": null,
-  "paused": false,
-  "run_count": 3
-}
