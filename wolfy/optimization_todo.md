@@ -604,3 +604,11 @@ Snapshot/conflict check:
 - State: recorded plan-only task/run in Postgres and KPI rows for budget skip, token headroom, gateway health, config rollback, max_turns, and concurrency cap.
 - LESSON: optimizer probation expiry equals scheduled start time, so a normal run can arrive after expiry and let the guardian clear probation first. Do not treat this specific restoration as functional regression because the protected Jonah gate remained present and verified.
 - NEXT ACTION: when budget recovers, continue OWS-1 wiring for remaining LLM jobs or choose OWS-4 Jonah cadence reduction, one reversible change at a time; consider a later bounded guardian improvement to add a small confirmation grace window if repeated false rollbacks occur.
+
+## 2026-07-11 daily optimizer plan-only run
+
+- Time: 2026-07-11 02:16 ET / 06:16 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py` returned `BUDGET=block token_cap_exceeded tokens_today=309142 cap=200000`; per optimizer rules this run made no code/config/cron implementation change.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;hermes_cron_list_ok;no_probation` and recorded `gateway_healthy=1`, `config_rollbacks=0`.
+- State: created/claimed Postgres task `3544` (`Plan-only optimizer budget block 2026-07-11`) and run `295717`; recorded `jobs_skipped_by_budget=1`, `parallel_jobs_cap=1`, `max_turns=90`, `human_approval_pending`, and trailing `iteration_success_rate` metrics.
+- NEXT ACTION: wait for budget headroom to recover, then implement one bounded Tier S slice only. Preferred next slice remains OWS-1/OWS-4 control-plane work: finish budget-gate no-op coverage for remaining LLM jobs or reduce Jonah cadence to hourly under the self-modification protocol.
