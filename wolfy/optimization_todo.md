@@ -612,3 +612,11 @@ Snapshot/conflict check:
 - Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;hermes_cron_list_ok;no_probation` and recorded `gateway_healthy=1`, `config_rollbacks=0`.
 - State: created/claimed Postgres task `3544` (`Plan-only optimizer budget block 2026-07-11`) and run `295717`; recorded `jobs_skipped_by_budget=1`, `parallel_jobs_cap=1`, `max_turns=90`, `human_approval_pending`, and trailing `iteration_success_rate` metrics.
 - NEXT ACTION: wait for budget headroom to recover, then implement one bounded Tier S slice only. Preferred next slice remains OWS-1/OWS-4 control-plane work: finish budget-gate no-op coverage for remaining LLM jobs or reduce Jonah cadence to hourly under the self-modification protocol.
+
+## 2026-07-12 daily optimizer plan-only run
+
+- Time: 2026-07-12 02:15 ET / 06:15 UTC.
+- Budget gate: `python wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=337507 cap=200000` (exit 1), so the optimizer followed the PLAN-ONLY rule: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
+- State: created/claimed Postgres task `3545` (`Plan-only optimizer budget block 2026-07-12`) and run `299774`; visible ledger showed 27 active cron jobs, no paused cron jobs, `parallel_jobs_cap=1`, `max_turns=90`, and `human_approval_pending=0`.
+- NEXT ACTION: wait for budget headroom to recover, then implement exactly one bounded Tier S control-plane slice. Preferred next slice remains OWS-1/OWS-4: finish budget-gate no-op coverage for remaining LLM jobs or reduce Jonah cadence to hourly under the self-modification protocol.
