@@ -620,3 +620,11 @@ Snapshot/conflict check:
 - Guardian/probation: no probation marker existed; `python wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
 - State: created/claimed Postgres task `3545` (`Plan-only optimizer budget block 2026-07-12`) and run `299774`; visible ledger showed 27 active cron jobs, no paused cron jobs, `parallel_jobs_cap=1`, `max_turns=90`, and `human_approval_pending=0`.
 - NEXT ACTION: wait for budget headroom to recover, then implement exactly one bounded Tier S control-plane slice. Preferred next slice remains OWS-1/OWS-4: finish budget-gate no-op coverage for remaining LLM jobs or reduce Jonah cadence to hourly under the self-modification protocol.
+
+## 2026-07-15 daily optimizer plan-only run
+
+- Time: 2026-07-15 02:15 ET / 06:15 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py` returned `BUDGET=block token_cap_exceeded tokens_today=323156 cap=200000` (exit 1), so this run followed the PLAN-ONLY rule: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
+- State: created/claimed/completed Postgres task `3558` (`Plan-only optimizer budget block 2026-07-15`) and run `311571`; recorded KPI rows for `tokens_today=323156`, `usage_headroom_pct=-61.578`, `jobs_skipped_by_budget=1`, `gateway_healthy=1`, `config_rollbacks=0`, `max_turns=90`, `parallel_jobs_cap=1`, `human_approval_pending=0`, `iteration_success_rate=0.9783783783783784`, and `regressions_introduced=0`.
+- NEXT ACTION: wait for budget headroom to recover, then implement exactly one bounded Tier S control-plane slice. Preferred next slice remains queued task `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol, or finish OWS-1 no-op coverage for remaining LLM jobs if that is higher leverage when headroom returns.
