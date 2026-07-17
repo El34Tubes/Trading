@@ -12,6 +12,14 @@ Durable trail for the daily Wolfy/Hermes optimization planner. Items here are pl
 - Postgres is live source of truth; run `/root/.hermes/wolfy/check_postgres_requirements.py` before Postgres package/schema maintenance.
 - Daily optimization runs should send a short completion report when done: what changed, verification, commit/KPI, blockers/next action only.
 
+## 2026-07-17 daily optimizer plan-only run
+
+- Time: 2026-07-17 02:16 ET / 06:16 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=270998 cap=200000` (exit 1), so this run followed the PLAN-ONLY rule: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;hermes_cron_list_ok;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
+- State: created/claimed/completed Postgres task `3569` and run `319202`; recorded KPI rows for tokens/headroom, budget skip, guardian/gateway health, data freshness/depth, migration posture, loop health, strategy counts, and repo size.
+- NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice. Preferred queued task remains `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
+
 ## Explicit user-directed data-load control TODO — 2026-07-02
 
 ### ONE-TIME Massive 2-year history bootstrap; daily ingest must stay incremental-only
@@ -628,3 +636,11 @@ Snapshot/conflict check:
 - Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
 - State: created/claimed/completed Postgres task `3558` (`Plan-only optimizer budget block 2026-07-15`) and run `311571`; recorded KPI rows for `tokens_today=323156`, `usage_headroom_pct=-61.578`, `jobs_skipped_by_budget=1`, `gateway_healthy=1`, `config_rollbacks=0`, `max_turns=90`, `parallel_jobs_cap=1`, `human_approval_pending=0`, `iteration_success_rate=0.9783783783783784`, and `regressions_introduced=0`.
 - NEXT ACTION: wait for budget headroom to recover, then implement exactly one bounded Tier S control-plane slice. Preferred next slice remains queued task `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol, or finish OWS-1 no-op coverage for remaining LLM jobs if that is higher leverage when headroom returns.
+
+## 2026-07-16 daily optimizer plan-only run
+
+- Time: 2026-07-16 02:16 ET / 06:16 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py` returned `BUDGET=block token_cap_exceeded tokens_today=276666 cap=200000` (exit 1), so this run followed the PLAN-ONLY rule: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;hermes_cron_list_ok;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
+- State: completed plan-only run `315551`; recorded KPI rows for tokens/headroom, budget skip, guardian/gateway health, max_turns, concurrency cap, data freshness/depth, strategy counts, trailing iteration success, and repo size.
+- NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice. Preferred queued task remains `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
