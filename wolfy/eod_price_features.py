@@ -25,6 +25,29 @@ EODHS_BASE_URL = os.environ.get("EODHS_BASE_URL", "https://eodhd.com")
 ENV_FILE = Path(os.environ.get("HERMES_ENV_PATH", "/root/.hermes/.env"))
 
 
+def _previous_business_day(day: date) -> date:
+    candidate = day - timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _default_massive_eod_end_dt(today: date | None = None) -> date:
+    """Return the safest default Massive EOD aggregate end date.
+
+    Wolfy's current Massive/Polygon plan has repeatedly returned 403
+    NOT_AUTHORIZED for same-calendar-day daily aggregate requests even after the
+    market close. Defaulting cron to the previous business day keeps the
+    deterministic EOD ingest healthy on delayed/free plans. Operators with a
+    real-time plan can opt back into same-day requests via
+    WOLFY_MASSIVE_ALLOW_CURRENT_DAY=1 or an explicit --end-date.
+    """
+    current = today or date.today()
+    if os.environ.get("WOLFY_MASSIVE_ALLOW_CURRENT_DAY", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return current
+    return _previous_business_day(current)
+
+
 def _env_secret(*names: str) -> str | None:
     for name in names:
         value = os.environ.get(name)
@@ -271,7 +294,8 @@ def ensure_eod_feature_schema(conn) -> None:
           started timestamptz,
           finished timestamptz,
           status text,
-          detail jsonb
+          detail jsonb,
+          source text
         )
         """
     )
@@ -280,8 +304,10 @@ def ensure_eod_feature_schema(conn) -> None:
     # agent-ledger names started_at/completed_at and a feature-run projection.
     conn.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS started_at timestamptz")
     conn.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS completed_at timestamptz")
+    conn.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS source text")
     conn.execute("UPDATE runs SET started_at=started WHERE started_at IS NULL AND started IS NOT NULL")
     conn.execute("UPDATE runs SET completed_at=finished WHERE completed_at IS NULL AND finished IS NOT NULL")
+    conn.execute("UPDATE runs SET source=NULLIF(detail->>'source', '') WHERE source IS NULL AND detail ? 'source'")
     conn.execute(
         """
         CREATE OR REPLACE FUNCTION wolfy_sync_runs_aliases()
@@ -293,6 +319,9 @@ def ensure_eod_feature_schema(conn) -> None:
           IF NEW.completed_at IS NULL THEN
             NEW.completed_at := NEW.finished;
           END IF;
+          IF NEW.source IS NULL THEN
+            NEW.source := NULLIF(NEW.detail->>'source', '');
+          END IF;
           RETURN NEW;
         END;
         $$;
@@ -302,7 +331,7 @@ def ensure_eod_feature_schema(conn) -> None:
     conn.execute(
         """
         CREATE TRIGGER trg_runs_aliases_biu
-          BEFORE INSERT OR UPDATE OF started, finished, started_at, completed_at ON runs
+          BEFORE INSERT OR UPDATE OF started, finished, started_at, completed_at, detail, source ON runs
           FOR EACH ROW EXECUTE FUNCTION wolfy_sync_runs_aliases()
         """
     )
@@ -318,12 +347,13 @@ def ensure_eod_feature_schema(conn) -> None:
           started_at,
           completed_at,
           status,
+          source,
           detail,
           NULLIF(detail->>'bars_loaded', '')::integer AS bars_loaded,
           NULLIF(detail->>'feature_rows_upserted', '')::integer AS feature_rows_upserted,
           NULLIF(detail->>'tickers_processed', '')::integer AS tickers_processed
         FROM runs
-        WHERE job LIKE 'eod-%' OR job LIKE 'feature%'
+        WHERE job LIKE 'eod%' OR job LIKE 'feature%'
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_job_started ON runs(job, started DESC)")
@@ -806,8 +836,9 @@ def _fetch_incremental_massive_bars(
     adjusted: bool,
     pause_seconds: float,
     min_history_bars: int,
+    end_dt: date | None = None,
 ) -> tuple[list[PriceBar], list[dict]]:
-    end_dt = date.today()
+    end_dt = end_dt or _default_massive_eod_end_dt()
     full_start_dt = end_dt - timedelta(days=days)
     state = _price_history_state(conn, tickers)
     bars: list[PriceBar] = []
@@ -842,6 +873,7 @@ def massive_ingest(
     pause_seconds: float = 0.0,
     min_history_bars: int = 500,
     eodhs_fallback_max_tickers: int = 0,
+    end_dt: date | None = None,
 ) -> dict:
     import psycopg
 
@@ -854,16 +886,17 @@ def massive_ingest(
             adjusted=adjusted,
             pause_seconds=pause_seconds,
             min_history_bars=min_history_bars,
+            end_dt=end_dt,
         )
         eodhs_fallback = None
         if eodhs_fallback_max_tickers > 0:
             missing = [item["ticker"] for item in fetch_plan if not item.get("skipped") and item.get("bars_fetched") == 0]
             if missing:
-                end_dt = date.today()
+                fallback_end_dt = end_dt or _default_massive_eod_end_dt()
                 fallback_bars = fetch_eodhs_eod_bars(
                     missing,
-                    start_dt=end_dt - timedelta(days=min(days, 30)),
-                    end_dt=end_dt,
+                    start_dt=fallback_end_dt - timedelta(days=min(days, 30)),
+                    end_dt=fallback_end_dt,
                     max_tickers=eodhs_fallback_max_tickers,
                 )
                 bars.extend(fallback_bars)
@@ -944,8 +977,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pause-seconds", type=float, default=0.0, help="Optional pause between API ticker calls")
     parser.add_argument("--min-history-bars", type=int, default=500, help="Only bootstrap full Massive history below this stored bar count; otherwise fetch missing days only")
     parser.add_argument("--eodhs-fallback-max-tickers", type=int, default=0, help="Conservative EODHS fallback cap for Massive missing-ticker retries; 0 disables")
+    parser.add_argument("--end-date", default=None, help="Override Massive/EODHS end date (YYYY-MM-DD); defaults to previous business day unless WOLFY_MASSIVE_ALLOW_CURRENT_DAY=1")
     args = parser.parse_args(argv)
     tickers = [ticker.strip().upper() for ticker in args.tickers.split(",") if ticker.strip()]
+    end_dt = _parse_date(args.end_date)
     if args.source == "massive":
         result = massive_ingest(
             tickers=tickers,
@@ -958,11 +993,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             pause_seconds=args.pause_seconds,
             min_history_bars=args.min_history_bars,
             eodhs_fallback_max_tickers=args.eodhs_fallback_max_tickers,
+            end_dt=end_dt,
         )
     elif args.source == "eodhs":
-        end_dt = date.today()
-        start_dt = end_dt - timedelta(days=args.days)
-        bars = fetch_eodhs_eod_bars(tickers, start_dt=start_dt, end_dt=end_dt, pause_seconds=args.pause_seconds, max_tickers=min(len(tickers), 5))
+        fallback_end_dt = end_dt or _default_massive_eod_end_dt()
+        start_dt = fallback_end_dt - timedelta(days=args.days)
+        bars = fetch_eodhs_eod_bars(tickers, start_dt=start_dt, end_dt=fallback_end_dt, pause_seconds=args.pause_seconds, max_tickers=min(len(tickers), 5))
         result = {"source": "eodhs-eod-fallback", "tickers": tickers[:5], "bars_fetched": len(bars), "writes": False, "note": "EODHS free-tier source is capped and does not write by default; Massive remains primary."}
     else:
         result = smoke_ingest(tickers=tickers, days=args.days, dsn=args.dsn, min_dollar_vol=Decimal(args.min_dollar_vol))

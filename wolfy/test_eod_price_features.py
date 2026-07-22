@@ -4,6 +4,17 @@ from decimal import Decimal
 import pytest
 
 
+def test_default_massive_eod_end_dt_uses_previous_business_day(monkeypatch):
+    from eod_price_features import _default_massive_eod_end_dt
+
+    monkeypatch.delenv("WOLFY_MASSIVE_ALLOW_CURRENT_DAY", raising=False)
+    assert _default_massive_eod_end_dt(date(2026, 7, 21)) == date(2026, 7, 20)
+    assert _default_massive_eod_end_dt(date(2026, 7, 20)) == date(2026, 7, 17)
+
+    monkeypatch.setenv("WOLFY_MASSIVE_ALLOW_CURRENT_DAY", "1")
+    assert _default_massive_eod_end_dt(date(2026, 7, 21)) == date(2026, 7, 21)
+
+
 def test_compute_eod_features_uses_deterministic_rolling_math():
     from eod_price_features import PriceBar, compute_feature_rows
 
@@ -237,8 +248,8 @@ def test_incremental_massive_plan_skips_current_ticker_without_api_call(monkeypa
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZCURRENTAPI"
-    today = date.today()
-    bars = [PriceBar(ticker, today, 10, 11, 9, 10, 1000)]
+    latest_accessible_dt = date(2026, 7, 20)
+    bars = [PriceBar(ticker, latest_accessible_dt, 10, 11, 9, 10, 1000)]
 
     def fail_fetch(*args, **kwargs):
         raise AssertionError("Massive should not be called when stored data is already current")
@@ -248,9 +259,17 @@ def test_incremental_massive_plan_skips_current_ticker_without_api_call(monkeypa
     with psycopg.connect(dsn) as conn:
         ensure_eod_feature_schema(conn)
         run_id = ingest_price_bars(conn, bars, source="unit-current-api")
-        fetched, plan = _fetch_incremental_massive_bars(conn, tickers=[ticker], days=730, adjusted=True, pause_seconds=0, min_history_bars=1)
+        fetched, plan = _fetch_incremental_massive_bars(
+            conn,
+            tickers=[ticker],
+            days=730,
+            adjusted=True,
+            pause_seconds=0,
+            min_history_bars=1,
+            end_dt=latest_accessible_dt,
+        )
         conn.execute("DELETE FROM prices WHERE ticker=%s", (ticker,))
         conn.execute("DELETE FROM runs WHERE id=%s", (run_id,))
 
     assert fetched == []
-    assert plan == [{"ticker": ticker, "skipped": True, "reason": "already_current", "latest_dt": str(today)}]
+    assert plan == [{"ticker": ticker, "skipped": True, "reason": "already_current", "latest_dt": str(latest_accessible_dt)}]

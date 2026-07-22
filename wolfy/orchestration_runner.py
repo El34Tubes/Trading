@@ -67,15 +67,16 @@ def run_eod_ingest(
     selected = list(tickers or (DRY_RUN_EOD_UNIVERSE if dry_run else CORE_EOD_UNIVERSE))
 
     if dry_run:
-        from datetime import date, timedelta
+        from datetime import timedelta
         from eod_price_features import (
+            _default_massive_eod_end_dt,
             compute_feature_rows,
             fetch_eodhs_eod_bars,
             fetch_massive_eod_bars,
             fetch_yahoo_chart_bars,
         )
 
-        end_dt = date.today()
+        end_dt = _default_massive_eod_end_dt()
         if source == "massive":
             bars = fetch_massive_eod_bars(
                 selected,
