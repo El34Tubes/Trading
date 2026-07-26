@@ -707,3 +707,11 @@ Snapshot/conflict check:
 - Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
 - State: created/claimed/completed Postgres task `3604` and run `346194`; recorded KPI rows including tokens_today=252284, usage_headroom_pct=-26.142, jobs_skipped_by_budget=1, gateway_healthy=1, config_rollbacks=0, max_turns=90, parallel_jobs_cap=1, human_approval_pending=0, iteration_success_rate, and strategy counts.
 - NEXT ACTION: wait for budget headroom to recover, then execute exactly one Tier S control-plane slice. Preferred queued task remains OWS-4 / Jonah cadence hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
+
+## 2026-07-26 daily optimizer plan-only run
+
+- Time: 2026-07-26 02:15 ET / 06:15 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=256305 cap=200000` (exit 1), so this run followed the PLAN-ONLY rule: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
+- State: recorded/completed Postgres plan-only task and run; recorded KPI rows for budget skip, tokens/headroom, guardian/gateway health, config rollbacks, max_turns, parallel cap, human approval pending, and regressions introduced.
+- NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice. Preferred queued task remains `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
