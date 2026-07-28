@@ -715,3 +715,21 @@ Snapshot/conflict check:
 - Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
 - State: recorded/completed Postgres plan-only task and run; recorded KPI rows for budget skip, tokens/headroom, guardian/gateway health, config rollbacks, max_turns, parallel cap, human approval pending, and regressions introduced.
 - NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice. Preferred queued task remains `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
+
+
+## 2026-07-27 daily optimizer plan-only run
+
+- Time: 2026-07-27 02:16 ET / 06:16 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block low_headroom_pct=8.01 threshold=15.00` (exit 1), so this run followed the PLAN-ONLY rule: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation`, and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
+- State: created/claimed/completed Postgres task `3608` and run `357210`; recorded KPI rows for budget skip, tokens/headroom, guardian/gateway health, max_turns, parallel cap, human approval pending, iteration success, and regressions introduced.
+- NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice. Preferred queued task remains `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
+
+## 2026-07-28 daily optimizer plan-only run
+
+- Time: 2026-07-28 02:16 ET / 06:16 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=302211 cap=200000` (exit 1), so this run followed the PLAN-ONLY rule: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation`, and `hermes cron list` succeeded with optimizer `92f31b95fccc` active.
+- State: created/claimed/completed Postgres task `3611` and run `360964`; recorded KPI rows for budget skip, tokens/headroom, guardian/gateway health, max_turns, parallel cap, human approval pending, iteration success, strategy counts, and repo health.
+- NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice. Preferred queued task remains `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
+
