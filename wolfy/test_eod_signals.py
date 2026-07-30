@@ -8,7 +8,7 @@ import pytest
 from eod_price_features import PriceBar, compute_and_store_features, ingest_price_bars
 
 
-def _bars(ticker: str, *, start: date = date(2026, 1, 1), n: int = 35, volume: int = 2_000_000) -> list[PriceBar]:
+def _bars(ticker: str, *, start: date = date(2099, 1, 1), n: int = 35, volume: int = 2_000_000) -> list[PriceBar]:
     rows: list[PriceBar] = []
     close = Decimal("20")
     for i in range(n):
@@ -21,7 +21,7 @@ def _bars(ticker: str, *, start: date = date(2026, 1, 1), n: int = 35, volume: i
 def _breakout_bars(
     ticker: str,
     *,
-    start: date = date(2026, 1, 1),
+    start: date = date(2099, 1, 1),
     n: int = 35,
     start_close: Decimal = Decimal("50"),
     daily_step: Decimal = Decimal("0.30"),
@@ -64,7 +64,7 @@ def test_recommendation_universe_uses_broad_current_universe_with_data_gates():
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZBLUE", "ZZSMALL", "ZZNONE", "ZZINACT", "ZZSTALE", "ZZTHIN"]
-    signal_dt = date(2026, 2, 4)
+    signal_dt = date(2099, 2, 4)
     with psycopg.connect(dsn) as conn:
         try:
             seed_default_strategies(conn)
@@ -110,7 +110,7 @@ def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZAUTO", "SPY"]
-    signal_dt = date(2026, 2, 4)
+    signal_dt = date(2099, 2, 4)
     with psycopg.connect(dsn) as conn:
         try:
             seed_default_strategies(conn)
@@ -161,7 +161,7 @@ def test_generate_liquid_rs_breakout_continuation_signal():
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZRSBO", "SPY"]
-    signal_dt = date(2026, 2, 4)
+    signal_dt = date(2099, 2, 4)
     with psycopg.connect(dsn) as conn:
         try:
             seed_default_strategies(conn)
@@ -207,7 +207,7 @@ def test_generate_eod_signals_seeds_research_only_strategies_and_writes_determin
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZSIG", "ZZMOM"]
-    signal_dt = date(2026, 2, 4)
+    signal_dt = date(2099, 2, 4)
     with psycopg.connect(dsn) as conn:
         try:
             seed_default_strategies(conn)
@@ -247,7 +247,7 @@ def test_approved_strategy_gate_creates_setups_only_for_approved_signals():
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZGATE"
-    signal_dt = date(2026, 2, 4)
+    signal_dt = date(2099, 2, 4)
     with psycopg.connect(dsn) as conn:
         try:
             seed_default_strategies(conn)
@@ -285,7 +285,7 @@ def test_nightly_screening_dry_run_ranks_setups_without_writing_rows():
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZDRY"
-    signal_dt = date(2026, 2, 4)
+    signal_dt = date(2099, 2, 4)
     with psycopg.connect(dsn) as conn:
         try:
             seed_default_strategies(conn)
@@ -325,7 +325,7 @@ def test_nightly_screening_blocks_liquidity_events_options_and_portfolio_breaker
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZILLQ", "ZZEVNT", "ZZOPT", "ZZHEAT"]
-    signal_dt = date(2026, 2, 4)
+    signal_dt = date(2099, 2, 4)
     with psycopg.connect(dsn) as conn:
         try:
             seed_default_strategies(conn)
@@ -381,7 +381,7 @@ def test_nightly_screening_applies_cumulative_heat_and_position_slots():
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZSLOT1", "ZZSLOT2", "ZZSLOT3", "ZZSLOT4"]
-    signal_dt = date(2026, 2, 4)
+    signal_dt = date(2099, 2, 4)
     with psycopg.connect(dsn) as conn:
         try:
             seed_default_strategies(conn)
