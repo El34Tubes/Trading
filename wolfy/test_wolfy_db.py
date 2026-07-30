@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Tests for Wolfy's shared Postgres-first DB adapter."""
+"""Tests for Wolfy's shared Postgres-only DB adapter."""
 from __future__ import annotations
-
-import sqlite3
 
 import pytest
 
 import wolfy_db
 
 
-def test_default_config_is_postgres_first_and_fallback_is_opt_in(monkeypatch):
+def test_default_config_is_postgres_only(monkeypatch):
     monkeypatch.delenv("WOLFY_POSTGRES_DSN", raising=False)
     monkeypatch.delenv("WOLFY_PG_DSN", raising=False)
     monkeypatch.delenv("WOLFY_DB_ALLOW_SQLITE_FALLBACK", raising=False)
@@ -18,8 +16,8 @@ def test_default_config_is_postgres_first_and_fallback_is_opt_in(monkeypatch):
 
     assert config.backend == "postgres"
     assert config.postgres_dsn == "dbname=wolfy user=root host=/var/run/postgresql"
-    assert str(config.sqlite_path) == "/root/.hermes/wolfy/wolfy.db"
-    assert config.allow_sqlite_fallback is False
+    assert not hasattr(config, "sqlite_path")
+    assert not hasattr(config, "allow_sqlite_fallback")
 
 
 def test_postgres_dsn_prefers_new_name_but_accepts_legacy_name(monkeypatch):
@@ -42,32 +40,16 @@ def test_connect_wolfy_db_connects_to_live_postgres_by_default():
     assert has_agent_runs is True
 
 
-def test_sqlite_fallback_requires_explicit_opt_in_and_emits_warning(monkeypatch, tmp_path):
-    sqlite_path = tmp_path / "legacy.db"
-    sqlite3.connect(sqlite_path).execute("create table smoke(id integer)").connection.close()
-
+def test_sqlite_fallback_is_retired_even_if_env_flag_is_set(monkeypatch):
     def fail_postgres_connect(*_args, **_kwargs):
         raise RuntimeError("postgres unavailable")
 
+    monkeypatch.setenv("WOLFY_DB_ALLOW_SQLITE_FALLBACK", "true")
     monkeypatch.setattr(wolfy_db.psycopg, "connect", fail_postgres_connect)
 
-    config_without_fallback = wolfy_db.DatabaseConfig(
-        postgres_dsn="dbname=missing",
-        sqlite_path=sqlite_path,
-        allow_sqlite_fallback=False,
-    )
-    with pytest.raises(wolfy_db.WolfyDatabaseError, match="SQLite fallback is disabled"):
-        wolfy_db.connect_wolfy_db(config_without_fallback)
-
-    config_with_fallback = wolfy_db.DatabaseConfig(
-        postgres_dsn="dbname=missing",
-        sqlite_path=sqlite_path,
-        allow_sqlite_fallback=True,
-    )
-    with pytest.warns(wolfy_db.WolfySQLiteFallbackWarning, match="legacy fallback"):
-        with wolfy_db.connect_wolfy_db(config_with_fallback) as handle:
-            assert handle.backend == "sqlite"
-            assert handle.connection.execute("select name from sqlite_master where type='table'").fetchone()[0] == "smoke"
+    config = wolfy_db.DatabaseConfig(postgres_dsn="dbname=missing")
+    with pytest.raises(wolfy_db.WolfyDatabaseError, match="SQLite fallback has been retired"):
+        wolfy_db.connect_wolfy_db(config)
 
 
 def test_agent_coordination_uses_shared_postgres_adapter(monkeypatch):

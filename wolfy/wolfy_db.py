@@ -1,35 +1,25 @@
 #!/usr/bin/env python3
-"""Shared Wolfy database adapter with Postgres-first defaults.
+"""Shared Wolfy database adapter for Wolfy's Postgres-only operational database.
 
-Postgres is Wolfy's primary operational database. SQLite remains a legacy
-compatibility store and must be selected through an explicit fallback flag so new
-scripts do not quietly continue the old SQLite-first pattern.
+SQLite has been retired from Wolfy. New/live scripts must connect to Postgres
+and fail clearly if Postgres is unavailable.
 """
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from pathlib import Path
 import os
 import re
-import sqlite3
 from types import TracebackType
 from typing import Literal
-import warnings
 
 import psycopg
 
 DEFAULT_POSTGRES_DSN = "dbname=wolfy user=root host=/var/run/postgresql"
-DEFAULT_SQLITE_PATH = Path("/root/.hermes/wolfy/wolfy.db")
-TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
 
 
 class WolfyDatabaseError(RuntimeError):
     """Raised when the shared Wolfy DB adapter cannot connect safely."""
-
-
-class WolfySQLiteFallbackWarning(RuntimeWarning):
-    """Warns that a caller has fallen back to legacy SQLite compatibility."""
 
 
 class DestructiveSQLError(WolfyDatabaseError):
@@ -38,25 +28,18 @@ class DestructiveSQLError(WolfyDatabaseError):
 
 @dataclass(frozen=True)
 class DatabaseConfig:
-    """Connection convention for Wolfy operational code.
-
-    backend is intentionally fixed to "postgres" by default. `allow_sqlite_fallback`
-    is the explicit compatibility switch for legacy consumers during migration.
-    """
+    """Connection convention for Wolfy operational code."""
 
     postgres_dsn: str = DEFAULT_POSTGRES_DSN
-    sqlite_path: Path = DEFAULT_SQLITE_PATH
     backend: Literal["postgres"] = "postgres"
-    allow_sqlite_fallback: bool = False
 
 
 @dataclass(frozen=True)
 class WolfyDBHandle(AbstractContextManager["WolfyDBHandle"]):
-    """Context-manager wrapper exposing the selected backend and connection."""
+    """Context-manager wrapper exposing the selected Postgres connection."""
 
-    backend: Literal["postgres", "sqlite"]
+    backend: Literal["postgres"]
     connection: object
-    fallback_reason: str | None = None
 
     def __enter__(self) -> "WolfyDBHandle":
         return self
@@ -73,24 +56,10 @@ class WolfyDBHandle(AbstractContextManager["WolfyDBHandle"]):
         return None
 
 
-def _env_truthy(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in TRUE_VALUES
-
-
 def get_database_config() -> DatabaseConfig:
-    """Return Wolfy's Postgres-first DB config from environment.
-
-    Preferred DSN env name is WOLFY_POSTGRES_DSN. WOLFY_PG_DSN remains accepted
-    for existing scripts. SQLite fallback is off unless explicitly enabled with
-    WOLFY_DB_ALLOW_SQLITE_FALLBACK=true/1/yes/on.
-    """
+    """Return Wolfy's Postgres-only DB config from environment."""
     postgres_dsn = os.environ.get("WOLFY_POSTGRES_DSN") or os.environ.get("WOLFY_PG_DSN") or DEFAULT_POSTGRES_DSN
-    sqlite_path = Path(os.environ.get("WOLFY_SQLITE_PATH", str(DEFAULT_SQLITE_PATH)))
-    return DatabaseConfig(
-        postgres_dsn=postgres_dsn,
-        sqlite_path=sqlite_path,
-        allow_sqlite_fallback=_env_truthy("WOLFY_DB_ALLOW_SQLITE_FALLBACK"),
-    )
+    return DatabaseConfig(postgres_dsn=postgres_dsn)
 
 
 def connect_postgres(config: DatabaseConfig | None = None):
@@ -99,40 +68,17 @@ def connect_postgres(config: DatabaseConfig | None = None):
     return psycopg.connect(cfg.postgres_dsn)
 
 
-def connect_sqlite_legacy(config: DatabaseConfig | None = None) -> sqlite3.Connection:
-    """Connect to Wolfy's legacy SQLite compatibility database explicitly."""
-    cfg = config or get_database_config()
-    conn = sqlite3.connect(cfg.sqlite_path)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def connect_wolfy_db(config: DatabaseConfig | None = None) -> WolfyDBHandle:
-    """Connect to Postgres by default, with opt-in legacy SQLite fallback only.
+    """Connect to Wolfy's Postgres operational database.
 
-    The fallback path is intentionally noisy: it raises unless enabled and emits a
-    RuntimeWarning when used, so cron/report code can surface stale migration
-    paths instead of silently writing to SQLite.
+    SQLite fallback has been removed. Any failure here is a live Postgres
+    availability/configuration problem, not an invitation to use a local file DB.
     """
     cfg = config or get_database_config()
     try:
         return WolfyDBHandle(backend="postgres", connection=connect_postgres(cfg))
     except Exception as exc:  # noqa: BLE001 - adapter boundary records any driver failure
-        if not cfg.allow_sqlite_fallback:
-            raise WolfyDatabaseError(
-                "Postgres connection failed and SQLite fallback is disabled; "
-                "set WOLFY_DB_ALLOW_SQLITE_FALLBACK=true only for explicit legacy compatibility."
-            ) from exc
-        warnings.warn(
-            f"Using legacy fallback SQLite database at {cfg.sqlite_path}; Postgres error: {exc}",
-            WolfySQLiteFallbackWarning,
-            stacklevel=2,
-        )
-        return WolfyDBHandle(
-            backend="sqlite",
-            connection=connect_sqlite_legacy(cfg),
-            fallback_reason=str(exc),
-        )
+        raise WolfyDatabaseError("Postgres connection failed; Wolfy SQLite fallback has been retired.") from exc
 
 
 _DESTRUCTIVE_PATTERNS = [
@@ -144,12 +90,7 @@ _DESTRUCTIVE_PATTERNS = [
 
 
 def assert_non_destructive_sql(sql: str) -> None:
-    """Reject SQL statements that violate Wolfy's no-destructive-migration guardrail.
-
-    This is a safety net for shared adapter users, not a full SQL parser. It
-    catches the high-risk operations that should never be part of routine Wolfy
-    Postgres-primary migration work without explicit human approval.
-    """
+    """Reject SQL statements that violate Wolfy's no-destructive-migration guardrail."""
     compact_sql = " ".join(sql.strip().split())
     for pattern in _DESTRUCTIVE_PATTERNS:
         if pattern.search(compact_sql):

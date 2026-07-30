@@ -34,6 +34,24 @@ DEFAULT_STRATEGIES = (
         {"source": "Hermes-EOD Section 3", "rebalance": "weekly", "requires_backtest": True},
         "Seeded as research_only. Human approval required for status promotion beyond candidate.",
     ),
+    (
+        "liquid_rs_breakout_continuation",
+        "rs_breakout_continuation",
+        {
+            "source": "Wolfy user-directed recommendation engine",
+            "requires_backtest": True,
+            "breakout_lookback_days": 5,
+            "rs_benchmark": "SPY",
+            "rs_window_days": 20,
+            "min_vol_ratio": "1.2",
+            "near_high_pct": "0.05",
+            "stop_rule": "prior_5_day_low",
+            "max_hold_days": 10,
+            "preferred_instrument": "2-3wk slightly OTM call spread",
+            "option_liquidity_hard_gate": False,
+        },
+        "Seeded as research_only. Human approval required before recommendations; deterministic 5-day RS breakout setup for options-oriented paper candidates.",
+    ),
 )
 
 
@@ -53,10 +71,16 @@ def ensure_signal_schema(conn) -> None:
           latest_oos_verdict boolean,
           last_validated date,
           params jsonb,
-          notes text
+          notes text,
+          metadata jsonb,
+          description text
         )
         """
     )
+    conn.execute("ALTER TABLE strategies ADD COLUMN IF NOT EXISTS metadata jsonb")
+    conn.execute("ALTER TABLE strategies ADD COLUMN IF NOT EXISTS description text")
+    conn.execute("UPDATE strategies SET metadata=COALESCE(metadata, params, '{}'::jsonb) WHERE metadata IS NULL")
+    conn.execute("UPDATE strategies SET description=notes WHERE description IS NULL AND notes IS NOT NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_strategies_status ON strategies(status, setup_type)")
     conn.execute(
         """
@@ -287,6 +311,125 @@ def _generate_momentum(conn, *, tickers: Sequence[str], signal_dt: date, momentu
     return len(selected)
 
 
+def _generate_liquid_rs_breakout(
+    conn,
+    *,
+    tickers: Sequence[str],
+    signal_dt: date,
+    strategies: dict[str, tuple[int, str]],
+    breakout_lookback_days: int = 5,
+    rs_window_days: int = 20,
+    min_vol_ratio: Decimal = Decimal("1.2"),
+    near_high_pct: Decimal = Decimal("0.05"),
+) -> int:
+    strategy_id, status = strategies["liquid_rs_breakout_continuation"]
+    spy_row = conn.execute(
+        """
+        SELECT cur.close, prev.close
+        FROM prices cur
+        JOIN LATERAL (
+          SELECT close FROM prices
+          WHERE ticker='SPY' AND dt <= %s
+          ORDER BY dt DESC LIMIT 1
+        ) prev ON true
+        WHERE cur.ticker='SPY' AND cur.dt=%s
+        """,
+        (signal_dt - timedelta(days=rs_window_days), signal_dt),
+    ).fetchone()
+    if not spy_row or spy_row[1] in (None, 0):
+        return 0
+    spy_return = (Decimal(str(spy_row[0])) / Decimal(str(spy_row[1]))) - Decimal("1")
+
+    generated = 0
+    for ticker in [t.upper() for t in tickers if t.upper() != "SPY"]:
+        row = conn.execute(
+            """
+            SELECT p.close, p.high, f.sma_fast, f.sma_slow, f.vol_ratio, f.atr, f.liquidity,
+                   prev.close,
+                   prior.prior_high, prior.prior_low
+            FROM prices p
+            JOIN LATERAL (
+              SELECT close FROM prices
+              WHERE ticker=p.ticker AND dt <= %s
+              ORDER BY dt DESC LIMIT 1
+            ) prev ON true
+            JOIN LATERAL (
+              SELECT max(high) AS prior_high, min(low) AS prior_low
+              FROM (
+                SELECT high, low FROM prices
+                WHERE ticker=p.ticker AND dt < p.dt
+                ORDER BY dt DESC LIMIT %s
+              ) recent
+            ) prior ON true
+            LEFT JOIN features f ON f.ticker=p.ticker AND f.dt=p.dt
+            WHERE p.ticker=%s AND p.dt=%s
+              AND coalesce(f.liquidity, true)=true
+              AND f.vol_ratio IS NOT NULL
+              AND f.atr IS NOT NULL
+            """,
+            (signal_dt - timedelta(days=rs_window_days), breakout_lookback_days, ticker, signal_dt),
+        ).fetchone()
+        if not row:
+            continue
+        close, high, sma_fast, sma_slow, vol_ratio, atr, _liquidity, lookback_close, prior_high, prior_low = row
+        if lookback_close in (None, 0) or prior_high is None or prior_low is None:
+            continue
+        close_dec = Decimal(str(close))
+        high_dec = Decimal(str(high))
+        prior_high_dec = Decimal(str(prior_high))
+        prior_low_dec = Decimal(str(prior_low))
+        vol_ratio_dec = Decimal(str(vol_ratio))
+        ticker_return = (close_dec / Decimal(str(lookback_close))) - Decimal("1")
+        rs_excess = ticker_return - spy_return
+        recent_high = max(high_dec, prior_high_dec)
+        within_5pct_recent_high = close_dec >= (recent_high * (Decimal("1") - near_high_pct))
+        trend_ok = True
+        if sma_fast is not None:
+            trend_ok = trend_ok and close_dec > Decimal(str(sma_fast))
+        if sma_fast is not None and sma_slow is not None:
+            trend_ok = trend_ok and Decimal(str(sma_fast)) >= Decimal(str(sma_slow))
+
+        if not trend_ok:
+            continue
+        if close_dec <= prior_high_dec:
+            continue
+        if ticker_return <= spy_return:
+            continue
+        if vol_ratio_dec < min_vol_ratio:
+            continue
+        if not within_5pct_recent_high:
+            continue
+
+        raw = {
+            "strategy": "liquid_rs_breakout_continuation",
+            "close": close_dec,
+            "prior_5d_high": prior_high_dec,
+            "prior_5d_low": prior_low_dec,
+            "sma_fast": sma_fast,
+            "sma_slow": sma_slow,
+            "atr": atr,
+            "atr_pct": Decimal(str(atr)) / close_dec if close_dec else None,
+            "ticker_return_20d": ticker_return,
+            "spy_return_20d": spy_return,
+            "rs_excess_20d": rs_excess,
+            "vol_ratio": vol_ratio_dec,
+            "within_5pct_recent_high": within_5pct_recent_high,
+            "stop_rule": "prior_5_day_low",
+            "invalidation": prior_low_dec,
+            "max_hold_days": 10,
+            "profit_plan": "partial_at_1_5R_then_trail_remainder",
+            "preferred_instrument": "2-3wk slightly OTM call spread",
+            "option_liquidity_hard_gate": False,
+            "option_liquidity_note": "user_to_evaluate_manually",
+            "gap_no_chase_atr": Decimal("0.5"),
+            "gate_status": status,
+            "reason": "20d RS leader breaking prior 5d high on confirmed volume near highs",
+        }
+        _upsert_signal(conn, ticker=ticker, signal_dt=signal_dt, strategy_id=strategy_id, direction="long", raw=raw)
+        generated += 1
+    return generated
+
+
 def generate_eod_signals(
     conn,
     *,
@@ -310,6 +453,7 @@ def generate_eod_signals(
             momentum_top_n=momentum_top_n,
             strategies=strategies,
         ),
+        "liquid_rs_breakout_continuation": _generate_liquid_rs_breakout(conn, tickers=tickers, signal_dt=signal_dt, strategies=strategies),
     }
     return {"signal_dt": signal_dt.isoformat(), "signals_by_strategy": counts, "signals_upserted": sum(counts.values())}
 

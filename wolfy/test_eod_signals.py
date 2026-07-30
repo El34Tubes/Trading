@@ -18,6 +18,27 @@ def _bars(ticker: str, *, start: date = date(2026, 1, 1), n: int = 35, volume: i
     return rows
 
 
+def _breakout_bars(
+    ticker: str,
+    *,
+    start: date = date(2026, 1, 1),
+    n: int = 35,
+    start_close: Decimal = Decimal("50"),
+    daily_step: Decimal = Decimal("0.30"),
+    breakout_lift: Decimal = Decimal("2.00"),
+    volume: int = 2_000_000,
+) -> list[PriceBar]:
+    rows: list[PriceBar] = []
+    close = start_close
+    for i in range(n):
+        close += daily_step
+        if i == n - 1:
+            close += breakout_lift
+        vol = volume * (2 if i == n - 1 else 1)
+        rows.append(PriceBar(ticker, start + timedelta(days=i), close - Decimal("0.25"), close + Decimal("0.40"), close - Decimal("0.50"), close, vol))
+    return rows
+
+
 def _cleanup(conn, tickers: list[str]) -> None:
     conn.execute("DELETE FROM setups WHERE ticker = ANY(%s)", (tickers,))
     conn.execute("DELETE FROM signals WHERE ticker = ANY(%s)", (tickers,))
@@ -31,9 +52,75 @@ def _restore_default_strategy_statuses(conn) -> None:
         """
         UPDATE strategies
         SET status='research_only', latest_oos_verdict=NULL, last_validated=NULL
-        WHERE name IN ('pead','trend_volume_vol_regime','sector_cross_sectional_momentum')
+        WHERE name IN ('pead','trend_volume_vol_regime','sector_cross_sectional_momentum','liquid_rs_breakout_continuation')
         """
     )
+
+
+def test_seed_default_strategies_includes_rs_breakout_as_research_only():
+    psycopg = pytest.importorskip("psycopg")
+    from eod_signals import seed_default_strategies
+
+    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    with psycopg.connect(dsn) as conn:
+        seed_default_strategies(conn)
+        _restore_default_strategy_statuses(conn)
+        row = conn.execute(
+            "SELECT name, setup_type, status, params, notes FROM strategies WHERE name='liquid_rs_breakout_continuation'"
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == "liquid_rs_breakout_continuation"
+    assert row[1] == "rs_breakout_continuation"
+    assert row[2] == "research_only"
+    assert row[3]["requires_backtest"] is True
+    assert "Human approval required" in row[4]
+
+
+def test_generate_liquid_rs_breakout_continuation_signal():
+    psycopg = pytest.importorskip("psycopg")
+    from eod_signals import generate_eod_signals, seed_default_strategies
+
+    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    tickers = ["ZZRSBO", "SPY"]
+    signal_dt = date(2026, 2, 4)
+    with psycopg.connect(dsn) as conn:
+        try:
+            seed_default_strategies(conn)
+            _restore_default_strategy_statuses(conn)
+            _cleanup(conn, tickers)
+            ingest_price_bars(conn, _breakout_bars("ZZRSBO", daily_step=Decimal("0.70"), breakout_lift=Decimal("2.50")), source="unit-rs-breakout")
+            ingest_price_bars(conn, _breakout_bars("SPY", daily_step=Decimal("0.05"), breakout_lift=Decimal("0.00")), source="unit-rs-breakout")
+            compute_and_store_features(conn, tickers=tickers, sma_fast_window=5, sma_slow_window=20, volume_window=5, atr_window=5, min_dollar_vol=Decimal("1000"))
+
+            result = generate_eod_signals(conn, tickers=["ZZRSBO"], signal_dt=signal_dt, momentum_lookback_days=20, momentum_top_n=1)
+            row = conn.execute(
+                """
+                SELECT st.status, s.direction, s.raw
+                FROM signals s JOIN strategies st ON st.id=s.strategy_id
+                WHERE s.ticker=%s AND s.dt=%s AND st.name='liquid_rs_breakout_continuation'
+                """,
+                ("ZZRSBO", signal_dt),
+            ).fetchone()
+            setup_count = conn.execute("SELECT COUNT(*) FROM setups WHERE ticker=%s AND created_dt=%s", ("ZZRSBO", signal_dt)).fetchone()[0]
+        finally:
+            _cleanup(conn, tickers)
+            _restore_default_strategy_statuses(conn)
+
+    assert result["signals_by_strategy"]["liquid_rs_breakout_continuation"] == 1
+    assert row is not None
+    assert row[0] == "research_only"
+    assert row[1] == "long"
+    raw = row[2]
+    assert raw["strategy"] == "liquid_rs_breakout_continuation"
+    assert raw["gate_status"] == "research_only"
+    assert Decimal(str(raw["rs_excess_20d"])) > 0
+    assert Decimal(str(raw["vol_ratio"])) >= Decimal("1.2")
+    assert raw["within_5pct_recent_high"] is True
+    assert raw["stop_rule"] == "prior_5_day_low"
+    assert raw["max_hold_days"] == 10
+    assert raw["option_liquidity_hard_gate"] is False
+    assert setup_count == 0
 
 
 def test_generate_eod_signals_seeds_research_only_strategies_and_writes_deterministic_signals():

@@ -12,6 +12,14 @@ Durable trail for the daily Wolfy/Hermes optimization planner. Items here are pl
 - Postgres is live source of truth; run `/root/.hermes/wolfy/check_postgres_requirements.py` before Postgres package/schema maintenance.
 - Daily optimization runs should send a short completion report when done: what changed, verification, commit/KPI, blockers/next action only.
 
+## 2026-07-30 daily optimizer plan-only run
+
+- Time: 2026-07-30 02:15 ET / 06:15 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block low_headroom_pct=14.47 threshold=15.00` (exit 1), so this run followed PLAN-ONLY: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;hermes_cron_list_ok;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer `92f31b95fccc` still active.
+- State: created/claimed/completed Postgres task `3621` and run `368701`; recorded 15 KPI rows including tokens_today=171064, usage_headroom_pct=14.47, jobs_skipped_by_budget=1, gateway_healthy=1, config_rollbacks=0, max_turns=90, parallel_jobs_cap=1, human_approval_pending=0, and iteration_success_rate.
+- NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice. Preferred queued task remains OWS-4 / reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish OWS-1 no-op coverage if budget-gate gaps are found.
+
 ## 2026-07-29 daily optimizer plan-only run
 
 - Time: 2026-07-29 02:15 ET / 06:15 UTC.
@@ -48,9 +56,12 @@ Durable trail for the daily Wolfy/Hermes optimization planner. Items here are pl
 
 - User direction: "go for these recommendations" by building a deep plan and wiring it into the agentic loop.
 - Plan file: `/root/.hermes/wolfy/RECOMMENDATION_ENGINE_AGENTIC_PLAN.md`.
-- Scope: build one narrow EOD-only deterministic strategy `liquid_pullback_continuation`, validate it, promote at most to `candidate`, then require explicit human approval before approved-strategy-gated recommendation generation.
-- Loop action: Postgres `agent_tasks` should carry the plan as ordered implementation slices: seed strategy, deterministic signals, liquid universe gate, validation hardening, validation run, approved-gated recommendation writer, Sentinel/Yang review integration, paper-ledger gate, visible ledger status.
+- Scope: build one narrow EOD-only deterministic strategy `liquid_rs_breakout_continuation`, validate it, promote at most to `candidate`, then require explicit human approval before approved-strategy-gated recommendation generation.
+- Strategy spec: 1–2wk defined-risk options-oriented bullish continuation setup; 5-day high breakout; 20-day relative strength > SPY; `vol_ratio >= 1.2`; within 5% of recent high; stop below prior 5-day low; max 10 trading days; partial at 1.5R then trail; 2–3 week slightly OTM call spread preferred; options liquidity is informational/user-evaluated, not a hard gate; equity fallback must be labeled.
+- Loop action: Postgres `agent_tasks` carry the plan as ordered implementation slices: seed strategy, deterministic RS breakout signals, broad-current universe gates, validation hardening, validation run, approved-gated recommendation writer, Sentinel/Yang review integration, Postgres paper-ledger gate, visible ledger status, and underlying setup-success post-trade review.
+- Current implementation slice: tasks 3577 and 3578 are completed/verified; `test_eod_signals.py -q` passed 7 tests and full Wolfy `pytest -q` passed 114 tests.
 - Reminder: this user approval is approval to build the recommendation engine, **not** approval to mark a strategy `approved` or to place/live-execute trades.
+- Paper-trade logging requirement: once an approved strategy produces a deterministic setup and **both Sentinel and Yang approve**, Wolfy should auto-log the paper trade to Postgres `paper_trades` only. No SQLite fallback and no broker/live execution path are allowed.
 
 ## 2026-07-19 daily optimizer plan-only run
 
