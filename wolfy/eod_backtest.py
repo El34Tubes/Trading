@@ -13,7 +13,10 @@ from typing import Sequence
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
 DEFAULT_SLIPPAGE_BPS = Decimal("10")
 DEFAULT_COMMISSION_PER_TRADE = Decimal("0")
-DEFAULT_MIN_OOS_SHARPE = Decimal("0.5")
+DEFAULT_MIN_OOS_SHARPE = Decimal("0.75")
+DEFAULT_MIN_IS_TRADES = 60
+DEFAULT_MIN_OOS_TRADES = 20
+DEFAULT_MAX_OOS_DRAWDOWN = Decimal("0.15")
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,45 @@ def _max_drawdown(returns: Sequence[float]) -> Decimal:
     return _q(worst)
 
 
+def evaluate_oos_gates(
+    *,
+    is_trades: int,
+    oos_trades: int,
+    oos_sharpe: Decimal,
+    max_dd: Decimal,
+    min_is_trades: int = DEFAULT_MIN_IS_TRADES,
+    min_oos_trades: int = DEFAULT_MIN_OOS_TRADES,
+    min_oos_sharpe: Decimal = DEFAULT_MIN_OOS_SHARPE,
+    max_oos_drawdown: Decimal = DEFAULT_MAX_OOS_DRAWDOWN,
+) -> dict:
+    """Evaluate governed OOS promotion gates and return auditable reasons."""
+    failure_reasons: list[str] = []
+    if is_trades < min_is_trades:
+        failure_reasons.append("insufficient_is_trades")
+    if oos_trades < min_oos_trades:
+        failure_reasons.append("insufficient_oos_trades")
+    if oos_sharpe < min_oos_sharpe:
+        failure_reasons.append("oos_sharpe_below_threshold")
+    if max_dd < -abs(max_oos_drawdown):
+        failure_reasons.append("max_drawdown_exceeds_threshold")
+    return {
+        "survives_oos": len(failure_reasons) == 0,
+        "failure_reasons": failure_reasons,
+        "thresholds": {
+            "min_is_trades": min_is_trades,
+            "min_oos_trades": min_oos_trades,
+            "min_oos_sharpe": str(min_oos_sharpe),
+            "max_oos_drawdown": str(max_oos_drawdown),
+        },
+        "observed": {
+            "is_trades": is_trades,
+            "oos_trades": oos_trades,
+            "oos_sharpe": str(oos_sharpe),
+            "max_dd": str(max_dd),
+        },
+    }
+
+
 def ensure_backtest_schema(conn) -> None:
     conn.execute(
         """
@@ -104,10 +146,16 @@ def ensure_backtest_schema(conn) -> None:
           latest_oos_verdict boolean,
           last_validated date,
           params jsonb,
-          notes text
+          notes text,
+          metadata jsonb,
+          description text
         )
         """
     )
+    conn.execute("ALTER TABLE strategies ADD COLUMN IF NOT EXISTS metadata jsonb")
+    conn.execute("ALTER TABLE strategies ADD COLUMN IF NOT EXISTS description text")
+    conn.execute("UPDATE strategies SET metadata=COALESCE(metadata, params, '{}'::jsonb) WHERE metadata IS NULL")
+    conn.execute("UPDATE strategies SET description=notes WHERE description IS NULL AND notes IS NOT NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_strategies_status ON strategies(status, setup_type)")
     conn.execute(
         """
@@ -248,6 +296,9 @@ def run_backtest(
     window_end: date,
     oos_days: int = 63,
     min_oos_sharpe: Decimal = DEFAULT_MIN_OOS_SHARPE,
+    min_is_trades: int = DEFAULT_MIN_IS_TRADES,
+    min_oos_trades: int = DEFAULT_MIN_OOS_TRADES,
+    max_oos_drawdown: Decimal = DEFAULT_MAX_OOS_DRAWDOWN,
     slippage_bps: Decimal = DEFAULT_SLIPPAGE_BPS,
     commission_per_trade: Decimal = DEFAULT_COMMISSION_PER_TRADE,
 ) -> BacktestResult:
@@ -276,10 +327,26 @@ def run_backtest(
     oos_cagr = _cagr(oos_returns)
     max_dd = _max_drawdown([float(trade["net_return"]) for trade in trades])
     turnover = _q(Decimal(len(trades)) / Decimal(max(1, len(unique_exit_dates))))
-    survives_oos = bool(oos_returns and oos_sharpe >= min_oos_sharpe)
+    gate = evaluate_oos_gates(
+        is_trades=len(is_returns),
+        oos_trades=len(oos_returns),
+        oos_sharpe=oos_sharpe,
+        max_dd=max_dd,
+        min_is_trades=min_is_trades,
+        min_oos_trades=min_oos_trades,
+        min_oos_sharpe=min_oos_sharpe,
+        max_oos_drawdown=max_oos_drawdown,
+    )
+    survives_oos = bool(gate["survives_oos"])
     params = {
         "tickers": [t.upper() for t in tickers],
-        "walk_forward": {"oos_days": oos_days, "min_oos_sharpe": str(min_oos_sharpe)},
+        "walk_forward": {
+            "oos_days": oos_days,
+            "min_oos_sharpe": str(min_oos_sharpe),
+            "min_is_trades": min_is_trades,
+            "min_oos_trades": min_oos_trades,
+            "max_oos_drawdown": str(max_oos_drawdown),
+        },
         "costs": {"slippage_bps": str(slippage_bps), "commission_per_trade": str(commission_per_trade)},
     }
     report = {
@@ -294,6 +361,7 @@ def run_backtest(
             "turnover": str(turnover),
             "survives_oos": survives_oos,
         },
+        "gate": gate,
         "costs": params["costs"],
         "sample_trades": trades[:20],
     }
