@@ -185,6 +185,39 @@ def _strategy_ids(conn) -> dict[str, tuple[int, str]]:
     return {str(name): (int(strategy_id), str(status)) for strategy_id, name, status in rows}
 
 
+def recommendation_universe_tickers(conn, *, signal_dt: date, min_history_bars: int = 20) -> list[str]:
+    """Return broad/current recommendation tickers with deterministic data-readiness gates.
+
+    This intentionally does not restrict by Wolfy tier. The user's first
+    recommendation engine may consider the whole active universe, but a ticker
+    must have current price/features rows and enough stored bars for the
+    strategy window before it can enter signal generation.
+    """
+    ensure_signal_schema(conn)
+    rows = conn.execute(
+        """
+        SELECT u.symbol
+        FROM universe u
+        JOIN prices p ON p.ticker=u.symbol AND p.dt=%s
+        JOIN features f ON f.ticker=u.symbol AND f.dt=%s
+        JOIN LATERAL (
+          SELECT count(*) AS bar_count
+          FROM prices ph
+          WHERE ph.ticker=u.symbol AND ph.dt <= %s
+        ) hist ON true
+        WHERE coalesce(u.active, true)=true
+          AND coalesce(u.enabled, true)=true
+          AND hist.bar_count >= %s
+          AND p.close IS NOT NULL
+          AND f.atr IS NOT NULL
+          AND f.vol_ratio IS NOT NULL
+        ORDER BY u.symbol
+        """,
+        (signal_dt, signal_dt, signal_dt, min_history_bars),
+    ).fetchall()
+    return [str(row[0]).upper() for row in rows]
+
+
 def _upsert_signal(conn, *, ticker: str, signal_dt: date, strategy_id: int, direction: str, raw: dict) -> None:
     conn.execute(
         """
@@ -433,11 +466,15 @@ def _generate_liquid_rs_breakout(
 def generate_eod_signals(
     conn,
     *,
-    tickers: Sequence[str],
+    tickers: Sequence[str] | None,
     signal_dt: date,
     momentum_lookback_days: int = 63,
     momentum_top_n: int = 10,
 ) -> dict:
+    universe_source = "explicit_tickers"
+    if tickers is None:
+        tickers = recommendation_universe_tickers(conn, signal_dt=signal_dt)
+        universe_source = "broad_current_with_data_gates"
     if not tickers:
         raise ValueError("tickers are required")
     seed_default_strategies(conn)
@@ -455,7 +492,13 @@ def generate_eod_signals(
         ),
         "liquid_rs_breakout_continuation": _generate_liquid_rs_breakout(conn, tickers=tickers, signal_dt=signal_dt, strategies=strategies),
     }
-    return {"signal_dt": signal_dt.isoformat(), "signals_by_strategy": counts, "signals_upserted": sum(counts.values())}
+    return {
+        "signal_dt": signal_dt.isoformat(),
+        "universe_source": universe_source,
+        "tickers_considered": [t.upper() for t in tickers],
+        "signals_by_strategy": counts,
+        "signals_upserted": sum(counts.values()),
+    }
 
 
 def _raw_value(raw: object, key: str, default: object = None) -> object:
