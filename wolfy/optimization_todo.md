@@ -760,3 +760,28 @@ Snapshot/conflict check:
 - State: created/claimed/completed Postgres task `3611` and run `360964`; recorded KPI rows for budget skip, tokens/headroom, guardian/gateway health, max_turns, parallel cap, human approval pending, iteration success, strategy counts, and repo health.
 - NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice. Preferred queued task remains `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
 
+
+
+## 2026-08-01 daily optimizer plan-only run
+
+- Time: 2026-08-01 02:17 EDT.
+- Budget gate: `python wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=204507 cap=200000` (exit 1), so this run followed the PLAN-ONLY rule: review/state/KPI updates only, no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), and `hermes cron list` exit=0 with optimizer job active.
+- State: created/completed Postgres task `3654` and run `374954`; recorded KPI rows for budget skip, tokens/headroom, guardian/gateway health, max_turns, parallel cap, human approval pending, iteration success, and regressions introduced.
+- NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice. Preferred queued task remains OWS-4 / Jonah cadence hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
+
+## 2026-08-02 daily optimizer plan-only run
+
+- Time: 2026-08-02 02:16 EDT / 06:16 UTC.
+- Budget gate: `python wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=203183 cap=200000` (exit 1), so this run followed PLAN-ONLY: orientation, guardian health, task/run state, and KPI updates only; no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python wolfy/guardian/config_guardian.py --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), `hermes cron list` succeeded, and `config.yaml`/`cron/jobs.json` parsed.
+- State: created/claimed/completed Postgres task `3655` and run `376346`; recorded 18 loop metric rows including jobs_skipped_by_budget=1, tokens_today=203183, usage_headroom_pct=0, gateway_healthy=1, config_rollbacks=0, max_turns=90, parallel_jobs_cap=1, human_approval_pending=0, and regressions_introduced=0.
+- NEXT ACTION: wait for budget headroom to recover, then execute exactly one Tier S control-plane slice. Preferred queued task remains `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish remaining OWS-1 no-op coverage if budget-gate gaps are found.
+
+## 2026-08-03 daily optimizer plan-only run
+
+- Time: 2026-08-03 02:16 EDT / 06:16 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=318509 cap=200000` (exit 1), so this run followed PLAN-ONLY: orientation, guardian/probation review, Postgres task/run state, KPI updates, and ledger note only; no code/config/cron implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;hermes_cron_list_ok;no_probation` (exit 0), and `hermes cron list` succeeded with optimizer job `92f31b95fccc` active.
+- State: created/claimed Postgres task `3656` and run `377516`; recorded 22 loop metric rows including jobs_skipped_by_budget=1, tokens_today=318509, usage_headroom_pct=0, gateway_healthy=1, config_rollbacks=0, max_turns=90, parallel_jobs_cap=1, human_approval_pending=0, and regressions_introduced=0.
+- NEXT ACTION: wait for budget headroom to recover, then execute exactly one Tier S control-plane slice. Preferred queued task remains `3546` / OWS-4: reduce Jonah cadence from `*/20` to hourly under the self-modification protocol; otherwise finish OWS-1 no-op coverage if budget-gate gaps are found.
