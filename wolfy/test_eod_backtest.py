@@ -76,6 +76,26 @@ def test_evaluate_underlying_setup_outcome_stops_before_later_target():
     assert result["mae_r"] == "-1.2000"
 
 
+def test_evaluate_underlying_setup_outcome_close_below_stop_mode_ignores_intraday_break():
+    from eod_backtest import evaluate_underlying_setup_outcome
+
+    result = evaluate_underlying_setup_outcome(
+        signal_dt=date(2026, 1, 1),
+        entry=Decimal("100"),
+        stop=Decimal("99"),
+        future_bars=[
+            {"dt": date(2026, 1, 2), "high": Decimal("100.5"), "low": Decimal("98.5"), "close": Decimal("99.5")},
+            {"dt": date(2026, 1, 3), "high": Decimal("101.2"), "low": Decimal("99.1"), "close": Decimal("101")},
+        ],
+        target_r=Decimal("1.0"),
+        stop_mode="close_below",
+    )
+
+    assert result["classification"] == "successful_continuation"
+    assert result["hit_target"] is True
+    assert result["hit_stop"] is False
+
+
 def test_evaluate_oos_gates_reports_threshold_failures():
     from eod_backtest import evaluate_oos_gates
 

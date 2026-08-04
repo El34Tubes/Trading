@@ -73,6 +73,28 @@ DEFAULT_STRATEGIES = (
         },
         "Tighter research_only revision after backward setup-success analysis: high volume, positive RS excess, and stop distance <=4%.",
     ),
+    (
+        "liquid_rs_breakout_close_confirm_1r",
+        "rs_breakout_continuation",
+        {
+            "source": "Wolfy exhaustive setup-outcome grid 2026-08-03",
+            "parent_strategy": "liquid_rs_breakout_continuation",
+            "requires_backtest": True,
+            "breakout_lookback_days": 5,
+            "rs_benchmark": "SPY",
+            "rs_window_days": 20,
+            "min_vol_ratio": "1.2",
+            "min_rs_excess_20d": "0.02",
+            "max_prior_low_risk_pct": "0.05",
+            "market_regime": "SPY_above_50_sma",
+            "stop_rule": "close_below_breakout_level",
+            "target_r": "1.0",
+            "max_hold_days": 10,
+            "preferred_instrument": "2-3wk slightly OTM call spread",
+            "option_liquidity_hard_gate": False,
+        },
+        "Research_only revision from exhaustive grid: SPY>50, 1R target, close-back-below-breakout invalidation, RS excess >=2%, volume >=1.2, prior-low risk <=5%.",
+    ),
 )
 
 
@@ -378,6 +400,9 @@ def _generate_liquid_rs_breakout(
     max_stop_risk_pct: Decimal | None = None,
     near_high_pct: Decimal = Decimal("0.05"),
     strategy_name: str = "liquid_rs_breakout_continuation",
+    require_spy_above_sma_days: int | None = None,
+    stop_rule: str = "prior_5_day_low",
+    target_r: Decimal = Decimal("1.5"),
 ) -> int:
     strategy_id, status = strategies[strategy_name]
     spy_row = conn.execute(
@@ -396,6 +421,19 @@ def _generate_liquid_rs_breakout(
     if not spy_row or spy_row[1] in (None, 0):
         return 0
     spy_return = (Decimal(str(spy_row[0])) / Decimal(str(spy_row[1]))) - Decimal("1")
+    spy_sma = None
+    if require_spy_above_sma_days:
+        spy_sma_row = conn.execute(
+            """
+            SELECT avg(close) FROM (
+              SELECT close FROM prices WHERE ticker='SPY' AND dt <= %s ORDER BY dt DESC LIMIT %s
+            ) spy_window
+            """,
+            (signal_dt, require_spy_above_sma_days),
+        ).fetchone()
+        spy_sma = Decimal(str(spy_sma_row[0])) if spy_sma_row and spy_sma_row[0] is not None else None
+        if spy_sma is None or Decimal(str(spy_row[0])) <= spy_sma:
+            return 0
 
     generated = 0
     for ticker in [t.upper() for t in tickers if t.upper() != "SPY"]:
@@ -479,11 +517,14 @@ def _generate_liquid_rs_breakout(
             "min_vol_ratio": min_vol_ratio,
             "stop_risk_pct": stop_risk_pct,
             "max_stop_risk_pct": max_stop_risk_pct,
+            "spy_sma_days": require_spy_above_sma_days,
+            "spy_sma": spy_sma,
             "within_5pct_recent_high": within_5pct_recent_high,
-            "stop_rule": "prior_5_day_low",
-            "invalidation": prior_low_dec,
+            "stop_rule": stop_rule,
+            "invalidation": prior_low_dec if stop_rule == "prior_5_day_low" else prior_high_dec,
             "max_hold_days": 10,
-            "profit_plan": "partial_at_1_5R_then_trail_remainder",
+            "target_r": target_r,
+            "profit_plan": f"take_partial_or_review_at_{target_r}R_then_trail_remainder",
             "preferred_instrument": "2-3wk slightly OTM call spread",
             "option_liquidity_hard_gate": False,
             "option_liquidity_note": "user_to_evaluate_manually",
@@ -533,6 +574,19 @@ def generate_eod_signals(
             min_vol_ratio=Decimal("2.0"),
             min_rs_excess=Decimal("0.02"),
             max_stop_risk_pct=Decimal("0.04"),
+        ),
+        "liquid_rs_breakout_close_confirm_1r": _generate_liquid_rs_breakout(
+            conn,
+            tickers=tickers,
+            signal_dt=signal_dt,
+            strategies=strategies,
+            strategy_name="liquid_rs_breakout_close_confirm_1r",
+            min_vol_ratio=Decimal("1.2"),
+            min_rs_excess=Decimal("0.02"),
+            max_stop_risk_pct=Decimal("0.05"),
+            require_spy_above_sma_days=50,
+            stop_rule="close_below_breakout_level",
+            target_r=Decimal("1.0"),
         ),
     }
     return {

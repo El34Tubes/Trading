@@ -94,6 +94,7 @@ def evaluate_underlying_setup_outcome(
     future_bars: Sequence[dict],
     target_r: Decimal = Decimal("1.5"),
     max_hold_days: int = 10,
+    stop_mode: str = "intrabar_low",
 ) -> dict:
     """Grade whether an underlying technical setup worked after recommendation.
 
@@ -133,12 +134,14 @@ def evaluate_underlying_setup_outcome(
     for idx, bar in enumerate(bars, start=1):
         high = _dec(bar.get("high"))
         low = _dec(bar.get("low"))
+        close = _dec(bar.get("close"))
         if high > best_high:
             best_high = high
             best_dt = bar["dt"]
         if low < worst_low:
             worst_low = low
-        if low <= stop:
+        stop_hit = close <= stop if stop_mode == "close_below" else low <= stop
+        if stop_hit:
             hit_stop = True
             exit_reason = "stop_or_invalidation"
             exit_dt = bar["dt"]

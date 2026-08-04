@@ -60,7 +60,7 @@ def _restore_default_strategy_statuses(conn) -> None:
         """
         UPDATE strategies
         SET status='research_only', latest_oos_verdict=NULL, last_validated=NULL
-        WHERE name IN ('pead','trend_volume_vol_regime','sector_cross_sectional_momentum','liquid_rs_breakout_continuation','liquid_rs_breakout_tight_risk_volume')
+        WHERE name IN ('pead','trend_volume_vol_regime','sector_cross_sectional_momentum','liquid_rs_breakout_continuation','liquid_rs_breakout_tight_risk_volume','liquid_rs_breakout_close_confirm_1r')
         """
     )
 
@@ -151,7 +151,7 @@ def test_seed_default_strategies_includes_rs_breakout_as_research_only():
         seed_default_strategies(conn)
         _restore_default_strategy_statuses(conn)
         rows = conn.execute(
-            "SELECT name, setup_type, status, params, notes FROM strategies WHERE name IN ('liquid_rs_breakout_continuation','liquid_rs_breakout_tight_risk_volume')"
+            "SELECT name, setup_type, status, params, notes FROM strategies WHERE name IN ('liquid_rs_breakout_continuation','liquid_rs_breakout_tight_risk_volume','liquid_rs_breakout_close_confirm_1r')"
         ).fetchall()
 
     by_name = {row[0]: row for row in rows}
@@ -164,6 +164,11 @@ def test_seed_default_strategies_includes_rs_breakout_as_research_only():
     assert tight[2] == "research_only"
     assert tight[3]["parent_strategy"] == "liquid_rs_breakout_continuation"
     assert tight[3]["max_stop_risk_pct"] == "0.04"
+    close_confirm = by_name["liquid_rs_breakout_close_confirm_1r"]
+    assert close_confirm[2] == "research_only"
+    assert close_confirm[3]["market_regime"] == "SPY_above_50_sma"
+    assert close_confirm[3]["stop_rule"] == "close_below_breakout_level"
+    assert close_confirm[3]["target_r"] == "1.0"
 
 
 def test_generate_liquid_rs_breakout_continuation_signal():
