@@ -96,6 +96,69 @@ def test_evaluate_underlying_setup_outcome_close_below_stop_mode_ignores_intrada
     assert result["hit_stop"] is False
 
 
+def test_evaluate_setup_outcome_gates_passes_with_frequency_aware_oos_split():
+    from eod_backtest import evaluate_setup_outcome_gates
+
+    outcomes = []
+    for idx in range(12):
+        outcomes.append(
+            {
+                "signal_dt": date(2026, 1, 1) + timedelta(days=idx),
+                "hit_target": idx not in {1, 7, 10},
+                "hit_stop": idx in {1, 10},
+                "mfe_r": "1.2500" if idx not in {1, 7, 10} else "0.4000",
+            }
+        )
+
+    verdict = evaluate_setup_outcome_gates(
+        outcomes,
+        min_sample=10,
+        min_oos_sample=3,
+        min_hit_rate=Decimal("0.60"),
+        min_oos_hit_rate=Decimal("0.50"),
+        max_stop_rate=Decimal("0.30"),
+        min_median_mfe_r=Decimal("1.0"),
+        oos_fraction=Decimal("0.25"),
+    )
+
+    assert verdict["passed"] is True
+    assert verdict["failure_reasons"] == []
+    assert verdict["observed"]["sample"] == 12
+    assert verdict["observed"]["oos_sample"] == 3
+    assert verdict["observed"]["hit_rate"] == "0.7500"
+    assert verdict["observed"]["oos_hit_rate"] == "0.6667"
+
+
+def test_evaluate_setup_outcome_gates_reports_failed_thresholds():
+    from eod_backtest import evaluate_setup_outcome_gates
+
+    outcomes = [
+        {"signal_dt": date(2026, 1, 1), "hit_target": False, "hit_stop": True, "mfe_r": "0.2000"},
+        {"signal_dt": date(2026, 1, 2), "hit_target": False, "hit_stop": False, "mfe_r": "0.3000"},
+    ]
+
+    verdict = evaluate_setup_outcome_gates(
+        outcomes,
+        min_sample=10,
+        min_oos_sample=3,
+        min_hit_rate=Decimal("0.55"),
+        min_oos_hit_rate=Decimal("0.50"),
+        max_stop_rate=Decimal("0.45"),
+        min_median_mfe_r=Decimal("1.0"),
+        oos_fraction=Decimal("0.25"),
+    )
+
+    assert verdict["passed"] is False
+    assert verdict["failure_reasons"] == [
+        "insufficient_setup_sample",
+        "insufficient_oos_setup_sample",
+        "hit_rate_below_threshold",
+        "oos_hit_rate_below_threshold",
+        "stop_rate_exceeds_threshold",
+        "median_mfe_r_below_threshold",
+    ]
+
+
 def test_evaluate_oos_gates_reports_threshold_failures():
     from eod_backtest import evaluate_oos_gates
 

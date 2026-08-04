@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from statistics import mean, pstdev
+from statistics import mean, median, pstdev
 from typing import Sequence
 
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
@@ -177,6 +177,76 @@ def evaluate_underlying_setup_outcome(
         "days_to_best_move": None if best_dt is None else (best_dt - signal_dt).days,
         "exit_dt": exit_dt.isoformat() if hasattr(exit_dt, "isoformat") else str(exit_dt),
         "exit_reason": exit_reason,
+    }
+
+
+def evaluate_setup_outcome_gates(
+    outcomes: Sequence[dict],
+    *,
+    min_sample: int = 100,
+    min_oos_sample: int = 25,
+    min_hit_rate: Decimal = Decimal("0.55"),
+    min_oos_hit_rate: Decimal = Decimal("0.50"),
+    max_stop_rate: Decimal = Decimal("0.45"),
+    min_median_mfe_r: Decimal = Decimal("1.0"),
+    oos_fraction: Decimal = Decimal("0.25"),
+) -> dict:
+    """Evaluate setup-outcome-native gates for options-timed technical strategies.
+
+    Unlike next-close return backtests, this validates the actual recommendation
+    thesis: hit deterministic R target before invalidation within the strategy
+    horizon, with a frequency-aware chronological OOS tail.
+    """
+    ordered = sorted(outcomes, key=lambda row: row["signal_dt"])
+    sample = len(ordered)
+    oos_size = min(sample, max(min_oos_sample, int((Decimal(sample) * oos_fraction).to_integral_value(rounding="ROUND_CEILING")))) if sample else 0
+    oos = ordered[-oos_size:] if oos_size else []
+
+    def _rate(rows: Sequence[dict], key: str) -> Decimal:
+        if not rows:
+            return Decimal("0")
+        return _q(Decimal(sum(1 for row in rows if row.get(key))) / Decimal(len(rows)))
+
+    hit_rate = _rate(ordered, "hit_target")
+    oos_hit_rate = _rate(oos, "hit_target")
+    stop_rate = _rate(ordered, "hit_stop")
+    mfe_values = [_dec(row.get("mfe_r")) for row in ordered]
+    median_mfe_r = _q(median(mfe_values)) if mfe_values else Decimal("0")
+
+    failure_reasons: list[str] = []
+    if sample < min_sample:
+        failure_reasons.append("insufficient_setup_sample")
+    if len(oos) < min_oos_sample:
+        failure_reasons.append("insufficient_oos_setup_sample")
+    if hit_rate < min_hit_rate:
+        failure_reasons.append("hit_rate_below_threshold")
+    if oos_hit_rate < min_oos_hit_rate:
+        failure_reasons.append("oos_hit_rate_below_threshold")
+    if stop_rate > max_stop_rate:
+        failure_reasons.append("stop_rate_exceeds_threshold")
+    if median_mfe_r < min_median_mfe_r:
+        failure_reasons.append("median_mfe_r_below_threshold")
+
+    return {
+        "passed": not failure_reasons,
+        "failure_reasons": failure_reasons,
+        "thresholds": {
+            "min_sample": min_sample,
+            "min_oos_sample": min_oos_sample,
+            "min_hit_rate": str(_q(min_hit_rate)),
+            "min_oos_hit_rate": str(_q(min_oos_hit_rate)),
+            "max_stop_rate": str(_q(max_stop_rate)),
+            "min_median_mfe_r": str(_q(min_median_mfe_r)),
+            "oos_fraction": str(_q(oos_fraction)),
+        },
+        "observed": {
+            "sample": sample,
+            "oos_sample": len(oos),
+            "hit_rate": str(hit_rate),
+            "oos_hit_rate": str(oos_hit_rate),
+            "stop_rate": str(stop_rate),
+            "median_mfe_r": str(median_mfe_r),
+        },
     }
 
 
