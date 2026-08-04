@@ -52,6 +52,27 @@ DEFAULT_STRATEGIES = (
         },
         "Seeded as research_only. Human approval required before recommendations; deterministic 5-day RS breakout setup for options-oriented paper candidates.",
     ),
+    (
+        "liquid_rs_breakout_tight_risk_volume",
+        "rs_breakout_continuation",
+        {
+            "source": "Wolfy failed-validation revision 2026-07-30",
+            "parent_strategy": "liquid_rs_breakout_continuation",
+            "requires_backtest": True,
+            "breakout_lookback_days": 5,
+            "rs_benchmark": "SPY",
+            "rs_window_days": 20,
+            "min_vol_ratio": "2.0",
+            "min_rs_excess_20d": "0.02",
+            "max_stop_risk_pct": "0.04",
+            "near_high_pct": "0.05",
+            "stop_rule": "prior_5_day_low",
+            "max_hold_days": 10,
+            "preferred_instrument": "2-3wk slightly OTM call spread",
+            "option_liquidity_hard_gate": False,
+        },
+        "Tighter research_only revision after backward setup-success analysis: high volume, positive RS excess, and stop distance <=4%.",
+    ),
 )
 
 
@@ -353,9 +374,12 @@ def _generate_liquid_rs_breakout(
     breakout_lookback_days: int = 5,
     rs_window_days: int = 20,
     min_vol_ratio: Decimal = Decimal("1.2"),
+    min_rs_excess: Decimal = Decimal("0"),
+    max_stop_risk_pct: Decimal | None = None,
     near_high_pct: Decimal = Decimal("0.05"),
+    strategy_name: str = "liquid_rs_breakout_continuation",
 ) -> int:
-    strategy_id, status = strategies["liquid_rs_breakout_continuation"]
+    strategy_id, status = strategies[strategy_name]
     spy_row = conn.execute(
         """
         SELECT cur.close, prev.close
@@ -428,13 +452,18 @@ def _generate_liquid_rs_breakout(
             continue
         if ticker_return <= spy_return:
             continue
+        if rs_excess < min_rs_excess:
+            continue
         if vol_ratio_dec < min_vol_ratio:
+            continue
+        stop_risk_pct = (close_dec - prior_low_dec) / close_dec if close_dec else None
+        if max_stop_risk_pct is not None and (stop_risk_pct is None or stop_risk_pct > max_stop_risk_pct):
             continue
         if not within_5pct_recent_high:
             continue
 
         raw = {
-            "strategy": "liquid_rs_breakout_continuation",
+            "strategy": strategy_name,
             "close": close_dec,
             "prior_5d_high": prior_high_dec,
             "prior_5d_low": prior_low_dec,
@@ -445,7 +474,11 @@ def _generate_liquid_rs_breakout(
             "ticker_return_20d": ticker_return,
             "spy_return_20d": spy_return,
             "rs_excess_20d": rs_excess,
+            "min_rs_excess_20d": min_rs_excess,
             "vol_ratio": vol_ratio_dec,
+            "min_vol_ratio": min_vol_ratio,
+            "stop_risk_pct": stop_risk_pct,
+            "max_stop_risk_pct": max_stop_risk_pct,
             "within_5pct_recent_high": within_5pct_recent_high,
             "stop_rule": "prior_5_day_low",
             "invalidation": prior_low_dec,
@@ -491,6 +524,16 @@ def generate_eod_signals(
             strategies=strategies,
         ),
         "liquid_rs_breakout_continuation": _generate_liquid_rs_breakout(conn, tickers=tickers, signal_dt=signal_dt, strategies=strategies),
+        "liquid_rs_breakout_tight_risk_volume": _generate_liquid_rs_breakout(
+            conn,
+            tickers=tickers,
+            signal_dt=signal_dt,
+            strategies=strategies,
+            strategy_name="liquid_rs_breakout_tight_risk_volume",
+            min_vol_ratio=Decimal("2.0"),
+            min_rs_excess=Decimal("0.02"),
+            max_stop_risk_pct=Decimal("0.04"),
+        ),
     }
     return {
         "signal_dt": signal_dt.isoformat(),

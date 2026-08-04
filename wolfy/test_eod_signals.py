@@ -40,12 +40,19 @@ def _breakout_bars(
 
 
 def _cleanup(conn, tickers: list[str]) -> None:
-    conn.execute("DELETE FROM setups WHERE ticker = ANY(%s)", (tickers,))
-    conn.execute("DELETE FROM signals WHERE ticker = ANY(%s)", (tickers,))
-    conn.execute("DELETE FROM earnings_calendar WHERE ticker = ANY(%s)", (tickers,))
-    conn.execute("DELETE FROM features WHERE ticker = ANY(%s)", (tickers,))
-    conn.execute("DELETE FROM prices WHERE ticker = ANY(%s)", (tickers,))
-    conn.execute("DELETE FROM universe_symbols WHERE symbol = ANY(%s)", (tickers,))
+    unit_tickers = [ticker for ticker in tickers if ticker != "SPY"]
+    if unit_tickers:
+        conn.execute("DELETE FROM setups WHERE ticker = ANY(%s)", (unit_tickers,))
+        conn.execute("DELETE FROM signals WHERE ticker = ANY(%s)", (unit_tickers,))
+        conn.execute("DELETE FROM earnings_calendar WHERE ticker = ANY(%s)", (unit_tickers,))
+        conn.execute("DELETE FROM features WHERE ticker = ANY(%s)", (unit_tickers,))
+        conn.execute("DELETE FROM prices WHERE ticker = ANY(%s)", (unit_tickers,))
+        conn.execute("DELETE FROM universe_symbols WHERE symbol = ANY(%s)", (unit_tickers,))
+    if "SPY" in tickers:
+        # SPY is the live benchmark; tests may insert isolated 2099 fixture rows,
+        # but cleanup must never erase real historical SPY prices/features.
+        conn.execute("DELETE FROM features WHERE ticker='SPY' AND dt >= DATE '2099-01-01'")
+        conn.execute("DELETE FROM prices WHERE ticker='SPY' AND dt >= DATE '2099-01-01'")
 
 
 def _restore_default_strategy_statuses(conn) -> None:
@@ -53,7 +60,7 @@ def _restore_default_strategy_statuses(conn) -> None:
         """
         UPDATE strategies
         SET status='research_only', latest_oos_verdict=NULL, last_validated=NULL
-        WHERE name IN ('pead','trend_volume_vol_regime','sector_cross_sectional_momentum','liquid_rs_breakout_continuation')
+        WHERE name IN ('pead','trend_volume_vol_regime','sector_cross_sectional_momentum','liquid_rs_breakout_continuation','liquid_rs_breakout_tight_risk_volume')
         """
     )
 
@@ -118,7 +125,7 @@ def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers
             _cleanup(conn, tickers)
             for symbol in tickers:
                 conn.execute(
-                    "INSERT INTO universe_symbols(symbol, name, source, active, wolfy_tier, backfill_enabled) VALUES (%s, %s, 'unit-test', true, 'small_cap', true)",
+                    "INSERT INTO universe_symbols(symbol, name, source, active, wolfy_tier, backfill_enabled) VALUES (%s, %s, 'unit-test', true, 'small_cap', true) ON CONFLICT (symbol) DO UPDATE SET active=true",
                     (symbol, symbol),
                 )
             ingest_price_bars(conn, _breakout_bars("ZZAUTO", daily_step=Decimal("0.70"), breakout_lift=Decimal("2.50")), source="unit-auto-universe")
@@ -143,16 +150,20 @@ def test_seed_default_strategies_includes_rs_breakout_as_research_only():
     with psycopg.connect(dsn) as conn:
         seed_default_strategies(conn)
         _restore_default_strategy_statuses(conn)
-        row = conn.execute(
-            "SELECT name, setup_type, status, params, notes FROM strategies WHERE name='liquid_rs_breakout_continuation'"
-        ).fetchone()
+        rows = conn.execute(
+            "SELECT name, setup_type, status, params, notes FROM strategies WHERE name IN ('liquid_rs_breakout_continuation','liquid_rs_breakout_tight_risk_volume')"
+        ).fetchall()
 
-    assert row is not None
-    assert row[0] == "liquid_rs_breakout_continuation"
+    by_name = {row[0]: row for row in rows}
+    row = by_name["liquid_rs_breakout_continuation"]
     assert row[1] == "rs_breakout_continuation"
     assert row[2] == "research_only"
     assert row[3]["requires_backtest"] is True
     assert "Human approval required" in row[4]
+    tight = by_name["liquid_rs_breakout_tight_risk_volume"]
+    assert tight[2] == "research_only"
+    assert tight[3]["parent_strategy"] == "liquid_rs_breakout_continuation"
+    assert tight[3]["max_stop_risk_pct"] == "0.04"
 
 
 def test_generate_liquid_rs_breakout_continuation_signal():
