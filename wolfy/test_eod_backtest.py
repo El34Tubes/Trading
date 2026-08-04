@@ -32,6 +32,50 @@ def _cleanup(conn, ticker: str, strategy_name: str, ids: list[int] | None = None
     conn.execute("DELETE FROM prices WHERE ticker=%s", (ticker,))
 
 
+def test_evaluate_underlying_setup_outcome_hits_target_before_time_stop():
+    from eod_backtest import evaluate_underlying_setup_outcome
+
+    result = evaluate_underlying_setup_outcome(
+        signal_dt=date(2026, 1, 1),
+        entry=Decimal("100"),
+        stop=Decimal("95"),
+        future_bars=[
+            {"dt": date(2026, 1, 2), "high": Decimal("103"), "low": Decimal("98"), "close": Decimal("102")},
+            {"dt": date(2026, 1, 3), "high": Decimal("108"), "low": Decimal("101"), "close": Decimal("107")},
+        ],
+        target_r=Decimal("1.5"),
+        max_hold_days=10,
+    )
+
+    assert result["classification"] == "successful_continuation"
+    assert result["hit_target"] is True
+    assert result["hit_stop"] is False
+    assert result["target_price"] == "107.5000"
+    assert result["mfe_r"] == "1.6000"
+    assert result["days_to_best_move"] == 2
+
+
+def test_evaluate_underlying_setup_outcome_stops_before_later_target():
+    from eod_backtest import evaluate_underlying_setup_outcome
+
+    result = evaluate_underlying_setup_outcome(
+        signal_dt=date(2026, 1, 1),
+        entry=Decimal("100"),
+        stop=Decimal("95"),
+        future_bars=[
+            {"dt": date(2026, 1, 2), "high": Decimal("102"), "low": Decimal("94"), "close": Decimal("95")},
+            {"dt": date(2026, 1, 3), "high": Decimal("110"), "low": Decimal("99"), "close": Decimal("109")},
+        ],
+        target_r=Decimal("1.5"),
+        max_hold_days=10,
+    )
+
+    assert result["classification"] == "stopped_or_invalidated"
+    assert result["hit_stop"] is True
+    assert result["hit_target"] is False
+    assert result["mae_r"] == "-1.2000"
+
+
 def test_evaluate_oos_gates_reports_threshold_failures():
     from eod_backtest import evaluate_oos_gates
 

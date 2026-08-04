@@ -86,6 +86,97 @@ def _max_drawdown(returns: Sequence[float]) -> Decimal:
     return _q(worst)
 
 
+def evaluate_underlying_setup_outcome(
+    *,
+    signal_dt: date,
+    entry: Decimal,
+    stop: Decimal,
+    future_bars: Sequence[dict],
+    target_r: Decimal = Decimal("1.5"),
+    max_hold_days: int = 10,
+) -> dict:
+    """Grade whether an underlying technical setup worked after recommendation.
+
+    This grades setup accuracy, not user fill price or option-spread P/L. It uses
+    the deterministic recommendation close/stop and looks forward up to the
+    strategy horizon. If stop and target both appear inside the same bar, the
+    conservative stop-first assumption wins.
+    """
+    if entry <= 0:
+        raise ValueError("entry must be positive")
+    risk = entry - stop
+    if risk <= 0:
+        raise ValueError("stop must be below entry for long setup evaluation")
+    target_price = entry + (risk * target_r)
+    bars = sorted(future_bars, key=lambda row: row["dt"])[:max_hold_days]
+    if not bars:
+        return {
+            "classification": "no_follow_through",
+            "hit_target": False,
+            "hit_stop": False,
+            "target_price": str(_q(target_price)),
+            "mfe_r": "0.0000",
+            "mae_r": "0.0000",
+            "mfe_pct": "0.0000",
+            "mae_pct": "0.0000",
+            "days_to_best_move": None,
+            "exit_dt": None,
+            "exit_reason": "no_future_bars",
+        }
+    best_high = entry
+    worst_low = entry
+    best_dt = None
+    exit_reason = "time_stop"
+    exit_dt = bars[-1]["dt"]
+    hit_target = False
+    hit_stop = False
+    for idx, bar in enumerate(bars, start=1):
+        high = _dec(bar.get("high"))
+        low = _dec(bar.get("low"))
+        if high > best_high:
+            best_high = high
+            best_dt = bar["dt"]
+        if low < worst_low:
+            worst_low = low
+        if low <= stop:
+            hit_stop = True
+            exit_reason = "stop_or_invalidation"
+            exit_dt = bar["dt"]
+            break
+        if high >= target_price:
+            hit_target = True
+            exit_reason = "target_1_5r"
+            exit_dt = bar["dt"]
+            break
+    mfe_r = (best_high - entry) / risk
+    mae_r = (worst_low - entry) / risk
+    mfe_pct = (best_high / entry) - Decimal("1")
+    mae_pct = (worst_low / entry) - Decimal("1")
+    if hit_target:
+        classification = "successful_continuation"
+    elif hit_stop:
+        classification = "stopped_or_invalidated"
+    elif mfe_r >= Decimal("1.0"):
+        classification = "partial_success"
+    elif best_high > entry:
+        classification = "no_follow_through"
+    else:
+        classification = "failed_breakout"
+    return {
+        "classification": classification,
+        "hit_target": hit_target,
+        "hit_stop": hit_stop,
+        "target_price": str(_q(target_price)),
+        "mfe_r": str(_q(mfe_r)),
+        "mae_r": str(_q(mae_r)),
+        "mfe_pct": str(_q(mfe_pct)),
+        "mae_pct": str(_q(mae_pct)),
+        "days_to_best_move": None if best_dt is None else (best_dt - signal_dt).days,
+        "exit_dt": exit_dt.isoformat() if hasattr(exit_dt, "isoformat") else str(exit_dt),
+        "exit_reason": exit_reason,
+    }
+
+
 def evaluate_oos_gates(
     *,
     is_trades: int,
