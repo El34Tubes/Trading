@@ -65,6 +65,19 @@ def test_dashboard_requires_pin_and_exposes_summary_api():
     assert ok.json()["refresh_seconds"] == 60
 
 
+def test_poll_answer_replaces_prior_answer_for_same_poll(tmp_path):
+    from dashboard_app import JsonNoteStore
+
+    store = JsonNoteStore(tmp_path / "notes.json")
+    store.add_poll_answer(poll_id="next-build", choice="dashboard")
+    store.add_poll_answer(poll_id="next-build", choice="paper logging")
+
+    loaded = JsonNoteStore(tmp_path / "notes.json").list_poll_answers()
+    assert len(loaded) == 1
+    assert loaded[0]["poll_id"] == "next-build"
+    assert loaded[0]["choice"] == "paper logging"
+
+
 def test_poll_answer_api_writes_back_and_summary_returns_answer(tmp_path):
     from dashboard_app import JsonNoteStore, create_app
 

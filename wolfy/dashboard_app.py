@@ -106,7 +106,7 @@ class JsonNoteStore:
         }
         if not item["poll_id"] or not item["choice"]:
             raise ValueError("poll_id and choice are required")
-        rows = self._read()
+        rows = [row for row in self._read() if not (row.get("type") == "poll_answer" and row.get("poll_id") == item["poll_id"])]
         rows.append(item)
         self._write(rows)
         return item
