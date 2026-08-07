@@ -772,6 +772,148 @@ def _build_screened_setup(
     return setup, reasons
 
 
+def _recommendation_score(raw: Mapping[str, Any]) -> Decimal:
+    return _as_decimal(_raw_value(raw, "rs_excess_20d"), Decimal("0")) * Decimal("100") + _as_decimal(_raw_value(raw, "vol_ratio"), Decimal("0"))
+
+
+def write_approved_paper_recommendations(
+    conn,
+    *,
+    signal_dt: date,
+    tickers: Sequence[str] | None = None,
+    max_recommendations: int = 3,
+    risk_fraction: Decimal = Decimal("0.05"),
+    dry_run: bool = False,
+) -> dict:
+    """Write approved-strategy deterministic paper recommendations to Postgres.
+
+    This is paper-only: no broker execution and no paper_trades insert. The paper
+    logging step is a separate gate. Recommendations are sourced only from
+    strategies with status='approved'.
+    """
+    ensure_signal_schema(conn)
+    params: list[object] = [signal_dt]
+    ticker_clause = ""
+    if tickers is not None:
+        ticker_clause = "AND s.ticker = ANY(%s)"
+        params.append([ticker.upper() for ticker in tickers])
+    rows = conn.execute(
+        f"""
+        SELECT s.ticker, s.direction, s.raw, st.id, st.name, st.status
+        FROM signals s
+        JOIN strategies st ON st.id=s.strategy_id
+        WHERE s.dt=%s {ticker_clause}
+          AND lower(coalesce(s.direction,'')) IN ('long','buy')
+        ORDER BY s.ticker, st.name
+        """,
+        params,
+    ).fetchall()
+    approved: list[dict[str, Any]] = []
+    blocked_by_strategy_status = 0
+    for ticker, direction, raw, strategy_id, strategy_name, status in rows:
+        if status != "approved":
+            blocked_by_strategy_status += 1
+            continue
+        raw_dict = raw if isinstance(raw, Mapping) else json.loads(raw or "{}")
+        approved.append(
+            {
+                "ticker": str(ticker),
+                "direction": str(direction or "long"),
+                "raw": raw_dict,
+                "strategy_id": int(strategy_id),
+                "strategy_name": str(strategy_name),
+                "score": _recommendation_score(raw_dict),
+            }
+        )
+    approved.sort(key=lambda item: (-item["score"], item["ticker"]))
+    selected = approved[: max(0, max_recommendations)]
+    created = 0
+    skipped_existing = 0
+    serializable: list[dict[str, Any]] = []
+    for item in selected:
+        raw = item["raw"]
+        ticker = item["ticker"]
+        entry = _as_decimal(_raw_value(raw, "close"), Decimal("0"))
+        invalidation = _as_decimal(_raw_value(raw, "invalidation"), _as_decimal(_raw_value(raw, "prior_5d_high"), Decimal("0")))
+        risk_per_share = max(entry - invalidation, Decimal("0.01"))
+        target_r = _as_decimal(_raw_value(raw, "target_r"), Decimal("1.0"))
+        target = entry + risk_per_share * target_r
+        notes = {
+            "paper_only": True,
+            "no_live_execution": True,
+            "review_gate_required": False,
+            "sentinel_yang_required": False,
+            "paper_entry_baseline": "eod_close",
+            "signal_dt": signal_dt.isoformat(),
+            "strategy_id": item["strategy_id"],
+            "strategy_name": item["strategy_name"],
+            "source_signal": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in raw.items()},
+            "option_spread": {
+                "structure": _raw_value(raw, "preferred_instrument", "2-3wk slightly OTM call spread"),
+                "exact_contract": None,
+                "liquidity_hard_gate": False,
+                "user_evaluates_liquidity_manually": True,
+            },
+            "equity_fallback": True,
+            "future_same_gate_auto_activation_allowed": True,
+        }
+        exists = conn.execute(
+            """
+            SELECT id FROM recommendations
+            WHERE ticker=%s
+              AND notes->>'signal_dt'=%s
+              AND notes->>'strategy_name'=%s
+              AND status='paper_candidate'
+            LIMIT 1
+            """,
+            (ticker, signal_dt.isoformat(), item["strategy_name"]),
+        ).fetchone()
+        payload = {
+            "ticker": ticker,
+            "strategy_name": item["strategy_name"],
+            "entry": _money(entry),
+            "stop": _money(invalidation),
+            "target": _money(target),
+            "risk_fraction": str(risk_fraction),
+        }
+        if exists:
+            skipped_existing += 1
+            serializable.append({**payload, "status": "existing"})
+            continue
+        if not dry_run:
+            conn.execute(
+                """
+                INSERT INTO recommendations(ticker, action, recommendation_type, thesis, setup_type, entry_zone, entry_trigger, stop, target, risk_reward, confidence, position_size_suggestion, holding_period, status, notes)
+                VALUES (%s,'buy','equity_plus_option_spread_when_data_exists',%s,%s,%s,%s,%s,%s,%s,'medium-high',%s,%s,'paper_candidate',%s::jsonb)
+                """,
+                (
+                    ticker,
+                    f"{ticker} triggered approved deterministic {item['strategy_name']} paper setup; paper-only, no live execution.",
+                    item["strategy_name"],
+                    f"EOD close baseline near {_money(entry)}",
+                    f"Use EOD close baseline {_money(entry)} from {signal_dt.isoformat()} for paper accounting.",
+                    f"Close below breakout/invalidation level {_money(invalidation)}.",
+                    f"Initial paper target near {_money(target)} ({target_r}R); max hold 10 trading days.",
+                    f"{target_r}R",
+                    f"Paper risk {risk_fraction * Decimal('100'):.2f}% of account; no max-open cap for paper testing.",
+                    "Up to 10 trading days",
+                    _json(notes),
+                ),
+            )
+        created += 1
+        serializable.append({**payload, "status": "paper_candidate"})
+    return {
+        "signal_dt": signal_dt.isoformat(),
+        "dry_run": dry_run,
+        "recommendations_created": created if not dry_run else 0,
+        "recommendations_ranked": len(selected),
+        "skipped_existing": skipped_existing,
+        "blocked_by_strategy_status": blocked_by_strategy_status,
+        "paper_trades_created": 0,
+        "recommendations": serializable,
+    }
+
+
 def propose_approved_setups(
     conn,
     *,

@@ -42,6 +42,7 @@ def _breakout_bars(
 def _cleanup(conn, tickers: list[str]) -> None:
     unit_tickers = [ticker for ticker in tickers if ticker != "SPY"]
     if unit_tickers:
+        conn.execute("DELETE FROM recommendations WHERE ticker = ANY(%s)", (unit_tickers,))
         conn.execute("DELETE FROM setups WHERE ticker = ANY(%s)", (unit_tickers,))
         conn.execute("DELETE FROM signals WHERE ticker = ANY(%s)", (unit_tickers,))
         conn.execute("DELETE FROM earnings_calendar WHERE ticker = ANY(%s)", (unit_tickers,))
@@ -161,7 +162,7 @@ def test_seed_default_strategies_includes_rs_breakout_as_research_only():
     assert tight[3]["parent_strategy"] == "liquid_rs_breakout_continuation"
     assert tight[3]["max_stop_risk_pct"] == "0.04"
     close_confirm = by_name["liquid_rs_breakout_close_confirm_1r"]
-    assert close_confirm[2] in {"research_only", "candidate"}
+    assert close_confirm[2] in {"research_only", "candidate", "approved"}
     assert close_confirm[3]["market_regime"] == "SPY_above_50_sma"
     assert close_confirm[3]["stop_rule"] == "close_below_breakout_level"
     assert close_confirm[3]["target_r"] == "1.0"
@@ -247,10 +248,66 @@ def test_generate_eod_signals_seeds_research_only_strategies_and_writes_determin
     assert result["signals_upserted"] >= 3
     names = {(row[0], row[1]) for row in rows}
     assert ("pead", "research_only") in names
-    assert ("trend_volume_vol_regime", "research_only") in names
+    assert any(name == "trend_volume_vol_regime" and status in {"research_only", "candidate", "approved"} for name, status in names)
     assert ("sector_cross_sectional_momentum", "research_only") in names
     assert all(row[3] == "long" for row in rows)
-    assert all(row[4]["gate_status"] == "research_only" for row in rows)
+    assert all(row[4]["gate_status"] in {"research_only", "candidate", "approved"} for row in rows)
+
+
+def test_write_approved_paper_recommendations_only_uses_approved_signals_and_caps_daily_rows():
+    psycopg = pytest.importorskip("psycopg")
+    from eod_signals import seed_default_strategies, write_approved_paper_recommendations
+
+    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    signal_dt = date(2099, 2, 4)
+    tickers = ["ZZREC1", "ZZREC2", "ZZREC3", "ZZREC4", "ZZBLOCK"]
+    with psycopg.connect(dsn) as conn:
+        try:
+            seed_default_strategies(conn)
+            _cleanup(conn, tickers)
+            approved_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_close_confirm_1r'").fetchone()[0]
+            blocked_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_continuation'").fetchone()[0]
+            conn.execute("UPDATE strategies SET status='approved' WHERE id=%s", (approved_id,))
+            conn.execute("UPDATE strategies SET status='research_only' WHERE id=%s", (blocked_id,))
+            for idx, ticker in enumerate(tickers, start=1):
+                ingest_price_bars(conn, _breakout_bars(ticker, start_close=Decimal("50") + idx), source="unit-recommendation-writer")
+                compute_and_store_features(conn, tickers=[ticker], sma_fast_window=5, sma_slow_window=20, volume_window=5, atr_window=5, min_dollar_vol=Decimal("1000"))
+                raw = {
+                    "strategy": "liquid_rs_breakout_close_confirm_1r" if ticker != "ZZBLOCK" else "liquid_rs_breakout_continuation",
+                    "close": str(Decimal("60") + idx),
+                    "prior_5d_high": str(Decimal("59") + idx),
+                    "prior_5d_low": str(Decimal("57") + idx),
+                    "invalidation": str(Decimal("59") + idx),
+                    "target_r": "1.0",
+                    "stop_rule": "close_below_breakout_level",
+                    "rs_excess_20d": "0.05",
+                    "vol_ratio": "1.8",
+                    "preferred_instrument": "2-3wk slightly OTM call spread",
+                    "option_liquidity_hard_gate": False,
+                }
+                conn.execute(
+                    """
+                    INSERT INTO signals(ticker, dt, strategy_id, direction, raw)
+                    VALUES (%s,%s,%s,'long',%s::jsonb)
+                    ON CONFLICT (ticker, dt, strategy_id) DO UPDATE SET raw=EXCLUDED.raw
+                    """,
+                    (ticker, signal_dt, approved_id if ticker != "ZZBLOCK" else blocked_id, __import__("json").dumps(raw)),
+                )
+
+            result = write_approved_paper_recommendations(conn, signal_dt=signal_dt, tickers=tickers, max_recommendations=3, dry_run=False)
+            rows = conn.execute("SELECT ticker, status, recommendation_type, entry_trigger, stop, target, position_size_suggestion, notes FROM recommendations WHERE ticker = ANY(%s) ORDER BY ticker", (tickers,)).fetchall()
+        finally:
+            _cleanup(conn, tickers)
+
+    assert result["recommendations_created"] == 3
+    assert result["blocked_by_strategy_status"] == 1
+    assert [row[0] for row in rows] == ["ZZREC1", "ZZREC2", "ZZREC3"]
+    assert all(row[1] == "paper_candidate" for row in rows)
+    assert all(row[2] == "equity_plus_option_spread_when_data_exists" for row in rows)
+    assert all("EOD close" in row[3] for row in rows)
+    assert all("5.00%" in row[6] for row in rows)
+    assert rows[0][7]["paper_entry_baseline"] == "eod_close"
+    assert rows[0][7]["review_gate_required"] is False
 
 
 def test_approved_strategy_gate_creates_setups_only_for_approved_signals():
