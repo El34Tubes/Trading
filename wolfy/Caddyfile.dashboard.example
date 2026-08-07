@@ -1,0 +1,14 @@
+# Example Caddy reverse proxy for the Wolfy dashboard.
+# Replace dashboard.example.com with your real domain and keep the dashboard behind TLS.
+
+ dashboard.example.com {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:8080
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        X-Frame-Options "DENY"
+    }
+}
