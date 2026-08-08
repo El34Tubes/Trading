@@ -5,8 +5,8 @@ services:
       dockerfile: wolfy/Dockerfile.dashboard
     image: wolfy-dashboard:latest
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    expose:
+      - "8080"
     environment:
       WOLFY_POSTGRES_DSN: ${WOLFY_POSTGRES_DSN:?set WOLFY_POSTGRES_DSN}
       WOLFY_DASHBOARD_PIN: ${WOLFY_DASHBOARD_PIN:?set WOLFY_DASHBOARD_PIN}
@@ -14,6 +14,12 @@ services:
       WOLFY_DASHBOARD_NOTES: /data/dashboard_notes.json
     volumes:
       - wolfy_dashboard_data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:-wolfy-dashboard}.rule=Host(`${COMPOSE_PROJECT_NAME:-wolfy-dashboard}.${TRAEFIK_HOST:-srv1718608.hstgr.cloud}`)
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:-wolfy-dashboard}.entrypoints=websecure
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME:-wolfy-dashboard}.tls.certresolver=letsencrypt
+      - traefik.http.services.${COMPOSE_PROJECT_NAME:-wolfy-dashboard}.loadbalancer.server.port=8080
 
 volumes:
   wolfy_dashboard_data:
