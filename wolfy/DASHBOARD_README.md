@@ -37,15 +37,7 @@ http://localhost:8080
 
 ## Docker/VPS run
 
-1. Copy the compose file and app files to the VPS.
-2. Copy `dashboard.env.example` to `.env` and fill in real values:
-
-```bash
-cp dashboard.env.example .env
-$EDITOR .env
-```
-
-Required values:
+Create a `.env` file next to `docker-compose.dashboard.yml` on the VPS:
 
 ```dotenv
 WOLFY_DASHBOARD_PIN=choose-a-strong-pin
@@ -55,21 +47,10 @@ WOLFY_POSTGRES_DSN=postgresql://wolfy:REDACTED@postgres-host:5432/wolfy
 Then:
 
 ```bash
-docker compose -f docker-compose.dashboard.yml --env-file .env up -d --build
+docker compose -f docker-compose.dashboard.yml up -d --build
 ```
 
-Expose the service behind your VPS reverse proxy/TLS provider. The app listens on host/container port `8080`.
-
-A Caddy reverse-proxy example is provided at `Caddyfile.dashboard.example`.
-
-## What I need from the user before public launch
-
-- Public domain/subdomain to use, e.g. `wolfy.yourdomain.com`.
-- VPS target or permission to provision/use a VPS.
-- Postgres connectivity from that VPS to the Wolfy database, preferably a non-superuser read-mostly dashboard DB user.
-- Final dashboard PIN/password.
-- DNS access or confirmation that you will point the DNS record at the VPS IP.
-- TLS/reverse proxy preference if not Caddy.
+Expose the service behind your VPS reverse proxy/TLS provider. The app listens on container port `8080`.
 
 ## API
 
