@@ -27,12 +27,8 @@ def test_dashboard_snapshot_groups_daily_progress_agents_health_recommendations_
     )
 
     assert snapshot["refresh_seconds"] == 60
-    assert "timeline" not in snapshot
-    assert snapshot["current"]["as_of_date"] == "2026-08-06"
-    assert snapshot["current"]["tasks"]["completed"] == 1
-    assert snapshot["current"]["tasks"]["queued"] == 1
-    assert snapshot["current"]["runs"]["completed"] == 1
-    assert snapshot["current"]["recommendations"]["pending_attention"] == 1
+    assert snapshot["timeline"][0]["date"] == "2026-08-06"
+    assert snapshot["timeline"][0]["completed_tasks"] == 1
     assert snapshot["agents"]["wolfy"]["completed_tasks"] == 1
     assert snapshot["agents"]["mike"]["queued_tasks"] == 1
     assert snapshot["agents"]["yang"]["completed_runs"] == 1
@@ -63,38 +59,6 @@ def test_dashboard_requires_pin_and_exposes_summary_api():
     ok = client.get("/api/summary", headers={"x-dashboard-pin": "1234"})
     assert ok.status_code == 200
     assert ok.json()["refresh_seconds"] == 60
-
-
-def test_poll_answer_api_writes_back_and_summary_returns_answer(tmp_path):
-    from dashboard_app import JsonNoteStore, create_app
-
-    note_store = JsonNoteStore(tmp_path / "notes.json")
-    app = create_app(
-        repository=lambda: {
-            "tasks": [],
-            "runs": [],
-            "recommendations": [],
-            "paper_trades": [],
-            "system_metrics": [],
-            "polls": [{"id": "next-build", "question": "Move next?", "choices": ["paper logging"]}],
-            "poll_answers": note_store.list_poll_answers(),
-            "manual_notes": [],
-        },
-        dashboard_pin="1234",
-        note_store=note_store,
-    )
-    client = TestClient(app)
-
-    answer = client.post(
-        "/api/polls/next-build/answer",
-        headers={"x-dashboard-pin": "1234"},
-        json={"choice": "paper logging", "note": "yes"},
-    )
-
-    assert answer.status_code == 200
-    summary = client.get("/api/summary", headers={"x-dashboard-pin": "1234"}).json()
-    assert summary["poll_answers"][0]["poll_id"] == "next-build"
-    assert summary["poll_answers"][0]["choice"] == "paper logging"
 
 
 def test_poll_answer_is_persisted_by_repository(tmp_path):

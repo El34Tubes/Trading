@@ -150,13 +150,7 @@ def build_dashboard_snapshot(
 ) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     agents: dict[str, dict[str, Any]] = defaultdict(lambda: {"queued_tasks": 0, "in_progress_tasks": 0, "completed_tasks": 0, "failed_tasks": 0, "completed_runs": 0, "active_runs": 0, "latest": None})
-    current = {
-        "as_of_date": now.date().isoformat(),
-        "tasks": {"queued": 0, "in_progress": 0, "completed": 0, "failed": 0},
-        "runs": {"active": 0, "completed": 0, "failed": 0},
-        "recommendations": {"pending_attention": 0, "total_current": 0},
-        "paper_trades": {"open": 0, "total_current": 0},
-    }
+    timeline: dict[str, dict[str, Any]] = defaultdict(lambda: {"date": "", "completed_tasks": 0, "queued_tasks": 0, "runs": 0, "recommendations": 0, "paper_trades": 0})
 
     normalized_tasks = [_normalize_task(dict(task)) for task in tasks]
     normalized_runs = [_normalize_run(dict(run)) for run in runs]
@@ -166,29 +160,30 @@ def build_dashboard_snapshot(
         bucket = agents[agent]
         if status == "queued":
             bucket["queued_tasks"] += 1
-            current["tasks"]["queued"] += 1
         elif status in {"in_progress", "claimed", "started"}:
             bucket["in_progress_tasks"] += 1
-            current["tasks"]["in_progress"] += 1
         elif status == "completed":
             bucket["completed_tasks"] += 1
-            current["tasks"]["completed"] += 1
         elif status in {"failed", "error", "blocked"}:
             bucket["failed_tasks"] += 1
-            current["tasks"]["failed"] += 1
         bucket["latest"] = bucket["latest"] or task["title"]
+        day = _day(task.get("updated_at"))
+        timeline[day]["date"] = day
+        if status == "completed":
+            timeline[day]["completed_tasks"] += 1
+        if status == "queued":
+            timeline[day]["queued_tasks"] += 1
 
     for run in normalized_runs:
         agent = run["agent"]
         status = run["status"]
         if status in {"completed", "success", "succeeded"}:
             agents[agent]["completed_runs"] += 1
-            current["runs"]["completed"] += 1
-        elif status in {"failed", "error"}:
-            current["runs"]["failed"] += 1
         if status in {"started", "running", "in_progress"}:
             agents[agent]["active_runs"] += 1
-            current["runs"]["active"] += 1
+        day = _day(run.get("started_at"))
+        timeline[day]["date"] = day
+        timeline[day]["runs"] += 1
 
     rec_rows = []
     pending_user_attention = 0
@@ -196,8 +191,6 @@ def build_dashboard_snapshot(
         status = rec.get("status") or "unknown"
         if status in {"paper_candidate", "pending", "pending_review", "needs_user_approval", "approved"}:
             pending_user_attention += 1
-            current["recommendations"]["pending_attention"] += 1
-        current["recommendations"]["total_current"] += 1
         rec_rows.append({
             "id": rec.get("id"),
             "ticker": rec.get("ticker"),
@@ -208,14 +201,16 @@ def build_dashboard_snapshot(
             "stop": rec.get("stop"),
             "target": rec.get("target"),
         })
+        day = _day(rec.get("created_at"))
+        timeline[day]["date"] = day
+        timeline[day]["recommendations"] += 1
 
     paper_rows = []
     for trade in paper_trades:
-        trade_status = str(trade.get("status") or "unknown")
         paper_rows.append({k: _iso(v) if isinstance(v, (datetime, date)) else v for k, v in dict(trade).items()})
-        current["paper_trades"]["total_current"] += 1
-        if trade_status in {"open", "active", "entered"}:
-            current["paper_trades"]["open"] += 1
+        day = _day(trade.get("created_at") or trade.get("entry_date"))
+        timeline[day]["date"] = day
+        timeline[day]["paper_trades"] += 1
 
     health: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for metric in system_metrics:
@@ -226,10 +221,11 @@ def build_dashboard_snapshot(
             "captured_at": _iso(metric.get("captured_at") or metric.get("created_at")),
         })
 
+    ordered_timeline = sorted((value | {"date": key} for key, value in timeline.items()), key=lambda item: item["date"], reverse=True)[:30]
     return {
         "generated_at": now.isoformat(),
         "refresh_seconds": refresh_seconds,
-        "current": current,
+        "timeline": ordered_timeline,
         "agents": dict(sorted(agents.items())),
         "recommendations": {"pending_user_attention": pending_user_attention, "items": rec_rows[:25]},
         "paper_trades": paper_rows[:25],
@@ -356,10 +352,10 @@ DASHBOARD_HTML = """<!doctype html>
   </style>
 </head>
 <body>
-<header><h1>Wolfy Command Dashboard</h1><div class="sub">Current point-in-time status, agents, health, recommendations, approvals, and interview polls. Updates every 60 seconds.</div></header>
+<header><h1>Wolfy Command Dashboard</h1><div class="sub">Daily progress, agents, health, recommendations, approvals, and interview polls. Updates every 60 seconds.</div></header>
 <main>
   <section class="card"><h2>Unlock</h2><input id="pin" type="password" placeholder="Dashboard PIN" autocomplete="current-password"/><button onclick="load()">Load Dashboard</button><div id="status" class="sub"></div></section>
-  <section class="card"><h2>Current Snapshot</h2><div id="current"></div></section>
+  <section class="card"><h2>Daily Progress Timeline</h2><div id="timeline"></div></section>
   <section class="grid"><div class="card"><h2>Recommendations / Approval Attention</h2><div id="recs"></div></div><div class="card"><h2>Agents</h2><div id="agents"></div></div></section>
   <section class="grid"><div class="card"><h2>Environment Health</h2><div id="health"></div></div><div class="card"><h2>Interview Polls</h2><div id="polls"></div></div></section>
   <section class="card"><h2>Manual Notes / Status Overrides</h2><input id="agent" placeholder="agent e.g. wolfy"/><textarea id="note" placeholder="Add note or override"></textarea><button onclick="addNote()">Save Note</button><div id="notes"></div></section>
@@ -375,12 +371,11 @@ async function load(){
 }
 function metric(k,v){ return `<div class="metric"><span>${k}</span><b>${v}</b></div>`; }
 function render(d){
-  const c=d.current||{tasks:{},runs:{},recommendations:{},paper_trades:{}};
-  current.innerHTML=`<div class="grid"><div>${metric('As of', c.as_of_date||'now')}${metric('Queued tasks', c.tasks.queued||0)}${metric('In progress tasks', c.tasks.in_progress||0)}${metric('Failed/blocked tasks', c.tasks.failed||0)}</div><div>${metric('Active runs', c.runs.active||0)}${metric('Recommendations needing attention', c.recommendations.pending_attention||0)}${metric('Open paper trades', c.paper_trades.open||0)}${metric('Current paper trades tracked', c.paper_trades.total_current||0)}</div></div>`;
+  timeline.innerHTML=(d.timeline||[]).map(x=>`<div class="timeline-row"><b>${x.date}</b><span class="pill">done ${x.completed_tasks}</span><span class="pill">queued ${x.queued_tasks}</span><span class="pill">runs ${x.runs}</span><span class="pill">recs ${x.recommendations}</span></div>`).join('')||'<div class="muted">No timeline yet</div>';
   recs.innerHTML=metric('Pending attention', d.recommendations.pending_user_attention)+(d.recommendations.items||[]).slice(0,8).map(r=>`<div class="rec"><b>${r.ticker}</b> <span class="pill">${r.status}</span><div class="muted">${r.thesis||''}</div></div>`).join('');
   agents.innerHTML=Object.entries(d.agents||{}).map(([a,x])=>`<div class="metric"><span><b>${a}</b><br><span class="muted">${x.latest||''}</span></span><span>Q${x.queued_tasks} / Run${x.active_runs} / Done${x.completed_tasks}</span></div>`).join('')||'<div class="muted">No agents</div>';
   health.innerHTML=Object.entries(d.health||{}).map(([cat,items])=>`<h3>${cat}</h3>`+items.slice(0,5).map(i=>metric(i.metric_name,i.metric_value??'n/a')).join('')).join('')||'<div class="muted">No health metrics</div>';
-  polls.innerHTML=(d.polls||[]).map(p=>`<div class="rec"><b>${p.question}</b><div>${(p.choices||[]).map(c=>`<button onclick="answerPoll('${p.id}','${String(c).replaceAll("'","&#39;")}')">${c}</button>`).join('')}</div></div>`).join('')+((d.poll_answers||[]).length?`<h3>Recent answers</h3>${(d.poll_answers||[]).slice(0,5).map(a=>metric(a.poll_id,a.choice)).join('')}`:'')||'<div class="muted">No polls</div>';
+  polls.innerHTML=(d.polls||[]).map(p=>`<div class="rec"><b>${p.question}</b><div>${(p.choices||[]).map(c=>`<button onclick="answerPoll('${p.id}','${String(c).replaceAll("'","&#39;")}')">${c}</button>`).join('')}</div></div>`).join('')||'<div class="muted">No polls</div>';
   notes.innerHTML=(d.manual_notes||[]).map(n=>`<div class="metric"><span><b>${n.agent}</b><br>${n.note}</span><span class="muted">${(n.created_at||'').slice(0,16)}</span></div>`).join('');
 }
 async function addNote(){

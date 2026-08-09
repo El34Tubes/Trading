@@ -4,7 +4,7 @@ Mobile-first, PIN-protected, platform-agnostic public website for Wolfy/Hermes p
 
 ## What v1 shows
 
-- Current point-in-time command snapshot first.
+- Daily progress timeline first.
 - All discovered agents/profiles from `agent_tasks` and `agent_runs`.
 - Environment health metrics from `system_metrics`.
 - Recommendations and items needing attention from `recommendations`.
