@@ -92,6 +92,21 @@ def _sample_progress_data() -> dict:
                     "gate_note": "candidate/research only; candidate is not approved",
                 }
             ],
+            "recommendation_engine": {
+                "approved_strategy": "liquid_rs_breakout_close_confirm_1r",
+                "approved_strategy_status": "approved",
+                "latest_signal_dt": "2026-07-14",
+                "approved_strategy_signals": 1086,
+                "paper_candidates": 0,
+                "paper_logged_recommendations": 1,
+                "open_paper_trades": 1,
+                "latest_open_trade": "LTC",
+                "latest_entry_price": "40.03",
+                "latest_stop_price": "39.73",
+                "latest_target_price": "40.33",
+                "next_blocked_gate": "setup-success post-trade review gate",
+                "live_execution_allowed": False,
+            },
             "recent_blockers": [],
         },
         "cron": {"active_count": 20, "paused_count": 0, "recent_usage_limit_seen": False},
@@ -117,6 +132,7 @@ def test_render_markdown_has_core_visibility_sections() -> None:
         "## Strategy gates",
         "## Latest walk-forward validation",
         "## Deterministic strategy readiness",
+        "## Recommendation engine",
         "## Paper/accountability gate",
         "## Blockers / noise",
         "## Next recommended action",
@@ -125,4 +141,9 @@ def test_render_markdown_has_core_visibility_sections() -> None:
 
     assert "latest_price_dt=2026-06-25" in markdown
     assert "paper_trades=1" in markdown
+    assert "liquid_rs_breakout_close_confirm_1r" in markdown
+    assert "approved_strategy_signals=1086" in markdown
+    assert "latest_open_trade=LTC" in markdown
+    assert "next_blocked_gate=setup-success post-trade review gate" in markdown
+    assert "live_execution_allowed=False" in markdown
     assert "queued_ready=1" in markdown

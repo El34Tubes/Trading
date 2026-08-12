@@ -267,6 +267,48 @@ def collect_progress(dsn: str = DEFAULT_DSN) -> dict[str, Any]:
                            (SELECT count(*)::int FROM recommendations WHERE status IN ('pending_review','proposed','open') AND coalesce(nullif(trim(stop), ''), null) IS NULL) AS pending_recommendations_without_stop
                     """,
                 )
+                data["postgres"]["recommendation_engine"] = _safe_query(
+                    cur,
+                    """
+                    WITH approved_strategy AS (
+                        SELECT id, name, status
+                        FROM strategies
+                        WHERE status='approved'
+                          AND metadata->>'approval_scope'='paper_only_no_live_execution'
+                          AND metadata->>'paper_recommendation_approval'='true'
+                        ORDER BY name
+                        LIMIT 1
+                    ), latest_open AS (
+                        SELECT pt.ticker, pt.entry_date, pt.entry_price, pt.stop_price, pt.target_price, pt.status
+                        FROM paper_trades pt
+                        JOIN recommendations r ON r.id::text=pt.recommendation_id
+                        JOIN approved_strategy st ON st.name = r.notes->>'strategy_name'
+                        WHERE pt.status='open'
+                        ORDER BY pt.id DESC
+                        LIMIT 1
+                    ), next_gate AS (
+                        SELECT title
+                        FROM agent_tasks
+                        WHERE status IN ('queued','ready','in_progress')
+                          AND (id IN (3622, 3219, 3236) OR title ILIKE '%%recommendation%%' OR title ILIKE '%%paper%%')
+                        ORDER BY priority DESC NULLS LAST, id
+                        LIMIT 1
+                    )
+                    SELECT (SELECT name FROM approved_strategy) AS approved_strategy,
+                           (SELECT status FROM approved_strategy) AS approved_strategy_status,
+                           (SELECT max(dt)::text FROM signals WHERE strategy_id=(SELECT id FROM approved_strategy)) AS latest_signal_dt,
+                           (SELECT count(*)::int FROM signals WHERE strategy_id=(SELECT id FROM approved_strategy)) AS approved_strategy_signals,
+                           (SELECT count(*)::int FROM recommendations WHERE status='paper_candidate') AS paper_candidates,
+                           (SELECT count(*)::int FROM recommendations WHERE status='paper_logged') AS paper_logged_recommendations,
+                           (SELECT count(*)::int FROM paper_trades WHERE status='open') AS open_paper_trades,
+                           (SELECT ticker FROM latest_open) AS latest_open_trade,
+                           (SELECT entry_price::text FROM latest_open) AS latest_entry_price,
+                           (SELECT stop_price::text FROM latest_open) AS latest_stop_price,
+                           (SELECT target_price::text FROM latest_open) AS latest_target_price,
+                           (SELECT title FROM next_gate) AS next_blocked_gate,
+                           false AS live_execution_allowed
+                    """,
+                )
                 data["postgres"]["backlog_hygiene"] = _safe_query(
                     cur,
                     """
@@ -384,6 +426,7 @@ def render_markdown(data: dict[str, Any], blocker_limit: int | None = None) -> s
     setups = pg.get("setups", {}) or {}
     positions = pg.get("positions", {}) or {}
     paper = pg.get("paper_ledger", {}) or {}
+    rec_engine = pg.get("recommendation_engine", {}) or {}
     backlog = pg.get("backlog_hygiene", {}) or {}
     data_load_rows = pg.get("data_load_status") or []
     cron = data.get("cron", {}) or {}
@@ -506,6 +549,25 @@ def render_markdown(data: dict[str, Any], blocker_limit: int | None = None) -> s
         )
     else:
         lines.append(f"Strategy readiness unavailable: {readiness_rows}")
+
+    lines.extend(["", "## Recommendation engine"])
+    if rec_engine and "error" not in rec_engine:
+        lines.append(
+            _md_table(
+                ["Approved Strategy", "Signal Base", "Paper Recs", "Open Paper", "Latest Open", "Next Gate", "Live Execution"],
+                [[
+                    f"{rec_engine.get('approved_strategy')} status={rec_engine.get('approved_strategy_status')}",
+                    f"latest_signal_dt={rec_engine.get('latest_signal_dt')} approved_strategy_signals={rec_engine.get('approved_strategy_signals')}",
+                    f"paper_candidates={rec_engine.get('paper_candidates')} paper_logged={rec_engine.get('paper_logged_recommendations')}",
+                    rec_engine.get("open_paper_trades"),
+                    f"latest_open_trade={rec_engine.get('latest_open_trade')} entry={rec_engine.get('latest_entry_price')} stop={rec_engine.get('latest_stop_price')} target={rec_engine.get('latest_target_price')}",
+                    f"next_blocked_gate={rec_engine.get('next_blocked_gate')}",
+                    f"live_execution_allowed={rec_engine.get('live_execution_allowed')}",
+                ]],
+            )
+        )
+    else:
+        lines.append(f"Recommendation-engine status unavailable: {rec_engine}")
 
     lines.extend(["", "## Paper/accountability gate"])
     if paper and "error" not in paper:
