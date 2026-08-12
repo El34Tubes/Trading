@@ -18,6 +18,16 @@ from eod_backtest import evaluate_underlying_setup_outcome
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
 
 
+def ensure_paper_trade_metric_columns(conn) -> None:
+    """Non-destructively add paper-ledger learning metrics to Postgres."""
+    for name, ddl in {
+        "max_adverse_excursion": "DOUBLE PRECISION",
+        "exit_efficiency": "DOUBLE PRECISION",
+        "stop_distance_atr": "DOUBLE PRECISION",
+    }.items():
+        conn.execute(f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {name} {ddl}")
+
+
 def _json(value: Mapping[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
@@ -71,6 +81,16 @@ def _canonical_exit_reason(outcome: Mapping[str, Any], target_r: Decimal) -> str
     return str(outcome.get("exit_reason") or "time_stop")
 
 
+def _stop_distance_atr(conn, ticker: str, *, entry_date: date, entry: Decimal, stop: Decimal) -> float | None:
+    row = conn.execute("SELECT atr FROM features WHERE ticker=%s AND dt=%s", (ticker, entry_date)).fetchone()
+    if not row or row[0] in (None, 0):
+        return None
+    atr = _dec(row[0])
+    if atr <= 0:
+        return None
+    return float((entry - stop) / atr)
+
+
 def review_open_paper_trade_setups(
     conn,
     *,
@@ -85,6 +105,7 @@ def review_open_paper_trade_setups(
     trades when target/stop/time-horizon outcome is known; it does not execute,
     cancel, or route real broker orders.
     """
+    ensure_paper_trade_metric_columns(conn)
     params: list[Any] = [as_of]
     scope_clause = ""
     if tickers is not None:
@@ -151,10 +172,15 @@ def review_open_paper_trade_setups(
             days_held = (date.fromisoformat(str(exit_dt)) - entry_dt).days
         pnl = None if exit_px is None else (exit_px - entry) * qty
         r_multiple = None if exit_px is None else (exit_px - entry) / (entry - stop)
+        mfe_r = _dec(outcome.get("mfe_r"), Decimal("0"))
+        mae_r = _dec(outcome.get("mae_r"), Decimal("0"))
+        exit_efficiency = None if r_multiple is None or mfe_r <= 0 else float(r_multiple / mfe_r)
+        stop_distance_atr = _stop_distance_atr(conn, str(ticker), entry_date=entry_dt, entry=entry, stop=stop)
         notes = {
             **dict(outcome),
             "paper_only": True,
             "no_live_execution": True,
+            "stop_distance_atr": stop_distance_atr,
             "setup_success_metric": "underlying_stock_technical_setup_not_option_fill_pnl",
             "source": "recommendation_outcome_review.py",
         }
@@ -182,10 +208,11 @@ def review_open_paper_trade_setups(
                 conn.execute(
                     """
                     UPDATE paper_trades
-                    SET status='closed', exit_date=%s, exit_price=%s, exit_reason=%s, pnl=%s, r_multiple=%s, days_held=%s, updated_at=now()
+                    SET status='closed', exit_date=%s, exit_price=%s, exit_reason=%s, pnl=%s, r_multiple=%s, days_held=%s,
+                        max_adverse_excursion=%s, exit_efficiency=%s, stop_distance_atr=%s, updated_at=now()
                     WHERE id=%s
                     """,
-                    (exit_dt, float(exit_px), exit_reason, None if pnl is None else float(pnl), None if r_multiple is None else float(r_multiple), days_held, trade_id),
+                    (exit_dt, float(exit_px), exit_reason, None if pnl is None else float(pnl), None if r_multiple is None else float(r_multiple), days_held, float(mae_r), exit_efficiency, stop_distance_atr, trade_id),
                 )
                 closed_trades += 1
         outcomes_created += 1

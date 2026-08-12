@@ -45,14 +45,14 @@ def test_review_open_paper_trade_grades_underlying_setup_and_closes_on_target():
                 )
 
             result = review_open_paper_trade_setups(conn, as_of=entry_dt + timedelta(days=3), tickers=[ticker])
-            trade = conn.execute("SELECT status,exit_date,exit_price,exit_reason,pnl,r_multiple,days_held FROM paper_trades WHERE id=%s", (trade_id,)).fetchone()
+            trade = conn.execute("SELECT status,exit_date,exit_price,exit_reason,pnl,r_multiple,days_held,max_adverse_excursion,exit_efficiency,stop_distance_atr FROM paper_trades WHERE id=%s", (trade_id,)).fetchone()
             outcome = conn.execute("SELECT recommendation_id,paper_trade_id,entry_triggered,hit_target,hit_stop,r_multiple,days_held,exit_reason,notes FROM recommendation_outcomes WHERE paper_trade_id=%s::text", (str(trade_id),)).fetchone()
         finally:
             _cleanup(conn, [ticker])
 
     assert result["outcomes_created"] == 1
     assert result["closed_trades"] == 1
-    assert trade == ("closed", entry_dt + timedelta(days=2), 105.0, "target_1_0r", 50.0, 1.0, 2)
+    assert trade == ("closed", entry_dt + timedelta(days=2), 105.0, "target_1_0r", 50.0, 1.0, 2, -0.2, pytest.approx(0.8333333333), None)
     assert outcome[0] == str(rec_id)
     assert outcome[1] == str(trade_id)
     assert outcome[2] is True

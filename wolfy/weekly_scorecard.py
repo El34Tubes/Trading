@@ -230,6 +230,8 @@ def build_weekly_scorecard(
     winners = [row for row in closed_trades if _trade_is_winner(row)]
     r_values = _float_values(closed_trades, "r_multiple")
     drawdowns = _float_values(closed_trades, "max_drawdown") or _float_values(outcomes, "max_drawdown")
+    exit_efficiencies = _float_values(closed_trades, "exit_efficiency")
+    stop_distance_atrs = _float_values(closed_trades, "stop_distance_atr")
     reasons = _sentinel_reason_counter(recommendations)
     approved = sum(1 for row in recommendations if str(row.get("status") or "").lower() == "approved")
     rejected = sum(1 for row in recommendations if str(row.get("status") or "").lower() == "rejected")
@@ -249,6 +251,8 @@ def build_weekly_scorecard(
         "hit_rate": round(len(winners) / len(closed_trades), 4) if closed_trades else None,
         "avg_r": round(sum(r_values) / len(r_values), 4) if r_values else None,
         "max_drawdown_r": round(min(drawdowns), 4) if drawdowns else None,
+        "avg_exit_efficiency": round(sum(exit_efficiencies) / len(exit_efficiencies), 4) if exit_efficiencies else None,
+        "avg_stop_distance_atr": round(sum(stop_distance_atrs) / len(stop_distance_atrs), 4) if stop_distance_atrs else None,
     }
     return {
         "as_of": end.isoformat(timespec="seconds"),
@@ -264,6 +268,9 @@ def build_weekly_scorecard(
                 "pnl": row.get("pnl"),
                 "r_multiple": row.get("r_multiple"),
                 "max_drawdown": row.get("max_drawdown"),
+                "max_adverse_excursion": row.get("max_adverse_excursion"),
+                "exit_efficiency": row.get("exit_efficiency"),
+                "stop_distance_atr": row.get("stop_distance_atr"),
                 "days_held": row.get("days_held"),
             }
             for row in closed_trades
@@ -302,6 +309,7 @@ def render_discord_report(scorecard: Mapping[str, Any]) -> str:
         f"Wolfy Weekly Scorecard ({summary['window_start']} -> {summary['window_end']})",
         f"Reviews: {summary['recommendations_reviewed']} | Approved: {summary['approved']} | Rejected: {summary['rejected']} | Needs revision: {summary['needs_revision']}",
         f"Paper trades closed: {summary['closed_trades']} | Hit rate: {_fmt_pct(summary['hit_rate'])} | Avg R: {_fmt_r(summary['avg_r'])} | Max drawdown: {_fmt_r(summary['max_drawdown_r'])}",
+        f"Exit efficiency: {_fmt_pct(summary.get('avg_exit_efficiency'))} | Stop distance: {_fmt_r(summary.get('avg_stop_distance_atr'))}",
         "Rejected / revised trade reasons:",
         *_bullet_lines(scorecard.get("rejected_trade_reasons", {}), empty="none logged"),
         "Rule changes needed:",

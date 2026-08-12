@@ -94,8 +94,8 @@ def test_weekly_scorecard_summarizes_trades_reviews_rejections_and_learning_loop
     }
     insert_rec(con, ticker="AAPL", status="needs_revision", notes=json.dumps(revision_notes), risk_reward="1.5R")
     con.execute(
-        "INSERT INTO paper_trades(recommendation_id,ticker,status,entry_date,entry_price,quantity,stop_price,target_price,exit_date,exit_price,exit_reason,pnl,r_multiple,days_held,max_drawdown) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (msft, "MSFT", "closed", "2026-06-01", 100.0, 1.0, 95.0, 110.0, "2026-06-04", 110.0, "target", 10.0, 2.0, 3, -1.5),
+        "INSERT INTO paper_trades(recommendation_id,ticker,status,entry_date,entry_price,quantity,stop_price,target_price,exit_date,exit_price,exit_reason,pnl,r_multiple,days_held,max_drawdown,max_adverse_excursion,exit_efficiency,stop_distance_atr) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (msft, "MSFT", "closed", "2026-06-01", 100.0, 1.0, 95.0, 110.0, "2026-06-04", 110.0, "target", 10.0, 2.0, 3, -1.5, -0.3, 0.8, 1.25),
     )
     con.execute(
         "INSERT INTO paper_trades(recommendation_id,ticker,status,entry_date,entry_price,quantity,stop_price,target_price,exit_date,exit_price,exit_reason,pnl,r_multiple,days_held,max_drawdown) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -110,6 +110,9 @@ def test_weekly_scorecard_summarizes_trades_reviews_rejections_and_learning_loop
     assert scorecard["summary"]["hit_rate"] == 0.5
     assert scorecard["summary"]["avg_r"] == 0.5
     assert scorecard["summary"]["max_drawdown_r"] == -3.5
+    assert scorecard["summary"]["avg_exit_efficiency"] == 0.8
+    assert scorecard["summary"]["avg_stop_distance_atr"] == 1.25
+    assert scorecard["closed_trades"][0]["max_adverse_excursion"] == -0.3
     assert scorecard["rejected_trade_reasons"]["foreign/manipulation/government-interference risk"] == 1
     assert scorecard["rejected_trade_reasons"]["risk/reward below 2R minimum for swing candidate"] == 1
     assert "Tighten pre-Sentinel rejection filters" in scorecard["rule_changes_needed"][0]
@@ -133,6 +136,7 @@ def test_report_rendering_and_storage_are_discord_ready(tmp_path):
     assert "Hit rate: 100.0%" in report
     assert "Avg R: 2.00R" in report
     assert "Max drawdown: -1.00R" in report
+    assert "Exit efficiency:" in report
     assert result["report_id"] is not None
     con = sqlite3.connect(db)
     row = con.execute("SELECT report_type, content, delivered_to, source_job_id FROM reports WHERE id=?", (result["report_id"],)).fetchone()

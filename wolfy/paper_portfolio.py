@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   status TEXT NOT NULL DEFAULT 'planned',
   max_favorable_excursion REAL,
   max_drawdown REAL,
+  max_adverse_excursion REAL,
+  exit_efficiency REAL,
+  stop_distance_atr REAL,
   data_source TEXT,
   notes TEXT
 );
@@ -79,6 +82,9 @@ CREATE INDEX IF NOT EXISTS idx_recommendation_outcomes_rec ON recommendation_out
 PAPER_EXTRA_COLUMNS = {
     "max_favorable_excursion": "REAL",
     "max_drawdown": "REAL",
+    "max_adverse_excursion": "REAL",
+    "exit_efficiency": "REAL",
+    "stop_distance_atr": "REAL",
     "data_source": "TEXT",
     "notes": "TEXT",
     "qty": "REAL",
