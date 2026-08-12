@@ -42,6 +42,7 @@ def _breakout_bars(
 def _cleanup(conn, tickers: list[str]) -> None:
     unit_tickers = [ticker for ticker in tickers if ticker != "SPY"]
     if unit_tickers:
+        conn.execute("DELETE FROM paper_trades WHERE ticker = ANY(%s)", (unit_tickers,))
         conn.execute("DELETE FROM recommendations WHERE ticker = ANY(%s)", (unit_tickers,))
         conn.execute("DELETE FROM setups WHERE ticker = ANY(%s)", (unit_tickers,))
         conn.execute("DELETE FROM signals WHERE ticker = ANY(%s)", (unit_tickers,))
@@ -308,6 +309,71 @@ def test_write_approved_paper_recommendations_only_uses_approved_signals_and_cap
     assert all("5.00%" in row[6] for row in rows)
     assert rows[0][7]["paper_entry_baseline"] == "eod_close"
     assert rows[0][7]["review_gate_required"] is False
+
+
+def test_log_approved_paper_recommendation_trades_creates_open_paper_rows_idempotently():
+    psycopg = pytest.importorskip("psycopg")
+    from eod_signals import log_approved_paper_recommendation_trades, seed_default_strategies, write_approved_paper_recommendations
+
+    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    signal_dt = date(2099, 2, 4)
+    tickers = ["ZZPLOG1", "ZZPLOG2", "ZZPLOG3", "ZZPLOG4"]
+    with psycopg.connect(dsn) as conn:
+        try:
+            seed_default_strategies(conn)
+            _cleanup(conn, tickers)
+            approved_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_close_confirm_1r'").fetchone()[0]
+            conn.execute("UPDATE strategies SET status='approved' WHERE id=%s", (approved_id,))
+            for idx, ticker in enumerate(tickers, start=1):
+                raw = {
+                    "strategy": "liquid_rs_breakout_close_confirm_1r",
+                    "close": str(Decimal("60") + idx),
+                    "invalidation": str(Decimal("59") + idx),
+                    "prior_5d_high": str(Decimal("59") + idx),
+                    "target_r": "1.0",
+                    "rs_excess_20d": "0.04",
+                    "vol_ratio": "1.6",
+                    "preferred_instrument": "2-3wk slightly OTM call spread",
+                }
+                conn.execute(
+                    """
+                    INSERT INTO signals(ticker, dt, strategy_id, direction, raw)
+                    VALUES (%s,%s,%s,'long',%s::jsonb)
+                    ON CONFLICT (ticker, dt, strategy_id) DO UPDATE SET raw=EXCLUDED.raw
+                    """,
+                    (ticker, signal_dt, approved_id, __import__("json").dumps(raw)),
+                )
+            write_approved_paper_recommendations(conn, signal_dt=signal_dt, tickers=tickers, max_recommendations=3, dry_run=False)
+
+            first = log_approved_paper_recommendation_trades(conn, signal_dt=signal_dt, tickers=tickers, max_trades=10, dry_run=False)
+            second = log_approved_paper_recommendation_trades(conn, signal_dt=signal_dt, tickers=tickers, max_trades=10, dry_run=False)
+            rows = conn.execute(
+                """
+                SELECT pt.ticker, pt.recommendation_id, pt.status, pt.entry_date, pt.entry_price, pt.quantity, pt.stop_price, pt.target_price, pt.instrument, pt.data_source, pt.notes, r.status
+                FROM paper_trades pt JOIN recommendations r ON r.id::text=pt.recommendation_id
+                WHERE pt.ticker = ANY(%s)
+                ORDER BY pt.ticker
+                """,
+                (tickers,),
+            ).fetchall()
+        finally:
+            _cleanup(conn, tickers)
+
+    assert first["paper_trades_created"] == 3
+    assert first["blocked_by_strategy_status"] == 0
+    assert second["paper_trades_created"] == 0
+    assert second["skipped_existing"] == 3
+    assert [row[0] for row in rows] == ["ZZPLOG1", "ZZPLOG2", "ZZPLOG3"]
+    assert all(row[2] == "open" for row in rows)
+    assert all(row[3] == signal_dt for row in rows)
+    assert all(row[4] is not None and row[6] is not None and row[7] is not None for row in rows)
+    assert rows[0][5] == pytest.approx(250.0)
+    assert all(row[8] == "equity_fallback_plus_option_spread_advisory" for row in rows)
+    assert all(row[9] == "approved_deterministic_recommendation" for row in rows)
+    assert rows[0][10]["paper_only"] is True
+    assert rows[0][10]["no_live_execution"] is True
+    assert rows[0][10]["risk_fraction"] == "0.05"
+    assert all(row[11] == "paper_logged" for row in rows)
 
 
 def test_approved_strategy_gate_creates_setups_only_for_approved_signals():

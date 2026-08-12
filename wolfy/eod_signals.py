@@ -799,7 +799,7 @@ def write_approved_paper_recommendations(
         params.append([ticker.upper() for ticker in tickers])
     rows = conn.execute(
         f"""
-        SELECT s.ticker, s.direction, s.raw, st.id, st.name, st.status
+        SELECT s.ticker, s.direction, s.raw, st.id, st.name, st.status, st.metadata
         FROM signals s
         JOIN strategies st ON st.id=s.strategy_id
         WHERE s.dt=%s {ticker_clause}
@@ -810,8 +810,9 @@ def write_approved_paper_recommendations(
     ).fetchall()
     approved: list[dict[str, Any]] = []
     blocked_by_strategy_status = 0
-    for ticker, direction, raw, strategy_id, strategy_name, status in rows:
-        if status != "approved":
+    for ticker, direction, raw, strategy_id, strategy_name, status, metadata in rows:
+        strategy_metadata = metadata if isinstance(metadata, Mapping) else {}
+        if status != "approved" or strategy_metadata.get("approval_scope") != "paper_only_no_live_execution" or strategy_metadata.get("paper_recommendation_approval") is not True:
             blocked_by_strategy_status += 1
             continue
         raw_dict = raw if isinstance(raw, Mapping) else json.loads(raw or "{}")
@@ -863,7 +864,7 @@ def write_approved_paper_recommendations(
             WHERE ticker=%s
               AND notes->>'signal_dt'=%s
               AND notes->>'strategy_name'=%s
-              AND status='paper_candidate'
+              AND status IN ('paper_candidate','paper_logged')
             LIMIT 1
             """,
             (ticker, signal_dt.isoformat(), item["strategy_name"]),
@@ -911,6 +912,144 @@ def write_approved_paper_recommendations(
         "blocked_by_strategy_status": blocked_by_strategy_status,
         "paper_trades_created": 0,
         "recommendations": serializable,
+    }
+
+
+def _decimal_from_money(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+    if value is None:
+        return default
+    text = str(value).replace("$", "").replace(",", "").strip()
+    if not text:
+        return default
+    try:
+        return Decimal(text)
+    except Exception:
+        return default
+
+
+def _recommendation_entry_stop_target(rec: Mapping[str, Any]) -> tuple[Decimal, Decimal, Decimal, str | None]:
+    notes_obj = rec.get("notes")
+    notes = notes_obj if isinstance(notes_obj, Mapping) else {}
+    source_obj = notes.get("source_signal")
+    source_signal = source_obj if isinstance(source_obj, Mapping) else {}
+    entry = _decimal_from_money(source_signal.get("close"))
+    stop = _decimal_from_money(source_signal.get("invalidation")) or _decimal_from_money(source_signal.get("prior_5d_high"))
+    target_r = _as_decimal(source_signal.get("target_r"), Decimal("1.0"))
+    if entry <= 0:
+        return entry, stop, Decimal("0"), "missing entry price"
+    if stop <= 0:
+        return entry, stop, Decimal("0"), "missing stop price"
+    risk_per_share = entry - stop
+    if risk_per_share <= 0:
+        return entry, stop, Decimal("0"), "non-positive stop risk"
+    target = entry + risk_per_share * target_r
+    return entry, stop, target, None
+
+
+def log_approved_paper_recommendation_trades(
+    conn,
+    *,
+    signal_dt: date | None = None,
+    tickers: Sequence[str] | None = None,
+    max_trades: int = 3,
+    account_equity_usd: Decimal = Decimal("5000"),
+    risk_fraction: Decimal = Decimal("0.05"),
+    dry_run: bool = False,
+) -> dict:
+    """Create Postgres paper_trades from approved deterministic recommendations.
+
+    This is paper-only accounting. It never talks to a broker, places orders,
+    cancels orders, or moves money. Idempotency is by recommendation_id.
+    """
+    params: list[object] = []
+    scope_clause = ""
+    if signal_dt is not None:
+        scope_clause += " AND r.notes->>'signal_dt'=%s"
+        params.append(signal_dt.isoformat())
+    if tickers is not None:
+        scope_clause += " AND r.ticker = ANY(%s)"
+        params.append([ticker.upper() for ticker in tickers])
+    params.append(max(0, max_trades))
+    rows = conn.execute(
+        f"""
+        SELECT r.id, r.ticker, r.recommendation_type, r.notes, st.name, st.status, st.metadata
+        FROM recommendations r
+        JOIN strategies st ON st.name = r.notes->>'strategy_name'
+        WHERE r.status IN ('paper_candidate','paper_logged')
+          AND r.notes->>'paper_only'='true'
+          AND r.notes->>'no_live_execution'='true'
+          {scope_clause}
+        ORDER BY r.created_at, r.id
+        LIMIT %s
+        """,
+        params,
+    ).fetchall()
+    created = 0
+    skipped_existing = 0
+    blocked_by_strategy_status = 0
+    blocked_incomplete = 0
+    serializable: list[dict[str, Any]] = []
+    for rec_id, ticker, recommendation_type, notes, strategy_name, strategy_status, strategy_metadata in rows:
+        rec = {"id": rec_id, "ticker": ticker, "recommendation_type": recommendation_type, "notes": notes or {}}
+        metadata = strategy_metadata if isinstance(strategy_metadata, Mapping) else {}
+        if strategy_status != "approved" or metadata.get("approval_scope") != "paper_only_no_live_execution" or metadata.get("paper_recommendation_approval") is not True:
+            blocked_by_strategy_status += 1
+            continue
+        exists = conn.execute("SELECT id FROM paper_trades WHERE recommendation_id=%s LIMIT 1", (str(rec_id),)).fetchone()
+        if exists:
+            skipped_existing += 1
+            serializable.append({"recommendation_id": str(rec_id), "ticker": str(ticker), "status": "existing"})
+            continue
+        entry, stop, target, block_reason = _recommendation_entry_stop_target(rec)
+        if block_reason:
+            blocked_incomplete += 1
+            serializable.append({"recommendation_id": str(rec_id), "ticker": str(ticker), "status": "blocked", "reason": block_reason})
+            continue
+        risk_amount = account_equity_usd * risk_fraction
+        quantity = risk_amount / (entry - stop)
+        signal_dt = rec["notes"].get("signal_dt") if isinstance(rec["notes"], Mapping) else None
+        trade_notes = {
+            "paper_only": True,
+            "no_live_execution": True,
+            "broker_order_submitted": False,
+            "source_recommendation_id": str(rec_id),
+            "strategy_name": strategy_name,
+            "risk_fraction": str(risk_fraction),
+            "risk_amount_usd": _money(risk_amount),
+            "entry_baseline": "eod_close",
+            "option_spread_advisory": rec["notes"].get("option_spread") if isinstance(rec["notes"], Mapping) else None,
+            "equity_fallback": True,
+        }
+        if not dry_run:
+            conn.execute(
+                """
+                INSERT INTO paper_trades(recommendation_id, ticker, entry_date, entry_price, quantity, instrument, stop_price, target_price, status, data_source, notes)
+                VALUES (%s,%s,%s,%s,%s,'equity_fallback_plus_option_spread_advisory',%s,%s,'open','approved_deterministic_recommendation',%s::jsonb)
+                """,
+                (str(rec_id), str(ticker), signal_dt, float(entry), float(quantity), float(stop), float(target), _json(trade_notes)),
+            )
+            conn.execute("UPDATE recommendations SET status='paper_logged' WHERE id=%s", (rec_id,))
+        created += 1
+        serializable.append(
+            {
+                "recommendation_id": str(rec_id),
+                "ticker": str(ticker),
+                "entry": _money(entry),
+                "stop": _money(stop),
+                "target": _money(target),
+                "quantity": str(quantity.quantize(Decimal("0.0001"))),
+                "status": "open",
+            }
+        )
+    return {
+        "dry_run": dry_run,
+        "paper_trades_created": created if not dry_run else 0,
+        "paper_trades_ranked": len(rows),
+        "skipped_existing": skipped_existing,
+        "blocked_by_strategy_status": blocked_by_strategy_status,
+        "blocked_incomplete": blocked_incomplete,
+        "paper_trades": serializable,
+        "broker_orders_created": 0,
     }
 
 
