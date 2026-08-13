@@ -13,6 +13,15 @@ Durable trail for the daily Wolfy/Hermes optimization planner. Items here are pl
 - Daily optimization runs should send a short completion report when done: what changed, verification, commit/KPI, blockers/next action only.
 
 
+## 2026-08-13 daily optimizer plan-only run
+
+- Time: 2026-08-13 02:15 ET / 06:15 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=203455 cap=200000` (exit 1), so this run followed PLAN-ONLY: review/state/KPI updates only, no code/config/cron/migration implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --home /root/.hermes --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0), and default-profile cron list/status succeeded with 28 active jobs, gateway healthy, optimizer `92f31b95fccc`, and guardian `e55c9cc39d8d` enabled.
+- State: created/claimed Postgres task `3877` and run `388738`; visible-progress ledger and Postgres requirements guard passed; loop metrics recorded for budget, guardian/concurrency, pending approvals, and regression posture.
+- Lesson: treat token-cap exhaustion as a hard implementation stop even when guardian and scheduler are healthy; preserve the queued reversible control-plane slice rather than making an incidental change in a dirty live state repository.
+- NEXT ACTION: when budget headroom recovers, execute exactly one Tier S control-plane slice: queued task `3546` / OWS-4, reducing Jonah cadence from `*/20` to hourly under the self-modification protocol.
+
 ## 2026-08-12 daily optimizer plan-only run
 
 - Time: 2026-08-12 02:15 ET / 06:15 UTC.
