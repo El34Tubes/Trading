@@ -198,6 +198,7 @@ def run_eod_features_signals(
             compute_and_store_options_features,
             ingest_free_sources,
             fetch_nasdaq_short_interest,
+            snapshot_current_universe,
             store_nasdaq_short_interest,
         )
 
@@ -205,6 +206,7 @@ def run_eod_features_signals(
         # An explicit --signal-dt is a replay and must never relabel today's
         # Cboe/Nasdaq pages as observations from a historical session.
         if signal_dt_value is None:
+            snapshot_current_universe(conn, signal_dt=signal_dt)
             ingest_free_sources(conn, as_of=signal_dt)
             nasdaq_rows = fetch_nasdaq_short_interest(tickers, published_at=dt.date.today())
             store_nasdaq_short_interest(

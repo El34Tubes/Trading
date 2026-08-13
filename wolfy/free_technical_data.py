@@ -365,6 +365,18 @@ def ensure_free_technical_schema(conn) -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_nasdaq_short_interest_available ON nasdaq_short_interest(ticker, available_at DESC)")
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS universe_membership_snapshots (
+          dt date NOT NULL,
+          symbol text NOT NULL,
+          eligible boolean NOT NULL,
+          sector text,
+          source text NOT NULL,
+          snapshot_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY(dt, symbol, source)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_universe_membership_snapshot_dt ON universe_membership_snapshots(dt, eligible, symbol)")
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS options_technical_features (
           ticker text NOT NULL,
           dt date NOT NULL,
@@ -501,33 +513,54 @@ def compute_and_store_options_features(conn, *, tickers: Sequence[str], end_dt: 
     return store_options_features(conn, compute_options_oriented_features(bars))
 
 
+def snapshot_current_universe(conn, *, signal_dt: date, source: str = "universe_current_snapshot_v1") -> int:
+    """Freeze today's eligibility for forward-only, point-in-time breadth."""
+    ensure_free_technical_schema(conn)
+    rows = conn.execute("SELECT symbol, coalesce(active,true) AND coalesce(enabled,true), sector FROM universe").fetchall()
+    for symbol, eligible, sector in rows:
+        conn.execute("""
+            INSERT INTO universe_membership_snapshots(dt,symbol,eligible,sector,source)
+            VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT(dt,symbol,source) DO UPDATE SET
+              eligible=EXCLUDED.eligible,sector=EXCLUDED.sector,snapshot_at=now()
+        """, (signal_dt, symbol, eligible, sector, source))
+    return len(rows)
+
+
 def compute_and_store_breadth(conn, *, signal_dt: date) -> dict[str, object]:
     ensure_free_technical_schema(conn)
+    snapshot_count = conn.execute(
+        "SELECT count(*) FROM universe_membership_snapshots WHERE dt=%s AND source='universe_current_snapshot_v1'",
+        (signal_dt,),
+    ).fetchone()[0]
+    if not snapshot_count:
+        raise ValueError(f"no point-in-time universe snapshot for {signal_dt}; historical breadth backfill is intentionally blocked")
     rows = conn.execute("""
         SELECT u.symbol, p.close,
                lagp.close AS previous_close,
                avg20.sma20, avg50.sma50, avg200.sma200,
-               hl.high20, hl.low20, p.volume,
-               coalesce(u.active,true) AND coalesce(u.enabled,true) AS eligible
-        FROM universe u
+               hl.high20, hl.low20, p.volume, u.eligible
+        FROM universe_membership_snapshots u
         JOIN prices p ON p.ticker=u.symbol AND p.dt=%s
         JOIN LATERAL (SELECT close FROM prices WHERE ticker=u.symbol AND dt<p.dt ORDER BY dt DESC LIMIT 1) lagp ON true
         LEFT JOIN LATERAL (SELECT avg(close) sma20 FROM (SELECT close FROM prices WHERE ticker=u.symbol AND dt<=p.dt ORDER BY dt DESC LIMIT 20) x) avg20 ON true
         LEFT JOIN LATERAL (SELECT avg(close) sma50 FROM (SELECT close FROM prices WHERE ticker=u.symbol AND dt<=p.dt ORDER BY dt DESC LIMIT 50) x) avg50 ON true
         LEFT JOIN LATERAL (SELECT avg(close) sma200 FROM (SELECT close FROM prices WHERE ticker=u.symbol AND dt<=p.dt ORDER BY dt DESC LIMIT 200) x) avg200 ON true
         LEFT JOIN LATERAL (SELECT max(high) high20,min(low) low20 FROM (SELECT high,low FROM prices WHERE ticker=u.symbol AND dt<=p.dt ORDER BY dt DESC LIMIT 20) x) hl ON true
-    """, (signal_dt,)).fetchall()
+        WHERE u.dt=%s AND u.source='universe_current_snapshot_v1'
+    """, (signal_dt, signal_dt)).fetchall()
     keys = ("ticker","close","previous_close","sma20","sma50","sma200","high20","low20","volume","eligible")
     breadth = compute_point_in_time_breadth([dict(zip(keys, row)) for row in rows])
     conn.execute("""
         INSERT INTO market_breadth(dt,eligible_count,advancers,decliners,advance_decline_ratio,pct_above_20dma,pct_above_50dma,pct_above_200dma,new_20d_high_fraction,new_20d_low_fraction,up_volume_fraction,universe_definition)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'point_in_time_active_enabled_universe')
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'forward_snapshot_universe_v1')
         ON CONFLICT(dt) DO UPDATE SET eligible_count=EXCLUDED.eligible_count,advancers=EXCLUDED.advancers,
           decliners=EXCLUDED.decliners,advance_decline_ratio=EXCLUDED.advance_decline_ratio,
           pct_above_20dma=EXCLUDED.pct_above_20dma,pct_above_50dma=EXCLUDED.pct_above_50dma,
           pct_above_200dma=EXCLUDED.pct_above_200dma,new_20d_high_fraction=EXCLUDED.new_20d_high_fraction,
-          new_20d_low_fraction=EXCLUDED.new_20d_low_fraction,up_volume_fraction=EXCLUDED.up_volume_fraction,ingested_at=now()
-    """, (signal_dt,breadth["eligible_count"],breadth["advancers"],breadth["decliners"],breadth["advance_decline_ratio"],breadth["pct_above_20dma"],breadth["pct_above_50dma"],breadth["pct_above_200dma"],breadth["new_20d_high_fraction"],breadth["new_20d_low_fraction"],breadth["up_volume_fraction"]))
+          new_20d_low_fraction=EXCLUDED.new_20d_low_fraction,up_volume_fraction=EXCLUDED.up_volume_fraction,
+          universe_definition=EXCLUDED.universe_definition,ingested_at=now()
+          """, (signal_dt,breadth["eligible_count"],breadth["advancers"],breadth["decliners"],breadth["advance_decline_ratio"],breadth["pct_above_20dma"],breadth["pct_above_50dma"],breadth["pct_above_200dma"],breadth["new_20d_high_fraction"],breadth["new_20d_low_fraction"],breadth["up_volume_fraction"]))
     return breadth
 
 

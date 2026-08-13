@@ -157,6 +157,20 @@ def test_parse_nasdaq_short_interest_preserves_publication_availability():
     assert rows[0]["days_to_cover"] == Decimal("2.424722")
 
 
+def test_historical_breadth_requires_a_membership_snapshot():
+    import pytest
+    psycopg = pytest.importorskip("psycopg")
+    from free_technical_data import compute_and_store_breadth, ensure_free_technical_schema
+
+    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    with psycopg.connect(dsn) as conn:
+        ensure_free_technical_schema(conn)
+        conn.execute("DELETE FROM universe_membership_snapshots WHERE dt=%s", (date(2098, 12, 31),))
+        with pytest.raises(ValueError, match="historical breadth backfill is intentionally blocked"):
+            compute_and_store_breadth(conn, signal_dt=date(2098, 12, 31))
+        conn.rollback()
+
+
 def test_free_source_schema_and_upserts_are_idempotent():
     import pytest
     psycopg = pytest.importorskip("psycopg")
