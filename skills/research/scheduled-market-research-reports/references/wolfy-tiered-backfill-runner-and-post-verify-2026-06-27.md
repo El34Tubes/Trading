@@ -31,21 +31,16 @@ uvx --with 'psycopg[binary]' python /root/.hermes/wolfy/backfill_tiered_remainin
   --max-failures 8 2>&1 | tee "$LOG"
 ```
 
-4. Add a second background verifier that waits for the backfill PID instead of trusting completion by narrative.
-   - File created in-session: `/root/.hermes/wolfy/post_tiered_backfill_verify.py`.
-   - It waits for the backfill PID to exit.
-   - It prints final tier counts.
-   - It runs `eod_signals.py` across loaded target tickers using the common feature date.
-   - It runs targeted regression tests: `test_wolfy_tiered_universe.py`, `test_eod_price_features.py`, `test_eod_signals.py`.
-
-Example:
+4. Verify through the active bounded-backfill and scheduled EOD workflows rather than a PID-specific one-shot helper.
+   - The former `post_tiered_backfill_verify.py` utility was retired after its one-time run; do not recreate or invoke it.
+   - Check the bounded backfill job status and final tier counts in Postgres.
+   - Confirm the normal after-close EOD feature and signal jobs complete after the backfill window.
+   - Run the targeted regression suite directly:
 
 ```bash
-LOG=/root/.hermes/wolfy/tiered_backfill_post_verify_$(date -u +%Y%m%dT%H%M%SZ).log
-ln -sfn "$LOG" /root/.hermes/wolfy/tiered_backfill_post_verify_latest.log
-uvx --with 'psycopg[binary]' python /root/.hermes/wolfy/post_tiered_backfill_verify.py \
-  --wait-pid <BACKFILL_PID> \
-  --poll-seconds 60 2>&1 | tee "$LOG"
+cd /root/.hermes/wolfy
+uvx --with pytest --with 'psycopg[binary]' --with pyyaml pytest -q \
+  test_wolfy_tiered_universe.py test_eod_price_features.py test_eod_signals.py
 ```
 
 5. Report in-progress truthfully.
