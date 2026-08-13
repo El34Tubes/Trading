@@ -123,6 +123,11 @@ DEFAULT_STRATEGIES = (
             "target_r": "1.0",
             "max_hold_days": 10,
             "option_liquidity_hard_gate": True,
+            "experimental_forward_recommendations_allowed": True,
+            "historical_approval_required_for_experimental_paper": False,
+            "allowed_option_structures_v1": ["long_call", "call_debit_spread"],
+            "option_dte_min": 7,
+            "option_dte_max": 35,
         },
         "New research_only options strategy: volatility contraction then expansion, breadth and sector confirmation; high realized volatility is allowed and no live execution is authorized.",
     ),
@@ -1037,6 +1042,99 @@ def _broker_notes_for_ticker(
     }
     equity_fallback = not option_spread_available
     return normalized, warnings, equity_fallback
+
+
+def write_experimental_options_recommendations(
+    conn,
+    *,
+    signal_dt: date,
+    option_evaluations: Mapping[str, Any],
+    max_recommendations: int = 3,
+    account_equity_usd: Decimal = Decimal("5000"),
+    risk_fraction: Decimal = Decimal("0.05"),
+    dry_run: bool = False,
+) -> dict:
+    """Write unvalidated, paper-only option expressions for qualifying signals.
+
+    Historical approval is intentionally not required for this named research
+    strategy. A selected, defined-risk, exact option structure remains mandatory.
+    """
+    ensure_signal_schema(conn)
+    rows = conn.execute("""
+        SELECT s.ticker,s.raw,st.id,st.name,st.status
+        FROM signals s JOIN strategies st ON st.id=s.strategy_id
+        WHERE s.dt=%s AND st.name='liquid_rs_breakout_options_volatility_v1'
+          AND lower(coalesce(s.direction,'')) IN ('long','buy')
+        ORDER BY s.ticker
+    """, (signal_dt,)).fetchall()
+    eligible: list[dict[str, Any]] = []
+    blocked = 0
+    for ticker, raw, strategy_id, strategy_name, strategy_status in rows:
+        evaluation = option_evaluations.get(str(ticker).upper()) or option_evaluations.get(str(ticker))
+        selected = evaluation.get("selected") if isinstance(evaluation, Mapping) else None
+        if not isinstance(selected, Mapping) or selected.get("defined_risk") is not True:
+            blocked += 1
+            continue
+        debit = _as_decimal(selected.get("max_loss_per_contract"), Decimal("0"))
+        if debit <= 0:
+            blocked += 1
+            continue
+        raw_dict = raw if isinstance(raw, Mapping) else json.loads(raw or "{}")
+        eligible.append({"ticker": str(ticker), "raw": raw_dict, "strategy_id": int(strategy_id), "strategy_name": str(strategy_name), "strategy_status": str(strategy_status), "selected": dict(selected), "max_loss": debit})
+    eligible.sort(key=lambda item: (-_recommendation_score(item["raw"]), item["ticker"]))
+    created = skipped = 0
+    serializable: list[dict[str, Any]] = []
+    risk_budget = account_equity_usd * risk_fraction
+    for item in eligible[:max(0, max_recommendations)]:
+        ticker, raw, selected = item["ticker"], item["raw"], item["selected"]
+        entry = _as_decimal(_raw_value(raw, "close"), Decimal("0"))
+        stop = _as_decimal(_raw_value(raw, "invalidation"), Decimal("0"))
+        target_r = _as_decimal(_raw_value(raw, "target_r"), Decimal("1"))
+        target = entry + max(entry - stop, Decimal("0")) * target_r
+        contracts = int(risk_budget // item["max_loss"])
+        if contracts < 1:
+            blocked += 1
+            continue
+        exists = conn.execute("""
+            SELECT id FROM recommendations WHERE ticker=%s AND notes->>'signal_dt'=%s
+              AND notes->>'strategy_name'=%s AND status IN ('paper_candidate','paper_logged') LIMIT 1
+        """, (ticker, signal_dt.isoformat(), item["strategy_name"])).fetchone()
+        if exists:
+            skipped += 1
+            serializable.append({"ticker": ticker, "status": "existing"})
+            continue
+        notes = {
+            "experimental_forward_test": True, "strategy_validated": False,
+            "historical_approval_gate_overridden_for_paper_research": True,
+            "paper_only": True, "no_live_execution": True, "broker_order_submitted": False,
+            "equity_fallback": False, "signal_dt": signal_dt.isoformat(),
+            "strategy_id": item["strategy_id"], "strategy_name": item["strategy_name"],
+            "strategy_status_at_selection": item["strategy_status"],
+            "source_signal": raw, "option_structure": selected,
+            "paper_account_usd": str(account_equity_usd), "risk_fraction": str(risk_fraction),
+            "paper_risk_budget_usd": str(risk_budget), "paper_contracts": contracts,
+            "position_sizing_basis": "maximum_defined_option_loss",
+        }
+        if not dry_run:
+            conn.execute("""
+                INSERT INTO recommendations(ticker,action,recommendation_type,thesis,setup_type,entry_zone,entry_trigger,stop,target,risk_reward,confidence,position_size_suggestion,holding_period,status,notes)
+                VALUES (%s,'buy','experimental_defined_risk_option',%s,%s,%s,%s,%s,%s,%s,'experimental',%s,%s,'paper_candidate',%s::jsonb)
+            """, (
+                ticker, f"Experimental forward test of deterministic {item['strategy_name']}; not historically validated and no live execution.",
+                item["strategy_name"], f"Underlying EOD baseline {_money(entry)}",
+                f"Paper option expression using exact selected contracts; underlying baseline {_money(entry)}.",
+                f"Underlying close below {_money(stop)} invalidates thesis.", f"Underlying technical target {_money(target)}.", f"{target_r}R underlying thesis",
+                f"{contracts} paper contract(s), sized from ${item['max_loss']} maximum loss each.", "Up to 10 trading days", _json(notes),
+            ))
+        created += 1
+        serializable.append({"ticker": ticker, "status": "paper_candidate", "structure": selected.get("structure"), "contracts": contracts})
+    return {
+        "signal_dt": signal_dt.isoformat(), "dry_run": dry_run,
+        "recommendations_created": 0 if dry_run else created,
+        "recommendations_ranked": min(len(eligible), max(0, max_recommendations)),
+        "skipped_existing": skipped, "blocked_by_option_quality": blocked,
+        "broker_orders_created": 0, "recommendations": serializable,
+    }
 
 
 def write_approved_paper_recommendations(
