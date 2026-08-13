@@ -81,12 +81,35 @@ def test_snapshot_retention_keeps_latest_24(tmp_path: Path) -> None:
     home = tmp_path / "hermes"
     home.mkdir()
     write_min_home(home)
+    created = []
     for _ in range(30):
-        guardian.snapshot(home, reason="retention-test")
+        created.append(guardian.snapshot(home, reason="retention-test"))
 
-    snapshots = sorted((home / "wolfy" / "guardian" / "known_good").iterdir())
-    assert len(snapshots) == 24
+    snapshots = set((home / "wolfy" / "guardian" / "known_good").iterdir())
+    assert snapshots == set(created[-24:])
+    assert all(not path.exists() for path in created[:-24])
     manifest = guardian.load_manifest(home)
     latest = Path(manifest["latest_snapshot"])
+    assert latest == created[-1]
     assert latest.exists()
-    assert latest in snapshots
+
+
+def test_snapshot_retention_uses_creation_metadata_not_touched_mtime(tmp_path: Path) -> None:
+    import importlib.util
+    import os
+
+    spec = importlib.util.spec_from_file_location("wolfy_config_guardian", GUARDIAN)
+    assert spec is not None and spec.loader is not None
+    guardian = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guardian)
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    write_min_home(home)
+    created = [guardian.snapshot(home, reason="retention-test") for _ in range(24)]
+    os.utime(created[0], None)
+    newest = guardian.snapshot(home, reason="retention-test")
+
+    snapshots = set((home / "wolfy" / "guardian" / "known_good").iterdir())
+    assert created[0] not in snapshots
+    assert snapshots == set(created[1:] + [newest])

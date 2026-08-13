@@ -35,7 +35,7 @@ def utc_now() -> dt.datetime:
 
 
 def stamp(ts: dt.datetime | None = None) -> str:
-    return (ts or utc_now()).strftime("%Y%m%dT%H%M%SZ")
+    return (ts or utc_now()).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def sha256_file(path: Path) -> str:
@@ -106,6 +106,17 @@ def current_hashes(home: Path) -> dict[str, str]:
     return hashes
 
 
+def snapshot_created_at(path: Path) -> tuple[dt.datetime, str]:
+    try:
+        raw = json.loads((path / "snapshot.json").read_text()).get("created_at", "")
+        created_at = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=dt.timezone.utc)
+        return created_at, path.name
+    except Exception:
+        return dt.datetime.min.replace(tzinfo=dt.timezone.utc), path.name
+
+
 def snapshot(home: Path, reason: str = "manual") -> Path:
     root = known_good_dir(home)
     dest = root / stamp()
@@ -129,7 +140,7 @@ def snapshot(home: Path, reason: str = "manual") -> Path:
     save_manifest(home, manifest)
     snapshots = sorted(
         (path for path in root.iterdir() if path.is_dir()),
-        key=lambda path: (path.stat().st_mtime_ns, path.name),
+        key=snapshot_created_at,
     )
     for stale in snapshots[:-KNOWN_GOOD_SNAPSHOT_RETENTION]:
         shutil.rmtree(stale)
