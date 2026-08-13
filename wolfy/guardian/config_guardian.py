@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover
 
 DEFAULT_DSN = "dbname=wolfy user=root host=/var/run/postgresql"
 OPTIMIZER_JOB_ID = "92f31b95fccc"
+KNOWN_GOOD_SNAPSHOT_RETENTION = 24
 
 
 def utc_now() -> dt.datetime:
@@ -126,6 +127,12 @@ def snapshot(home: Path, reason: str = "manual") -> Path:
     manifest["latest_snapshot"] = str(dest)
     manifest["hashes"] = hashes
     save_manifest(home, manifest)
+    snapshots = sorted(
+        (path for path in root.iterdir() if path.is_dir()),
+        key=lambda path: (path.stat().st_mtime_ns, path.name),
+    )
+    for stale in snapshots[:-KNOWN_GOOD_SNAPSHOT_RETENTION]:
+        shutil.rmtree(stale)
     log(home, f"SNAPSHOT path={dest} reason={reason}")
     return dest
 

@@ -68,3 +68,25 @@ def test_config_guardian_restores_known_good_on_broken_config_and_expired_probat
     assert not probation.exists()
     log = home / "wolfy" / "guardian" / "guardian.log"
     assert "ROLLBACK" in log.read_text()
+
+
+def test_snapshot_retention_keeps_latest_24(tmp_path: Path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("wolfy_config_guardian", GUARDIAN)
+    assert spec is not None and spec.loader is not None
+    guardian = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guardian)
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    write_min_home(home)
+    for _ in range(30):
+        guardian.snapshot(home, reason="retention-test")
+
+    snapshots = sorted((home / "wolfy" / "guardian" / "known_good").iterdir())
+    assert len(snapshots) == 24
+    manifest = guardian.load_manifest(home)
+    latest = Path(manifest["latest_snapshot"])
+    assert latest.exists()
+    assert latest in snapshots

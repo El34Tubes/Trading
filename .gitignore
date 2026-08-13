@@ -33,6 +33,14 @@ channel_directory.json
 discord_threads.json
 context_length_cache.yaml
 models_dev_cache.json
+provider_models_cache.json
+ollama_cloud_models_cache.json
+.codex_gpt55_autoraise_notice
+profiles/*/.codex_gpt55_autoraise_notice
+mcp-tokens/
+state-snapshots/
+cron/ticker_heartbeat
+cron/ticker_last_success
 .update_check
 .scratch_tip_shown
 .hermes_history
@@ -95,6 +103,11 @@ wolfy/tmp_*.htm
 wolfy/tmp_*.html
 wolfy/tmp_*.txt
 wolfy/tmp/
+wolfy/integration_smoke_*/
+wolfy/*_factsheet
+wolfy/*_factsheet.pdf
+wolfy/*_factsheet.txt
+wolfy/*_holdings
 wolfy/*.out
 wolfy/smh_*.xml
 wolfy/smh_*.html
@@ -106,6 +119,7 @@ wolfy/usage_limit_watchdog_state.json
 wolfy/usage_limit_watchdog_state.json.bak*
 wolfy/guardian/known_good/
 wolfy/guardian/probation.json
+wolfy/guardian/guardian.log
 wolfy/insert_*_research_*.py
 wolfy/verify_*_*.py
 skills/.curator_backups/
