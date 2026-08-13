@@ -14,6 +14,9 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
+BROKER_PRICE_DRIFT_WARNING_FRACTION = Decimal("0.05")
+BROKER_WIDE_SPREAD_WARNING_FRACTION = Decimal("0.02")
+
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
 DEFAULT_STRATEGIES = (
     (
@@ -94,6 +97,34 @@ DEFAULT_STRATEGIES = (
             "option_liquidity_hard_gate": False,
         },
         "Research_only revision from exhaustive grid: SPY>50, 1R target, close-back-below-breakout invalidation, RS excess >=2%, volume >=1.2, prior-low risk <=5%.",
+    ),
+    (
+        "liquid_rs_breakout_options_volatility_v1",
+        "rs_breakout_options_volatility",
+        {
+            "source": "Wolfy free technical/options-volatility extension 2026-08-12",
+            "parent_strategy": "liquid_rs_breakout_close_confirm_1r",
+            "requires_backtest": True,
+            "breakout_lookback_days": 5,
+            "rs_benchmark": "SPY",
+            "rs_window_days": 20,
+            "min_vol_ratio": "1.2",
+            "min_rs_excess_20d": "0.02",
+            "max_prior_low_risk_pct": "0.05",
+            "market_regime": "SPY_above_50_sma",
+            "requires_options_volatility_setup": True,
+            "requires_breadth_pct_above_50dma": "0.50",
+            "requires_sector_confirmation": True,
+            "high_realized_volatility_allowed": True,
+            "max_realized_volatility": None,
+            "vix_role": "context_not_hard_cap",
+            "instrument_policy": "defined_risk_options_only",
+            "stop_rule": "close_below_breakout_level",
+            "target_r": "1.0",
+            "max_hold_days": 10,
+            "option_liquidity_hard_gate": True,
+        },
+        "New research_only options strategy: volatility contraction then expansion, breadth and sector confirmation; high realized volatility is allowed and no live execution is authorized.",
     ),
 )
 
@@ -403,6 +434,7 @@ def _generate_liquid_rs_breakout(
     require_spy_above_sma_days: int | None = None,
     stop_rule: str = "prior_5_day_low",
     target_r: Decimal = Decimal("1.5"),
+    require_options_volatility_setup: bool = False,
 ) -> int:
     strategy_id, status = strategies[strategy_name]
     spy_row = conn.execute(
@@ -500,6 +532,68 @@ def _generate_liquid_rs_breakout(
         if not within_5pct_recent_high:
             continue
 
+        options_volatility_facts: dict[str, Any] | None = None
+        if require_options_volatility_setup:
+            feature_row = conn.execute(
+                """
+                SELECT options_volatility_setup, realized_vol_annualized,
+                       pre_breakout_contraction_ratio, range_expansion_ratio,
+                       close_location_value, volume_percentile
+                FROM options_technical_features WHERE ticker=%s AND dt=%s
+                """,
+                (ticker, signal_dt),
+            ).fetchone()
+            breadth_row = conn.execute(
+                "SELECT pct_above_50dma, advance_decline_ratio FROM market_breadth WHERE dt=%s",
+                (signal_dt,),
+            ).fetchone()
+            sector_row = conn.execute("SELECT sector FROM universe_symbols WHERE symbol=%s", (ticker,)).fetchone()
+            sector = str(sector_row[0]) if sector_row and sector_row[0] else None
+            from free_technical_data import SECTOR_ETFS, compute_sector_relative_strength
+
+            sector_etf = SECTOR_ETFS.get(sector or "")
+            sector_return = None
+            if sector_etf:
+                sector_prices = conn.execute(
+                    """
+                    SELECT cur.close, prev.close
+                    FROM prices cur
+                    JOIN LATERAL (
+                      SELECT close FROM prices WHERE ticker=cur.ticker AND dt <= %s ORDER BY dt DESC LIMIT 1
+                    ) prev ON true
+                    WHERE cur.ticker=%s AND cur.dt=%s
+                    """,
+                    (signal_dt - timedelta(days=rs_window_days), sector_etf, signal_dt),
+                ).fetchone()
+                if sector_prices and sector_prices[1] not in (None, 0):
+                    sector_return = Decimal(str(sector_prices[0])) / Decimal(str(sector_prices[1])) - Decimal("1")
+            sector_strength = compute_sector_relative_strength(
+                ticker=ticker, sector=sector, stock_return=ticker_return,
+                sector_return=sector_return, spy_return=spy_return,
+            )
+            latest_vix = conn.execute(
+                """
+                SELECT value FROM technical_market_series
+                WHERE series='VIX' AND observation_date <= %s
+                  AND available_at <= (%s::date + interval '1 day')
+                ORDER BY observation_date DESC LIMIT 1
+                """,
+                (signal_dt, signal_dt),
+            ).fetchone()
+            feature = dict(zip(
+                ("options_volatility_setup", "realized_vol_annualized", "pre_breakout_contraction_ratio", "range_expansion_ratio", "close_location_value", "volume_percentile"),
+                feature_row,
+            )) if feature_row else None
+            breadth = dict(zip(("pct_above_50dma", "advance_decline_ratio"), breadth_row)) if breadth_row else None
+            accepted, options_volatility_facts = _options_volatility_gate(
+                options_feature=feature,
+                breadth=breadth,
+                sector_strength=sector_strength,
+                market_regime={"vix": latest_vix[0] if latest_vix else None},
+            )
+            if not accepted:
+                continue
+
         raw = {
             "strategy": strategy_name,
             "close": close_dec,
@@ -532,6 +626,10 @@ def _generate_liquid_rs_breakout(
             "gate_status": status,
             "reason": "20d RS leader breaking prior 5d high on confirmed volume near highs",
         }
+        if options_volatility_facts is not None:
+            raw["options_volatility"] = options_volatility_facts
+            raw["instrument_policy"] = "defined_risk_options_only"
+            raw["option_liquidity_hard_gate"] = True
         _upsert_signal(conn, ticker=ticker, signal_dt=signal_dt, strategy_id=strategy_id, direction="long", raw=raw)
         generated += 1
     return generated
@@ -588,6 +686,20 @@ def generate_eod_signals(
             stop_rule="close_below_breakout_level",
             target_r=Decimal("1.0"),
         ),
+        "liquid_rs_breakout_options_volatility_v1": _generate_liquid_rs_breakout(
+            conn,
+            tickers=tickers,
+            signal_dt=signal_dt,
+            strategies=strategies,
+            strategy_name="liquid_rs_breakout_options_volatility_v1",
+            min_vol_ratio=Decimal("1.2"),
+            min_rs_excess=Decimal("0.02"),
+            max_stop_risk_pct=Decimal("0.05"),
+            require_spy_above_sma_days=50,
+            stop_rule="close_below_breakout_level",
+            target_r=Decimal("1.0"),
+            require_options_volatility_setup=True,
+        ),
     }
     return {
         "signal_dt": signal_dt.isoformat(),
@@ -610,6 +722,42 @@ def _as_decimal(value: Any, default: Decimal) -> Decimal:
     if value is None:
         return default
     return Decimal(str(value))
+
+
+def _options_volatility_gate(
+    *,
+    options_feature: Mapping[str, Any] | None,
+    breadth: Mapping[str, Any] | None,
+    sector_strength: Mapping[str, Any] | None,
+    market_regime: Mapping[str, Any] | None,
+) -> tuple[bool, dict[str, Any]]:
+    """Gate the research strategy on setup shape, breadth, and sector strength.
+
+    Realized volatility and VIX are preserved as context and deliberately have
+    no maximum cap. Defined-risk option liquidity is enforced downstream before
+    any recommendation can become an options paper setup.
+    """
+    options_feature = options_feature or {}
+    breadth = breadth or {}
+    sector_strength = sector_strength or {}
+    market_regime = market_regime or {}
+    pct_above_50 = _as_decimal(breadth.get("pct_above_50dma"), Decimal("0"))
+    accepted = bool(
+        options_feature.get("options_volatility_setup") is True
+        and pct_above_50 >= Decimal("0.50")
+        and sector_strength.get("sector_confirmation") is True
+    )
+    facts = {
+        **dict(options_feature),
+        "breadth_pct_above_50dma": pct_above_50,
+        "sector_strength": dict(sector_strength),
+        "market_regime": dict(market_regime),
+        "high_realized_volatility_allowed": True,
+        "max_realized_volatility": None,
+        "vix_is_context_not_hard_cap": True,
+        "defined_risk_options_only": True,
+    }
+    return accepted, facts
 
 
 def _money(value: Decimal) -> str:
@@ -736,6 +884,9 @@ def _build_screened_setup(
     instrument_type = str(instrument.get("instrument_type", "equity")).lower()
     option_structure = {"instrument_type": instrument_type, "allowed": "defined_risk_only", "selected": None}
     iv_view = instrument.get("iv_view", {"source": "not_evaluated", "action": "do_not_infer_iv"})
+    options_only = str(_raw_value(raw, "instrument_policy", "")) == "defined_risk_options_only"
+    if options_only and instrument_type not in {"option", "options", "call", "put"}:
+        reasons.append("options-only strategy requires an option instrument")
     if instrument_type in {"option", "options", "call", "put"}:
         if instrument.get("option_liquidity_ok") is not True:
             reasons.append("option liquidity gate failed")
@@ -776,6 +927,118 @@ def _recommendation_score(raw: Mapping[str, Any]) -> Decimal:
     return _as_decimal(_raw_value(raw, "rs_excess_20d"), Decimal("0")) * Decimal("100") + _as_decimal(_raw_value(raw, "vol_ratio"), Decimal("0"))
 
 
+def _broker_decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+    if value is None:
+        return default
+    try:
+        return Decimal(str(value).replace("$", "").replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def _broker_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y"}
+    return bool(value)
+
+
+def _broker_notes_for_ticker(
+    ticker: str,
+    *,
+    entry: Decimal,
+    broker_enrichment: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[str], bool]:
+    """Normalize Robinhood read-only enrichment into recommendation note fields.
+
+    This function is deliberately passive: it records broker-side tradability,
+    quote/spread, exposure, earnings, fundamentals, and option-spread metadata;
+    it never calls broker order tools and never authorizes live execution.
+    """
+    if not broker_enrichment:
+        return None, [], True
+    raw_obj = broker_enrichment.get(ticker.upper()) or broker_enrichment.get(ticker)
+    if not isinstance(raw_obj, Mapping):
+        return None, [], True
+
+    raw = dict(raw_obj)
+    tradability_obj = raw.get("tradability")
+    quote_obj = raw.get("quote")
+    price_book_obj = raw.get("price_book")
+    account_exposure_obj = raw.get("account_exposure")
+    earnings_obj = raw.get("earnings")
+    option_spread_obj = raw.get("option_spread")
+    tradability: Mapping[str, Any] = tradability_obj if isinstance(tradability_obj, Mapping) else {}
+    quote: Mapping[str, Any] = quote_obj if isinstance(quote_obj, Mapping) else {}
+    price_book: Mapping[str, Any] = price_book_obj if isinstance(price_book_obj, Mapping) else {}
+    account_exposure: Mapping[str, Any] = account_exposure_obj if isinstance(account_exposure_obj, Mapping) else {}
+    earnings: Mapping[str, Any] = earnings_obj if isinstance(earnings_obj, Mapping) else {}
+    option_spread: Mapping[str, Any] = option_spread_obj if isinstance(option_spread_obj, Mapping) else {}
+
+    tradable = _broker_bool(tradability.get("tradable"), default=True)
+    halted = _broker_bool(tradability.get("halted"), default=False)
+    current_price = _broker_decimal(quote.get("last_price") or quote.get("mark_price") or quote.get("price"), Decimal("0"))
+    bid = _broker_decimal(price_book.get("bid_price") or quote.get("bid_price"), Decimal("0"))
+    ask = _broker_decimal(price_book.get("ask_price") or quote.get("ask_price"), Decimal("0"))
+    spread_pct = Decimal("0")
+    if bid > 0 and ask > 0:
+        mid = (bid + ask) / Decimal("2")
+        if mid > 0:
+            spread_pct = (ask - bid) / mid
+    price_drift_pct = Decimal("0")
+    if entry > 0 and current_price > 0:
+        price_drift_pct = abs(current_price - entry) / entry
+
+    option_spread_available = _broker_bool(option_spread.get("available"), default=False)
+    existing_equity_position = _broker_bool(account_exposure.get("existing_equity_position"), default=False)
+    existing_option_position = _broker_bool(account_exposure.get("existing_option_position"), default=False)
+    open_order_warning = _broker_bool(account_exposure.get("open_order_warning"), default=False)
+    earnings_window = _broker_bool(earnings.get("within_hold_window"), default=False)
+
+    warnings: list[str] = []
+    tradability_block = (not tradable) or halted
+    if tradability_block:
+        warnings.append("halted_or_not_tradable")
+    if price_drift_pct > BROKER_PRICE_DRIFT_WARNING_FRACTION:
+        warnings.append(f"price_drift_{price_drift_pct:.2%}_from_eod_baseline")
+    if spread_pct > BROKER_WIDE_SPREAD_WARNING_FRACTION:
+        warnings.append(f"wide_bid_ask_spread_{spread_pct:.2%}")
+    if existing_equity_position:
+        warnings.append("existing_equity_position")
+    if existing_option_position:
+        warnings.append("existing_option_position")
+    if open_order_warning:
+        warnings.append("open_order_warning")
+    if earnings_window:
+        warnings.append("earnings_within_expected_hold_window")
+
+    normalized = {
+        "source": str(raw.get("source") or "robinhood_mcp"),
+        "read_only": True,
+        "tradability_block": tradability_block,
+        "tradable": tradable,
+        "halted": halted,
+        "current_price": _money(current_price) if current_price > 0 else None,
+        "bid": _money(bid) if bid > 0 else None,
+        "ask": _money(ask) if ask > 0 else None,
+        "spread_pct": str(spread_pct) if spread_pct > 0 else None,
+        "price_drift_pct": str(price_drift_pct) if price_drift_pct > 0 else None,
+        "existing_equity_position": existing_equity_position,
+        "existing_option_position": existing_option_position,
+        "open_order_warning": open_order_warning,
+        "earnings_within_hold_window": earnings_window,
+        "option_spread_available": option_spread_available,
+        "option_spread": option_spread or None,
+        "fundamentals": raw.get("fundamentals") if isinstance(raw.get("fundamentals"), Mapping) else None,
+        "raw": raw,
+    }
+    equity_fallback = not option_spread_available
+    return normalized, warnings, equity_fallback
+
+
 def write_approved_paper_recommendations(
     conn,
     *,
@@ -784,6 +1047,7 @@ def write_approved_paper_recommendations(
     max_recommendations: int = 3,
     risk_fraction: Decimal = Decimal("0.05"),
     dry_run: bool = False,
+    broker_enrichment: Mapping[str, Any] | None = None,
 ) -> dict:
     """Write approved-strategy deterministic paper recommendations to Postgres.
 
@@ -839,9 +1103,13 @@ def write_approved_paper_recommendations(
         risk_per_share = max(entry - invalidation, Decimal("0.01"))
         target_r = _as_decimal(_raw_value(raw, "target_r"), Decimal("1.0"))
         target = entry + risk_per_share * target_r
+        broker_notes, broker_warnings, equity_fallback = _broker_notes_for_ticker(ticker, entry=entry, broker_enrichment=broker_enrichment)
         notes = {
             "paper_only": True,
             "no_live_execution": True,
+            "broker_order_submitted": False,
+            "robinhood_read_only": True,
+            "broker_warnings": broker_warnings,
             "review_gate_required": False,
             "sentinel_yang_required": False,
             "paper_entry_baseline": "eod_close",
@@ -849,15 +1117,17 @@ def write_approved_paper_recommendations(
             "strategy_id": item["strategy_id"],
             "strategy_name": item["strategy_name"],
             "source_signal": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in raw.items()},
-            "option_spread": {
+            "option_spread": (broker_notes.get("option_spread") if broker_notes and broker_notes.get("option_spread_available") else {
                 "structure": _raw_value(raw, "preferred_instrument", "2-3wk slightly OTM call spread"),
                 "exact_contract": None,
                 "liquidity_hard_gate": False,
                 "user_evaluates_liquidity_manually": True,
-            },
-            "equity_fallback": True,
+            }),
+            "equity_fallback": equity_fallback,
             "future_same_gate_auto_activation_allowed": True,
         }
+        if broker_notes is not None:
+            notes["broker_enrichment"] = broker_notes
         exists = conn.execute(
             """
             SELECT id FROM recommendations
@@ -879,7 +1149,7 @@ def write_approved_paper_recommendations(
         }
         if exists:
             skipped_existing += 1
-            serializable.append({**payload, "status": "existing"})
+            serializable.append({**payload, "status": "existing", "broker_enriched": broker_notes is not None})
             continue
         if not dry_run:
             conn.execute(
@@ -902,7 +1172,7 @@ def write_approved_paper_recommendations(
                 ),
             )
         created += 1
-        serializable.append({**payload, "status": "paper_candidate"})
+        serializable.append({**payload, "status": "paper_candidate", "broker_enriched": broker_notes is not None})
     return {
         "signal_dt": signal_dt.isoformat(),
         "dry_run": dry_run,
@@ -911,6 +1181,8 @@ def write_approved_paper_recommendations(
         "skipped_existing": skipped_existing,
         "blocked_by_strategy_status": blocked_by_strategy_status,
         "paper_trades_created": 0,
+        "broker_enriched": sum(1 for rec in serializable if rec.get("broker_enriched")),
+        "broker_orders_created": 0,
         "recommendations": serializable,
     }
 
@@ -1018,7 +1290,10 @@ def log_approved_paper_recommendation_trades(
             "risk_amount_usd": _money(risk_amount),
             "entry_baseline": "eod_close",
             "option_spread_advisory": rec["notes"].get("option_spread") if isinstance(rec["notes"], Mapping) else None,
-            "equity_fallback": True,
+            "equity_fallback": (rec["notes"].get("equity_fallback") if isinstance(rec["notes"], Mapping) else True),
+            "broker_enrichment": (rec["notes"].get("broker_enrichment") if isinstance(rec["notes"], Mapping) else None),
+            "broker_warnings": (rec["notes"].get("broker_warnings") if isinstance(rec["notes"], Mapping) else []),
+            "robinhood_read_only": (rec["notes"].get("robinhood_read_only") if isinstance(rec["notes"], Mapping) else True),
         }
         if not dry_run:
             conn.execute(

@@ -191,6 +191,31 @@ def run_eod_features_signals(
             )
             return 0
 
+        # Free/local technical context must exist before the research-only
+        # options-volatility strategy is generated. No paid APIs or trials.
+        from free_technical_data import (
+            compute_and_store_breadth,
+            compute_and_store_options_features,
+            ingest_free_sources,
+            fetch_nasdaq_short_interest,
+            store_nasdaq_short_interest,
+        )
+
+        # Fetch live public datasets only during the normal current EOD run.
+        # An explicit --signal-dt is a replay and must never relabel today's
+        # Cboe/Nasdaq pages as observations from a historical session.
+        if signal_dt_value is None:
+            ingest_free_sources(conn, as_of=signal_dt)
+            nasdaq_rows = fetch_nasdaq_short_interest(tickers, published_at=dt.date.today())
+            store_nasdaq_short_interest(
+                conn,
+                nasdaq_rows,
+                source="nasdaq-public-per-symbol-short-interest",
+                source_url="https://api.nasdaq.com/api/quote/{symbol}/short-interest?assetclass=stocks",
+            )
+        compute_and_store_options_features(conn, tickers=tickers, end_dt=signal_dt)
+        compute_and_store_breadth(conn, signal_dt=signal_dt)
+
     cmd = [
         sys.executable,
         str(WOLFY_DIR / "eod_signals.py"),
