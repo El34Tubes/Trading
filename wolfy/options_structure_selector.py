@@ -88,7 +88,9 @@ def _screen_contract(contract: Mapping[str, Any], *, as_of: date, policy: Select
     if quote_at is None:
         reasons.append("missing_quote_timestamp")
     else:
-        if quote_at.date() != as_of:
+        market_date_value = contract.get("market_date")
+        quote_market_date = str(market_date_value) if market_date_value else quote_at.date().isoformat()
+        if quote_market_date != as_of.isoformat():
             reasons.append("stale_quote")
         if policy.decision_time is not None:
             decision = policy.decision_time.astimezone(timezone.utc)
