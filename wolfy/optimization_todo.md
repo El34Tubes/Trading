@@ -12,6 +12,15 @@ Durable trail for the daily Wolfy/Hermes optimization planner. Items here are pl
 - Postgres is live source of truth; run `/root/.hermes/wolfy/check_postgres_requirements.py` before Postgres package/schema maintenance.
 - Daily optimization runs should send a short completion report when done: what changed, verification, commit/KPI, blockers/next action only.
 
+## 2026-08-15 daily optimizer plan-only run
+
+- Time: 2026-08-15 02:16 ET / 06:16 UTC.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block low_headroom_pct=2.38 threshold=15.00` (exit 1), so this run followed PLAN-ONLY: review/state/KPI updates only, with no code/config/cron/migration implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --home /root/.hermes --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0). Config YAML and cron JSON parsed, `hermes cron list` succeeded, the gateway was running, and optimizer `92f31b95fccc` plus guardian `e55c9cc39d8d` remained enabled.
+- State: created/claimed Postgres task `3884` and run `390825`; prior task `3881` remained completed with verified commit `e1b4ac6`; Postgres requirements and visible-progress ledger checks passed. This run records loop metrics and a durable plan-only note without altering orchestration.
+- Lesson: headroom can be exhausted early even after the daily accounting boundary; preserve the deterministic 15% gate and do not spend the remaining allowance on a control-plane mutation.
+- NEXT ACTION: when budget headroom recovers, execute exactly one reversible Tier S control-plane slice: queued task `3546` / OWS-4, reducing Jonah cadence from `*/20` to hourly under the self-modification protocol.
+
 ## 2026-08-14 daily optimizer plan-only run
 
 - Time: 2026-08-14 02:15 ET / 06:15 UTC.
