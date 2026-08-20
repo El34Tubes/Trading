@@ -154,6 +154,55 @@ def latest_price_date(conn, tickers: list[str]) -> dt.date:
     return row[0]
 
 
+def run_paper_recommendation_lifecycle(
+    conn,
+    *,
+    signal_dt: dt.date,
+    tickers: Sequence[str],
+    as_of: dt.date | None = None,
+    max_recommendations: int = 3,
+    dry_run: bool = False,
+) -> dict:
+    """Run the Postgres paper recommendation lifecycle without broker actions."""
+    from eod_signals import (
+        log_approved_paper_recommendation_trades,
+        write_approved_paper_recommendations,
+    )
+    from recommendation_outcome_review import review_open_paper_trade_setups
+
+    selected = [str(ticker).upper() for ticker in tickers]
+    recommendations = write_approved_paper_recommendations(
+        conn,
+        signal_dt=signal_dt,
+        tickers=selected,
+        max_recommendations=max_recommendations,
+        dry_run=dry_run,
+    )
+    paper_trades = log_approved_paper_recommendation_trades(
+        conn,
+        signal_dt=signal_dt,
+        tickers=selected,
+        max_trades=max_recommendations,
+        dry_run=dry_run,
+    )
+    outcomes = review_open_paper_trade_setups(
+        conn,
+        as_of=as_of or signal_dt,
+        tickers=selected,
+        dry_run=dry_run,
+    )
+    return {
+        "signal_dt": signal_dt.isoformat(),
+        "as_of": (as_of or signal_dt).isoformat(),
+        "dry_run": dry_run,
+        "recommendations": recommendations,
+        "paper_trades": paper_trades,
+        "outcomes": outcomes,
+        "broker_orders_created": 0,
+        "no_live_execution": True,
+    }
+
+
 def run_eod_features_signals(
     *,
     tickers_csv_value: str | None = None,
@@ -229,4 +278,17 @@ def run_eod_features_signals(
         str(for_session),
         "--create-setups",
     ]
-    return subprocess.call(cmd)
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        return rc
+    with psycopg.connect("dbname=wolfy user=root host=/var/run/postgresql") as conn:
+        lifecycle = run_paper_recommendation_lifecycle(
+            conn,
+            signal_dt=signal_dt,
+            tickers=tickers,
+            as_of=signal_dt,
+            max_recommendations=3,
+            dry_run=False,
+        )
+    print(json.dumps({"paper_recommendation_lifecycle": lifecycle}, sort_keys=True, default=str))
+    return 0
