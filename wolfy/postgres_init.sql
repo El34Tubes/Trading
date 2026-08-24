@@ -1003,6 +1003,10 @@ SELECT
   backfill_enabled,
   tier_notes
 FROM universe_symbols;
+-- Task 3: atomic, serialized daily evaluation ledger migration.
+BEGIN;
+SELECT pg_advisory_xact_lock(hashtextextended('wolfy_task3_migration', 0));
+
 CREATE TABLE IF NOT EXISTS daily_evaluation_runs (
     id UUID PRIMARY KEY,
     run_identity TEXT NOT NULL UNIQUE,
@@ -1028,43 +1032,6 @@ ALTER TABLE daily_evaluation_runs
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
 ALTER TABLE daily_evaluation_runs
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
-UPDATE daily_evaluation_runs
-SET required_stage_names = COALESCE(required_stage_names, ARRAY['features']::TEXT[]),
-    derived_stage_metadata = COALESCE(derived_stage_metadata, '{}'::jsonb),
-    status = COALESCE(status, 'started'),
-    created_at = COALESCE(created_at, now()),
-    updated_at = COALESCE(updated_at, now())
-WHERE required_stage_names IS NULL OR derived_stage_metadata IS NULL
-   OR status IS NULL OR created_at IS NULL OR updated_at IS NULL;
-ALTER TABLE daily_evaluation_runs
-    ALTER COLUMN required_stage_names SET DEFAULT ARRAY['features']::TEXT[],
-    ALTER COLUMN required_stage_names SET NOT NULL,
-    ALTER COLUMN derived_stage_metadata SET DEFAULT '{}'::jsonb,
-    ALTER COLUMN derived_stage_metadata SET NOT NULL,
-    ALTER COLUMN status SET DEFAULT 'started',
-    ALTER COLUMN status SET NOT NULL,
-    ALTER COLUMN created_at SET DEFAULT now(),
-    ALTER COLUMN created_at SET NOT NULL,
-    ALTER COLUMN updated_at SET DEFAULT now(),
-    ALTER COLUMN updated_at SET NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_daily_evaluation_runs_session_status
-    ON daily_evaluation_runs(target_session DESC, status);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'daily_evaluation_runs_status_check'
-          AND conrelid = 'daily_evaluation_runs'::regclass
-    ) THEN
-        ALTER TABLE daily_evaluation_runs
-            ADD CONSTRAINT daily_evaluation_runs_status_check
-            CHECK (status IN ('started', 'data_incomplete', 'evaluated', 'published', 'failed'));
-    END IF;
-END
-$$;
-
 CREATE TABLE IF NOT EXISTS ingestion_run_manifests (
     id BIGSERIAL PRIMARY KEY,
     run_id UUID NOT NULL REFERENCES daily_evaluation_runs(id) ON DELETE CASCADE,
@@ -1108,19 +1075,6 @@ ALTER TABLE ingestion_run_manifests
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
 ALTER TABLE ingestion_run_manifests
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
-UPDATE ingestion_run_manifests
-SET provenance = COALESCE(provenance, '{}'::jsonb),
-    created_at = COALESCE(created_at, now()),
-    updated_at = COALESCE(updated_at, now())
-WHERE provenance IS NULL OR created_at IS NULL OR updated_at IS NULL;
-ALTER TABLE ingestion_run_manifests
-    ALTER COLUMN provenance SET DEFAULT '{}'::jsonb,
-    ALTER COLUMN provenance SET NOT NULL,
-    ALTER COLUMN created_at SET DEFAULT now(),
-    ALTER COLUMN created_at SET NOT NULL,
-    ALTER COLUMN updated_at SET DEFAULT now(),
-    ALTER COLUMN updated_at SET NOT NULL;
-
 ALTER TABLE ingestion_run_manifests
     DROP CONSTRAINT IF EXISTS ingestion_run_manifests_check,
     DROP CONSTRAINT IF EXISTS ingestion_run_manifests_raw_payload_sha256_check,
@@ -1183,6 +1137,124 @@ ALTER TABLE setup_gate_evaluations
 ALTER TABLE setup_gate_evaluations
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 
+-- Validate all populated legacy rows before any clock-dependent backfill.  NULL
+-- terminal fields are accepted only where the canonical value is unambiguous.
+DO $$
+DECLARE
+    canonical_reasons CONSTANT TEXT[] := ARRAY[
+        'passed', 'missing_current_price', 'missing_current_features',
+        'insufficient_history', 'security_ineligible', 'liquidity_failed',
+        'market_regime_failed', 'trend_failed', 'breakout_not_confirmed',
+        'pullback_shape_failed', 'relative_strength_failed', 'volume_failed',
+        'stop_risk_too_wide', 'overextended', 'breadth_unavailable',
+        'breadth_failed', 'sector_confirmation_failed', 'event_landmine',
+        'option_chain_missing', 'option_liquidity_failed',
+        'portfolio_correlation_block', 'daily_limit_block'
+    ]::TEXT[];
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM setup_gate_evaluations AS gate
+        WHERE gate.reason_code_version <> 1
+           OR cardinality(gate.reason_codes) = 0
+           OR NOT gate.reason_codes <@ canonical_reasons
+           OR gate.reason_codes IS DISTINCT FROM (
+               SELECT array_agg(reason ORDER BY reason)
+               FROM unnest(gate.reason_codes) AS reason
+           )
+           OR cardinality(gate.reason_codes) <> (
+               SELECT count(DISTINCT reason)
+               FROM unnest(gate.reason_codes) AS reason
+           )
+           OR (gate.passed AND gate.reason_codes <> ARRAY['passed']::TEXT[])
+           OR (NOT gate.passed AND 'passed' = ANY(gate.reason_codes))
+           OR (
+               gate.terminal_reason IS NULL
+               AND NOT (
+                   (gate.passed AND gate.reason_codes = ARRAY['passed']::TEXT[])
+                   OR (NOT gate.passed AND cardinality(gate.reason_codes) = 1)
+               )
+           )
+           OR (
+               gate.terminal_reason IS NOT NULL
+               AND (
+                   gate.terminal_reason <> ALL(gate.reason_codes)
+                   OR (gate.passed AND gate.terminal_reason <> 'passed')
+               )
+           )
+           OR (
+               gate.failed_gates IS NOT NULL
+               AND (
+                   jsonb_typeof(gate.failed_gates) IS DISTINCT FROM 'array'
+                   OR (gate.passed AND gate.failed_gates <> '[]'::jsonb)
+                   OR (NOT gate.passed AND gate.failed_gates <> to_jsonb(gate.reason_codes))
+               )
+           )
+           OR jsonb_typeof(gate.gate_facts) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(gate.metrics) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(gate.provenance) IS DISTINCT FROM 'object'
+           OR gate.source_fingerprint IS NULL
+           OR gate.source_fingerprint = ''
+           OR gate.source_fingerprint <> btrim(gate.source_fingerprint)
+           OR gate.ticker <> upper(gate.ticker)
+           OR gate.strategy IS NULL
+           OR btrim(gate.strategy) = ''
+    ) THEN
+        RAISE EXCEPTION 'cannot migrate legacy setup_gate_evaluations: row violates canonical version 1 gate contract or lacks a defensible mapping';
+    END IF;
+END
+$$;
+
+UPDATE daily_evaluation_runs
+SET required_stage_names = COALESCE(required_stage_names, ARRAY['features']::TEXT[]),
+    derived_stage_metadata = COALESCE(derived_stage_metadata, '{}'::jsonb),
+    status = COALESCE(status, 'started'),
+    created_at = COALESCE(created_at, now()),
+    updated_at = COALESCE(updated_at, now())
+WHERE required_stage_names IS NULL OR derived_stage_metadata IS NULL
+   OR status IS NULL OR created_at IS NULL OR updated_at IS NULL;
+ALTER TABLE daily_evaluation_runs
+    ALTER COLUMN required_stage_names SET DEFAULT ARRAY['features']::TEXT[],
+    ALTER COLUMN required_stage_names SET NOT NULL,
+    ALTER COLUMN derived_stage_metadata SET DEFAULT '{}'::jsonb,
+    ALTER COLUMN derived_stage_metadata SET NOT NULL,
+    ALTER COLUMN status SET DEFAULT 'started',
+    ALTER COLUMN status SET NOT NULL,
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL,
+    ALTER COLUMN updated_at SET DEFAULT now(),
+    ALTER COLUMN updated_at SET NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_daily_evaluation_runs_session_status
+    ON daily_evaluation_runs(target_session DESC, status);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'daily_evaluation_runs_status_check'
+          AND conrelid = 'daily_evaluation_runs'::regclass
+    ) THEN
+        ALTER TABLE daily_evaluation_runs
+            ADD CONSTRAINT daily_evaluation_runs_status_check
+            CHECK (status IN ('started', 'data_incomplete', 'evaluated', 'published', 'failed'));
+    END IF;
+END
+$$;
+
+UPDATE ingestion_run_manifests
+SET provenance = COALESCE(provenance, '{}'::jsonb),
+    created_at = COALESCE(created_at, now()),
+    updated_at = COALESCE(updated_at, now())
+WHERE provenance IS NULL OR created_at IS NULL OR updated_at IS NULL;
+ALTER TABLE ingestion_run_manifests
+    ALTER COLUMN provenance SET DEFAULT '{}'::jsonb,
+    ALTER COLUMN provenance SET NOT NULL,
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL,
+    ALTER COLUMN updated_at SET DEFAULT now(),
+    ALTER COLUMN updated_at SET NOT NULL;
+
 UPDATE setup_gate_evaluations
 SET terminal_reason = CASE
         WHEN terminal_reason IS NOT NULL THEN terminal_reason
@@ -1202,15 +1274,49 @@ WHERE terminal_reason IS NULL OR failed_gates IS NULL OR metrics IS NULL
    OR provenance IS NULL OR created_at IS NULL OR updated_at IS NULL;
 
 DO $$
+DECLARE
+    canonical_reasons CONSTANT TEXT[] := ARRAY[
+        'passed', 'missing_current_price', 'missing_current_features',
+        'insufficient_history', 'security_ineligible', 'liquidity_failed',
+        'market_regime_failed', 'trend_failed', 'breakout_not_confirmed',
+        'pullback_shape_failed', 'relative_strength_failed', 'volume_failed',
+        'stop_risk_too_wide', 'overextended', 'breadth_unavailable',
+        'breadth_failed', 'sector_confirmation_failed', 'event_landmine',
+        'option_chain_missing', 'option_liquidity_failed',
+        'portfolio_correlation_block', 'daily_limit_block'
+    ]::TEXT[];
 BEGIN
     IF EXISTS (
-        SELECT 1 FROM setup_gate_evaluations
-        WHERE terminal_reason IS NULL
-           OR failed_gates IS NULL
-           OR gate_facts IS NULL
-           OR source_fingerprint IS NULL
+        SELECT 1 FROM setup_gate_evaluations AS gate
+        WHERE gate.reason_code_version <> 1
+           OR cardinality(gate.reason_codes) = 0
+           OR NOT gate.reason_codes <@ canonical_reasons
+           OR gate.reason_codes IS DISTINCT FROM (
+               SELECT array_agg(reason ORDER BY reason)
+               FROM unnest(gate.reason_codes) AS reason
+           )
+           OR cardinality(gate.reason_codes) <> (
+               SELECT count(DISTINCT reason)
+               FROM unnest(gate.reason_codes) AS reason
+           )
+           OR (gate.passed AND gate.reason_codes <> ARRAY['passed']::TEXT[])
+           OR (NOT gate.passed AND 'passed' = ANY(gate.reason_codes))
+           OR gate.terminal_reason <> ALL(gate.reason_codes)
+           OR (gate.passed AND gate.terminal_reason <> 'passed')
+           OR jsonb_typeof(gate.failed_gates) IS DISTINCT FROM 'array'
+           OR (gate.passed AND gate.failed_gates <> '[]'::jsonb)
+           OR (NOT gate.passed AND gate.failed_gates <> to_jsonb(gate.reason_codes))
+           OR jsonb_typeof(gate.gate_facts) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(gate.metrics) IS DISTINCT FROM 'object'
+           OR jsonb_typeof(gate.provenance) IS DISTINCT FROM 'object'
+           OR gate.source_fingerprint IS NULL
+           OR gate.source_fingerprint = ''
+           OR gate.source_fingerprint <> btrim(gate.source_fingerprint)
+           OR gate.ticker <> upper(gate.ticker)
+           OR gate.strategy IS NULL
+           OR btrim(gate.strategy) = ''
     ) THEN
-        RAISE EXCEPTION 'cannot migrate legacy setup_gate_evaluations: canonical terminal reason, failed gates, gate facts, or source fingerprint is unavailable';
+        RAISE EXCEPTION 'cannot migrate legacy setup_gate_evaluations: canonical backfill validation failed';
     END IF;
 END
 $$;
@@ -1234,16 +1340,30 @@ ALTER TABLE setup_gate_evaluations
 CREATE OR REPLACE FUNCTION wolfy_reject_published_ledger_change()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
-    parent_run_id UUID := CASE WHEN TG_OP = 'DELETE' THEN OLD.run_id ELSE NEW.run_id END;
+    candidate_run_id UUID;
     parent_status TEXT;
 BEGIN
-    SELECT status INTO parent_status
-    FROM daily_evaluation_runs
-    WHERE id = parent_run_id
-    FOR UPDATE;
-    IF parent_status = 'published' THEN
-        RAISE EXCEPTION 'published daily evaluation run is immutable';
-    END IF;
+    -- UPDATE must protect both sides: otherwise a row can be reparented away from
+    -- a published run or moved into one.  Stable UUID ordering avoids deadlocks.
+    FOR candidate_run_id IN
+        SELECT DISTINCT run_id
+        FROM unnest(
+            CASE TG_OP
+                WHEN 'INSERT' THEN ARRAY[NEW.run_id]::UUID[]
+                WHEN 'DELETE' THEN ARRAY[OLD.run_id]::UUID[]
+                ELSE ARRAY[OLD.run_id, NEW.run_id]::UUID[]
+            END
+        ) AS run_id
+        ORDER BY run_id
+    LOOP
+        SELECT status INTO parent_status
+        FROM daily_evaluation_runs
+        WHERE id = candidate_run_id
+        FOR UPDATE;
+        IF parent_status = 'published' THEN
+            RAISE EXCEPTION 'published daily evaluation run is immutable';
+        END IF;
+    END LOOP;
     RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
 END;
 $$;
@@ -1296,6 +1416,8 @@ BEGIN
        OR jsonb_typeof(NEW.provenance) <> 'object'
        OR NEW.source_fingerprint = ''
        OR NEW.source_fingerprint <> btrim(NEW.source_fingerprint)
+       OR NEW.ticker <> upper(NEW.ticker)
+       OR btrim(NEW.strategy) = ''
     THEN
         RAISE EXCEPTION 'noncanonical setup gate evaluation';
     END IF;
@@ -1337,11 +1459,18 @@ DECLARE
     source_distinct INTEGER;
     source_bad INTEGER;
 BEGIN
-    IF TG_OP = 'UPDATE'
-       AND OLD.status = 'published'
-       AND NEW.derived_stage_metadata IS DISTINCT FROM OLD.derived_stage_metadata
-    THEN
-        RAISE EXCEPTION 'published daily evaluation run derived metadata is immutable';
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.status = 'published' THEN
+            RAISE EXCEPTION 'published daily evaluation run is immutable and cannot be deleted';
+        END IF;
+        RETURN OLD;
+    END IF;
+    IF TG_OP = 'UPDATE' AND OLD.status = 'published' THEN
+        IF NEW IS DISTINCT FROM OLD THEN
+            RAISE EXCEPTION 'published daily evaluation run identity, readiness, and audit fields are immutable';
+        END IF;
+        -- Preserve a truly idempotent no-op without changing updated_at.
+        RETURN OLD;
     END IF;
     IF TG_OP = 'UPDATE' AND NEW.status <> OLD.status THEN
         IF NOT (
@@ -1426,5 +1555,7 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_daily_evaluation_run_transition ON daily_evaluation_runs;
 CREATE TRIGGER trg_daily_evaluation_run_transition
-    BEFORE INSERT OR UPDATE ON daily_evaluation_runs
+    BEFORE INSERT OR UPDATE OR DELETE ON daily_evaluation_runs
     FOR EACH ROW EXECUTE FUNCTION wolfy_validate_daily_run_transition();
+
+COMMIT;

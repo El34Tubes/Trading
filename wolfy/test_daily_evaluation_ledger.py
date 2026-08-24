@@ -844,6 +844,113 @@ def test_database_rejects_derived_metadata_change_after_publication():
             )
 
 
+@pytest.mark.parametrize(
+    ("column", "value_sql"),
+    [
+        ("id", "gen_random_uuid()"),
+        ("run_identity", "run_identity || '-changed'"),
+        ("target_session", "target_session + 1"),
+        ("evaluator_name", "evaluator_name || '-changed'"),
+        ("evaluator_version", "evaluator_version || '-changed'"),
+        ("universe_snapshot_id", "universe_snapshot_id || '-changed'"),
+        ("required_stage_names", "ARRAY['other']::text[]"),
+        ("derived_stage_metadata", "'{}'::jsonb"),
+        ("created_at", "created_at + interval '1 second'"),
+        ("updated_at", "updated_at + interval '1 second'"),
+    ],
+)
+def test_database_rejects_published_parent_identity_readiness_and_audit_updates(
+    column, value_sql
+):
+    with test_connection() as conn:
+        universe = f"published-parent-{column}"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        _make_publishable(conn, run.run_id, universe_snapshot_id=universe)
+        with pytest.raises(Exception, match="published"), conn.transaction():
+            conn.execute(
+                f"UPDATE daily_evaluation_runs SET {column}={value_sql} WHERE id=%s",
+                (run.run_id,),
+            )
+
+
+def test_database_published_parent_exact_noop_preserves_audit_timestamp():
+    with test_connection() as conn:
+        universe = "published-parent-noop"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        _make_publishable(conn, run.run_id, universe_snapshot_id=universe)
+        before = conn.execute(
+            "SELECT updated_at FROM daily_evaluation_runs WHERE id=%s", (run.run_id,)
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE daily_evaluation_runs SET status=status WHERE id=%s", (run.run_id,)
+        )
+        after = conn.execute(
+            "SELECT updated_at FROM daily_evaluation_runs WHERE id=%s", (run.run_id,)
+        ).fetchone()[0]
+        assert after == before
+
+
+def test_database_rejects_published_parent_delete_without_cascading_children():
+    from daily_evaluation_ledger import upsert_gate_evaluation
+
+    with test_connection() as conn:
+        universe = "published-parent-delete"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        upsert_gate_evaluation(conn, run.run_id, _gate())
+        _make_publishable(conn, run.run_id, universe_snapshot_id=universe)
+        before = conn.execute(
+            "SELECT (SELECT count(*) FROM ingestion_run_manifests WHERE run_id=%s), "
+            "(SELECT count(*) FROM setup_gate_evaluations WHERE run_id=%s)",
+            (run.run_id, run.run_id),
+        ).fetchone()
+        with pytest.raises(Exception, match="published"), conn.transaction():
+            conn.execute("DELETE FROM daily_evaluation_runs WHERE id=%s", (run.run_id,))
+        after = conn.execute(
+            "SELECT (SELECT count(*) FROM ingestion_run_manifests WHERE run_id=%s), "
+            "(SELECT count(*) FROM setup_gate_evaluations WHERE run_id=%s)",
+            (run.run_id, run.run_id),
+        ).fetchone()
+        assert after == before == (1, 1)
+
+
+@pytest.mark.parametrize("table", ["ingestion_run_manifests", "setup_gate_evaluations"])
+@pytest.mark.parametrize("published_side", ["old", "new"])
+def test_database_rejects_child_reparenting_from_or_to_published_run(
+    table, published_side
+):
+    from daily_evaluation_ledger import upsert_gate_evaluation, upsert_ingestion_manifest
+
+    with test_connection() as conn:
+        published_universe = f"published-reparent-{table}-{published_side}"
+        published = _create_run(conn, universe_snapshot_id=published_universe)
+        other = _create_run(conn, universe_snapshot_id=f"other-{table}-{published_side}")
+        source = published if published_side == "old" else other
+        if table == "ingestion_run_manifests":
+            child_id = upsert_ingestion_manifest(conn, source.run_id, _manifest())
+        else:
+            child_id = upsert_gate_evaluation(conn, source.run_id, _gate())
+        _make_publishable(conn, published.run_id, universe_snapshot_id=published_universe)
+        destination = other if published_side == "old" else published
+        with pytest.raises(Exception, match="published"), conn.transaction():
+            conn.execute(
+                f"UPDATE {table} SET run_id=%s WHERE id=%s",
+                (destination.run_id, child_id),
+            )
+
+
+def _wait_for_lock(conn, pid: int, *, locktype: str | None = None) -> tuple[str, str]:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        row = conn.execute(
+            "SELECT wait_event_type,wait_event FROM pg_stat_activity WHERE pid=%s",
+            (pid,),
+        ).fetchone()
+        if row and row[0] == "Lock" and (locktype is None or row[1] == locktype):
+            return row
+        threading.Event().wait(0.01)
+    pytest.fail(f"backend {pid} did not expose expected lock wait")
+
+
 def test_writer_waiting_behind_publication_observes_published_and_fails_closed():
     import psycopg
 
@@ -881,7 +988,7 @@ def test_writer_waiting_behind_publication_observes_published_and_fails_closed()
 
         thread = threading.Thread(target=write_manifest)
         thread.start()
-        time.sleep(0.2)
+        assert _wait_for_lock(setup, writer.info.backend_pid)[0] == "Lock"
         assert thread.is_alive(), "writer must wait for the publisher's parent-row lock"
         publisher.commit()
         thread.join(timeout=5)
@@ -892,7 +999,36 @@ def test_writer_waiting_behind_publication_observes_published_and_fails_closed()
         publisher.rollback()
         writer.rollback()
         if run is not None:
-            setup.execute("DELETE FROM daily_evaluation_runs WHERE id=%s", (run.run_id,))
+            with setup.transaction():
+                setup.execute(
+                    "ALTER TABLE daily_evaluation_runs DISABLE TRIGGER "
+                    "trg_daily_evaluation_run_transition"
+                )
+                setup.execute(
+                    "ALTER TABLE ingestion_run_manifests DISABLE TRIGGER "
+                    "trg_immutable_published_manifest"
+                )
+                setup.execute(
+                    "ALTER TABLE setup_gate_evaluations DISABLE TRIGGER "
+                    "trg_immutable_published_gate"
+                )
+                try:
+                    setup.execute(
+                        "DELETE FROM daily_evaluation_runs WHERE id=%s", (run.run_id,)
+                    )
+                finally:
+                    setup.execute(
+                        "ALTER TABLE daily_evaluation_runs ENABLE TRIGGER "
+                        "trg_daily_evaluation_run_transition"
+                    )
+                    setup.execute(
+                        "ALTER TABLE ingestion_run_manifests ENABLE TRIGGER "
+                        "trg_immutable_published_manifest"
+                    )
+                    setup.execute(
+                        "ALTER TABLE setup_gate_evaluations ENABLE TRIGGER "
+                        "trg_immutable_published_gate"
+                    )
         setup.close()
         publisher.close()
         writer.close()
@@ -900,15 +1036,18 @@ def test_writer_waiting_behind_publication_observes_published_and_fails_closed()
 
 def _task3_schema_sql() -> str:
     schema = (Path(__file__).resolve().parent / "postgres_init.sql").read_text()
-    return schema[schema.index("CREATE TABLE IF NOT EXISTS daily_evaluation_runs") :]
+    return schema[schema.index("-- Task 3: atomic") :]
 
 
-def _create_partial_task3_schema(conn, schema_name: str, *, invalid_gate: bool = False):
+def _create_partial_task3_schema(
+    conn, schema_name: str, *, gate_overrides: dict[str, object] | None = None
+):
     from psycopg import sql
+    from psycopg.types.json import Jsonb
 
     conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name)))
     conn.execute(
-        sql.SQL("SET LOCAL search_path TO {}, public").format(sql.Identifier(schema_name))
+        sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema_name))
     )
     conn.execute(
         """
@@ -960,47 +1099,195 @@ def _create_partial_task3_schema(conn, schema_name: str, *, invalid_gate: bool =
         """,
         (run_id, _now(), _now(), "a" * 64),
     )
-    reasons = ["trend_failed", "volume_failed"] if invalid_gate else ["trend_failed"]
+    gate = {
+        "ticker": "ZZLEGACY",
+        "strategy": "legacy",
+        "passed": False,
+        "reason_code_version": 1,
+        "reason_codes": ["trend_failed"],
+        "terminal_reason": None,
+        "failed_gates": None,
+        "gate_facts": {},
+        "source_fingerprint": "legacy-fingerprint",
+        "metrics": {},
+        "provenance": {},
+    }
+    gate.update(gate_overrides or {})
     conn.execute(
         """
         INSERT INTO setup_gate_evaluations(
             run_id,ticker,strategy,passed,reason_code_version,reason_codes,
-            gate_facts,source_fingerprint,evaluated_at
-        ) VALUES (%s,'ZZLEGACY','legacy',false,1,%s,'{}',%s,%s)
+            terminal_reason,failed_gates,gate_facts,source_fingerprint,evaluated_at,
+            metrics,provenance
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
-        (run_id, reasons, "legacy-fingerprint", _now()),
+        (
+            run_id,
+            gate["ticker"],
+            gate["strategy"],
+            gate["passed"],
+            gate["reason_code_version"],
+            gate["reason_codes"],
+            gate["terminal_reason"],
+            None if gate["failed_gates"] is None else Jsonb(gate["failed_gates"]),
+            Jsonb(gate["gate_facts"]),
+            gate["source_fingerprint"],
+            _now(),
+            Jsonb(gate["metrics"]),
+            Jsonb(gate["provenance"]),
+        ),
     )
     return run_id
 
 
 def test_task3_schema_migrates_populated_partial_schema_twice_without_data_loss():
-    with test_connection() as conn:
+    import psycopg
+    from psycopg import sql
+
+    with psycopg.connect(resolve_test_dsn(), autocommit=True) as conn:
         schema_name = f"task3_upgrade_{uuid.uuid4().hex}"
-        run_id = _create_partial_task3_schema(conn, schema_name)
-        conn.execute(_task3_schema_sql())
-        conn.execute(_task3_schema_sql())
-        gate = conn.execute(
-            "SELECT terminal_reason,failed_gates,gate_facts,source_fingerprint FROM setup_gate_evaluations WHERE run_id=%s",
-            (run_id,),
-        ).fetchone()
-        manifest = conn.execute(
-            "SELECT immutable_object_ref,provenance FROM ingestion_run_manifests WHERE run_id=%s",
-            (run_id,),
-        ).fetchone()
-        daily = conn.execute(
-            "SELECT required_stage_names,derived_stage_metadata FROM daily_evaluation_runs WHERE id=%s",
-            (run_id,),
-        ).fetchone()
-        assert gate == ("trend_failed", ["trend_failed"], {}, "legacy-fingerprint")
-        assert manifest == (None, {})
-        assert daily == (["features"], {})
-        assert conn.execute("SELECT count(*) FROM setup_gate_evaluations").fetchone() == (1,)
+        try:
+            run_id = _create_partial_task3_schema(conn, schema_name)
+            conn.execute(_task3_schema_sql())
+            conn.execute(_task3_schema_sql())
+            gate = conn.execute(
+                "SELECT terminal_reason,failed_gates,gate_facts,source_fingerprint FROM setup_gate_evaluations WHERE run_id=%s",
+                (run_id,),
+            ).fetchone()
+            manifest = conn.execute(
+                "SELECT immutable_object_ref,provenance FROM ingestion_run_manifests WHERE run_id=%s",
+                (run_id,),
+            ).fetchone()
+            daily = conn.execute(
+                "SELECT required_stage_names,derived_stage_metadata FROM daily_evaluation_runs WHERE id=%s",
+                (run_id,),
+            ).fetchone()
+            assert gate == ("trend_failed", ["trend_failed"], {}, "legacy-fingerprint")
+            assert manifest == (None, {})
+            assert daily == (["features"], {})
+            assert conn.execute("SELECT count(*) FROM setup_gate_evaluations").fetchone() == (
+                1,
+            )
+        finally:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema_name)
+                )
+            )
 
 
-def test_task3_schema_fails_closed_for_unmappable_legacy_gate_row():
-    with test_connection() as conn:
+@pytest.mark.parametrize(
+    "gate_overrides",
+    [
+        {"reason_code_version": 2},
+        {"reason_codes": ["volume_failed", "trend_failed"]},
+        {"reason_codes": ["trend_failed", "trend_failed"]},
+        {"reason_codes": ["invented_reason"]},
+        {"passed": True, "reason_codes": ["trend_failed"]},
+        {"terminal_reason": "volume_failed"},
+        {"failed_gates": ["volume_failed"]},
+        {"gate_facts": []},
+        {"source_fingerprint": " fingerprint "},
+        {"ticker": "zzlegacy"},
+        {"strategy": ""},
+        {"metrics": []},
+        {"provenance": []},
+        {"reason_codes": ["trend_failed", "volume_failed"]},
+    ],
+)
+def test_task3_schema_fails_closed_for_every_noncanonical_legacy_gate_row(
+    gate_overrides,
+):
+    import psycopg
+    from psycopg import sql
+
+    with psycopg.connect(resolve_test_dsn(), autocommit=True) as conn:
         schema_name = f"task3_invalid_{uuid.uuid4().hex}"
-        _create_partial_task3_schema(conn, schema_name, invalid_gate=True)
-        with pytest.raises(Exception, match="cannot migrate legacy setup_gate_evaluations"):
-            with conn.transaction():
+        try:
+            _create_partial_task3_schema(conn, schema_name, gate_overrides=gate_overrides)
+            with pytest.raises(
+                Exception, match="cannot migrate legacy setup_gate_evaluations"
+            ):
                 conn.execute(_task3_schema_sql())
+            # A failed explicit migration transaction remains aborted until the
+            # psql client rolls it back (or disconnects with ON_ERROR_STOP).
+            conn.rollback()
+            columns = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema=%s AND table_name='daily_evaluation_runs' "
+                "AND column_name IN ('required_stage_names','derived_stage_metadata')",
+                (schema_name,),
+            ).fetchall()
+            assert columns == []
+            row = conn.execute(
+                "SELECT terminal_reason,failed_gates FROM setup_gate_evaluations"
+            ).fetchone()
+            assert row == (
+                gate_overrides.get("terminal_reason"),
+                gate_overrides.get("failed_gates"),
+            )
+        finally:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema_name)
+                )
+            )
+
+
+def test_task3_schema_serializes_concurrent_normal_psql_migrations():
+    import psycopg
+    from psycopg import sql
+
+    dsn = resolve_test_dsn()
+    schema_name = f"task3_concurrent_{uuid.uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as setup:
+        _create_partial_task3_schema(setup, schema_name)
+        blocker = psycopg.connect(dsn)
+        migrators = [psycopg.connect(dsn, autocommit=True) for _ in range(2)]
+        errors: list[Exception] = []
+        try:
+            blocker.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('wolfy_task3_migration', 0))"
+            )
+            for conn in migrators:
+                conn.execute(
+                    sql.SQL("SET search_path TO {}, public").format(
+                        sql.Identifier(schema_name)
+                    )
+                )
+
+            def migrate(conn):
+                try:
+                    conn.execute(_task3_schema_sql())
+                except Exception as exc:  # asserted across the thread boundary
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(target=migrate, args=(conn,)) for conn in migrators
+            ]
+            for thread in threads:
+                thread.start()
+            for conn in migrators:
+                assert _wait_for_lock(
+                    setup, conn.info.backend_pid, locktype="advisory"
+                ) == ("Lock", "advisory")
+            blocker.commit()
+            for thread in threads:
+                thread.join(timeout=10)
+                assert not thread.is_alive()
+            assert errors == []
+            assert setup.execute(
+                sql.SQL("SELECT count(*) FROM {}.setup_gate_evaluations").format(
+                    sql.Identifier(schema_name)
+                )
+            ).fetchone() == (1,)
+        finally:
+            blocker.rollback()
+            blocker.close()
+            for conn in migrators:
+                conn.close()
+            setup.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema_name)
+                )
+            )
