@@ -74,15 +74,28 @@ class IngestionManifest:
 CANONICAL_REASON_CODES: Mapping[int, frozenset[str]] = {
     1: frozenset(
         {
-            "breakout_failed",
-            "data_incomplete",
-            "gate_passed",
+            "passed",
+            "missing_current_price",
+            "missing_current_features",
             "insufficient_history",
+            "security_ineligible",
             "liquidity_failed",
             "market_regime_failed",
+            "trend_failed",
+            "breakout_not_confirmed",
+            "pullback_shape_failed",
             "relative_strength_failed",
-            "risk_invalid",
-            "volume_confirmation_failed",
+            "volume_failed",
+            "stop_risk_too_wide",
+            "overextended",
+            "breadth_unavailable",
+            "breadth_failed",
+            "sector_confirmation_failed",
+            "event_landmine",
+            "option_chain_missing",
+            "option_liquidity_failed",
+            "portfolio_correlation_block",
+            "daily_limit_block",
         }
     )
 }
@@ -95,8 +108,11 @@ class GateEvaluation:
     passed: bool
     reason_code_version: int
     reason_codes: tuple[str, ...]
+    terminal_reason: str
     evaluated_at: datetime
     metrics: Mapping[str, Any]
+    gate_facts: Mapping[str, Any]
+    source_fingerprint: str
     provenance: Mapping[str, Any]
 
 
@@ -269,10 +285,11 @@ def _validate_manifest(manifest: IngestionManifest) -> None:
         raise LedgerValidationError(
             "raw_payload_sha256 must be canonical lowercase SHA-256"
         )
-    if manifest.immutable_object_ref is not None and not manifest.immutable_object_ref:
-        raise LedgerValidationError("immutable_object_ref must be non-empty")
-    if not isinstance(manifest.provenance, Mapping):
-        raise LedgerValidationError("provenance must be a JSON object")
+    if manifest.immutable_object_ref is not None and not _is_canonical_string(
+        manifest.immutable_object_ref
+    ):
+        raise LedgerValidationError("immutable_object_ref must be non-empty and canonical")
+    _validate_json_mapping(manifest.provenance, "provenance")
 
 
 def upsert_ingestion_manifest(
@@ -359,13 +376,20 @@ def _validate_gate(evaluation: GateEvaluation) -> None:
         or not set(evaluation.reason_codes).issubset(allowed)
     ):
         raise LedgerValidationError("reason_codes must be known, unique, and sorted")
-    if evaluation.passed != (evaluation.reason_codes == ("gate_passed",)):
+    if evaluation.passed != (evaluation.reason_codes == ("passed",)) or (
+        not evaluation.passed and "passed" in evaluation.reason_codes
+    ):
         raise LedgerValidationError("passed and reason_codes are inconsistent")
+    if evaluation.terminal_reason not in evaluation.reason_codes:
+        raise LedgerValidationError("terminal_reason must designate a recorded reason")
+    if evaluation.passed and evaluation.terminal_reason != "passed":
+        raise LedgerValidationError("a passed gate requires terminal_reason='passed'")
     _require_utc(evaluation.evaluated_at, "evaluated_at")
-    if not isinstance(evaluation.metrics, Mapping):
-        raise LedgerValidationError("metrics must be a JSON object")
-    if not isinstance(evaluation.provenance, Mapping):
-        raise LedgerValidationError("provenance must be a JSON object")
+    _validate_json_mapping(evaluation.metrics, "metrics")
+    _validate_json_mapping(evaluation.gate_facts, "gate_facts")
+    if not _is_canonical_string(evaluation.source_fingerprint):
+        raise LedgerValidationError("source_fingerprint must be non-empty and canonical")
+    _validate_json_mapping(evaluation.provenance, "provenance")
 
 
 def upsert_gate_evaluation(conn, run_id: uuid.UUID, evaluation: GateEvaluation) -> int:
@@ -377,12 +401,17 @@ def upsert_gate_evaluation(conn, run_id: uuid.UUID, evaluation: GateEvaluation) 
         """
         INSERT INTO setup_gate_evaluations(
             run_id,ticker,strategy,passed,reason_code_version,reason_codes,
+            terminal_reason,failed_gates,gate_facts,source_fingerprint,
             evaluated_at,metrics,provenance
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (run_id,ticker,strategy) DO UPDATE SET
             passed=EXCLUDED.passed,
             reason_code_version=EXCLUDED.reason_code_version,
             reason_codes=EXCLUDED.reason_codes,
+            terminal_reason=EXCLUDED.terminal_reason,
+            failed_gates=EXCLUDED.failed_gates,
+            gate_facts=EXCLUDED.gate_facts,
+            source_fingerprint=EXCLUDED.source_fingerprint,
             evaluated_at=EXCLUDED.evaluated_at,
             metrics=EXCLUDED.metrics,
             provenance=EXCLUDED.provenance,
@@ -396,6 +425,10 @@ def upsert_gate_evaluation(conn, run_id: uuid.UUID, evaluation: GateEvaluation) 
             evaluation.passed,
             evaluation.reason_code_version,
             list(evaluation.reason_codes),
+            evaluation.terminal_reason,
+            Jsonb([] if evaluation.passed else list(evaluation.reason_codes)),
+            Jsonb(dict(evaluation.gate_facts)),
+            evaluation.source_fingerprint,
             evaluation.evaluated_at,
             Jsonb(dict(evaluation.metrics)),
             Jsonb(dict(evaluation.provenance)),

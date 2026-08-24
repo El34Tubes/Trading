@@ -162,6 +162,8 @@ def test_ingestion_manifest_persists_counts_hash_and_is_deterministic_upsert():
         {"raw_payload_sha256": "not-a-hash"},
         {"raw_payload_sha256": None, "immutable_object_ref": None},
         {"raw_payload_sha256": "a" * 64, "immutable_object_ref": "s3://immutable/key"},
+        {"raw_payload_sha256": None, "immutable_object_ref": ""},
+        {"raw_payload_sha256": None, "immutable_object_ref": "   "},
         {"started_at": datetime(2099, 3, 2, 20)},
         {"completed_at": datetime(2099, 3, 2, 20)},
         {"received_row_count": -1},
@@ -189,9 +191,12 @@ def _gate(**overrides):
         "strategy": "liquid_rs_breakout",
         "passed": False,
         "reason_code_version": 1,
-        "reason_codes": ("breakout_failed", "volume_confirmation_failed"),
+        "reason_codes": ("breakout_not_confirmed", "volume_failed"),
+        "terminal_reason": "breakout_not_confirmed",
         "evaluated_at": _now(),
         "metrics": {"close": "101.25", "breakout_level": "102.00"},
+        "gate_facts": {"breakout_not_confirmed": {"passed": False}},
+        "source_fingerprint": "sha256:" + "c" * 64,
         "provenance": {"feature_row_id": 42},
     }
     values.update(overrides)
@@ -207,11 +212,16 @@ def test_gate_evaluation_is_one_row_per_run_ticker_strategy_with_upsert():
         second = upsert_gate_evaluation(
             conn,
             run.run_id,
-            _gate(reason_codes=("relative_strength_failed",), metrics={"rs": "0.01"}),
+            _gate(
+                reason_codes=("relative_strength_failed",),
+                terminal_reason="relative_strength_failed",
+                metrics={"rs": "0.01"},
+            ),
         )
         row = conn.execute(
             """
-            SELECT passed, reason_code_version, reason_codes, metrics, provenance
+            SELECT passed, reason_code_version, reason_codes, terminal_reason,
+                   failed_gates, gate_facts, source_fingerprint, metrics, provenance
             FROM setup_gate_evaluations WHERE id=%s
             """,
             (first,),
@@ -221,6 +231,10 @@ def test_gate_evaluation_is_one_row_per_run_ticker_strategy_with_upsert():
             False,
             1,
             ["relative_strength_failed"],
+            "relative_strength_failed",
+            ["relative_strength_failed"],
+            {"breakout_not_confirmed": {"passed": False}},
+            "sha256:" + "c" * 64,
             {"rs": "0.01"},
             {"feature_row_id": 42},
         )
@@ -231,11 +245,17 @@ def test_gate_evaluation_is_one_row_per_run_ticker_strategy_with_upsert():
     [
         {"reason_code_version": 2},
         {"reason_codes": ("unknown_reason",)},
-        {"reason_codes": ("volume_confirmation_failed", "breakout_failed")},
-        {"reason_codes": ("breakout_failed", "breakout_failed")},
+        {"reason_codes": ("volume_failed", "breakout_not_confirmed")},
+        {"reason_codes": ("breakout_not_confirmed", "breakout_not_confirmed")},
+        {"reason_codes": ("passed",), "passed": False, "terminal_reason": "passed"},
+        {"reason_codes": ("trend_failed",), "passed": True, "terminal_reason": "trend_failed"},
+        {"reason_codes": ("passed", "trend_failed"), "terminal_reason": "passed"},
+        {"terminal_reason": "trend_failed"},
         {"ticker": "zzledger"},
         {"evaluated_at": datetime(2099, 3, 2, 20)},
         {"metrics": []},
+        {"gate_facts": []},
+        {"source_fingerprint": "   "},
         {"provenance": []},
     ],
 )
@@ -246,6 +266,101 @@ def test_gate_evaluation_rejects_noncanonical_reasons_and_provenance(overrides):
         run = _create_run(conn, universe_snapshot_id=f"bad-gate-{len(str(overrides))}")
         with pytest.raises(LedgerValidationError):
             upsert_gate_evaluation(conn, run.run_id, _gate(**overrides))
+
+
+CANONICAL_REASON_CODES = (
+    "passed",
+    "missing_current_price",
+    "missing_current_features",
+    "insufficient_history",
+    "security_ineligible",
+    "liquidity_failed",
+    "market_regime_failed",
+    "trend_failed",
+    "breakout_not_confirmed",
+    "pullback_shape_failed",
+    "relative_strength_failed",
+    "volume_failed",
+    "stop_risk_too_wide",
+    "overextended",
+    "breadth_unavailable",
+    "breadth_failed",
+    "sector_confirmation_failed",
+    "event_landmine",
+    "option_chain_missing",
+    "option_liquidity_failed",
+    "portfolio_correlation_block",
+    "daily_limit_block",
+)
+
+
+def test_python_reason_taxonomy_matches_the_exact_plan_contract():
+    from daily_evaluation_ledger import CANONICAL_REASON_CODES as actual
+
+    assert actual == {1: frozenset(CANONICAL_REASON_CODES)}
+
+
+@pytest.mark.parametrize(
+    ("passed", "version", "reasons", "metrics", "provenance"),
+    [
+        (False, 1, ["trend_failed", "liquidity_failed"], {}, {}),
+        (False, 1, ["trend_failed", "trend_failed"], {}, {}),
+        (False, 1, ["unknown_reason"], {}, {}),
+        (False, 1, ["passed"], {}, {}),
+        (True, 1, ["trend_failed"], {}, {}),
+        (True, 1, ["passed", "trend_failed"], {}, {}),
+        (False, 2, ["trend_failed"], {}, {}),
+        (False, 1, ["trend_failed"], [], {}),
+        (False, 1, ["trend_failed"], {}, []),
+    ],
+)
+def test_database_rejects_noncanonical_gate_rows_from_direct_sql(
+    passed, version, reasons, metrics, provenance
+):
+    from psycopg.types.json import Jsonb
+
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id=f"direct-gate-{version}-{len(reasons)}")
+        terminal_reason = reasons[0]
+        with pytest.raises(Exception), conn.transaction():
+            conn.execute(
+                """
+                INSERT INTO setup_gate_evaluations(
+                    run_id,ticker,strategy,passed,reason_code_version,reason_codes,
+                    terminal_reason,failed_gates,gate_facts,source_fingerprint,
+                    evaluated_at,metrics,provenance
+                ) VALUES (%s,'ZZDIRECT','direct_strategy',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    run.run_id,
+                    passed,
+                    version,
+                    reasons,
+                    terminal_reason,
+                    Jsonb(reasons),
+                    Jsonb({}),
+                    "sha256:" + "d" * 64,
+                    _now(),
+                    Jsonb(metrics),
+                    Jsonb(provenance),
+                ),
+            )
+
+
+def test_database_accepts_only_the_canonical_pass_row_from_direct_sql():
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id="direct-canonical-pass")
+        conn.execute(
+            """
+            INSERT INTO setup_gate_evaluations(
+                run_id,ticker,strategy,passed,reason_code_version,reason_codes,
+                terminal_reason,failed_gates,gate_facts,source_fingerprint,
+                evaluated_at,metrics,provenance
+            ) VALUES (%s,'ZZPASS','direct_strategy',true,1,ARRAY['passed'],
+                      'passed','[]'::jsonb,'{}'::jsonb,%s,%s,'{}'::jsonb,'{}'::jsonb)
+            """,
+            (run.run_id, "sha256:" + "e" * 64, _now()),
+        )
 
 
 def _derived(**overrides):
@@ -369,6 +484,16 @@ def test_published_requires_passed_manifest_and_every_required_derived_stage():
         assert published.status == "published"
         assert transition_daily_run(conn, run.run_id, "published") == published
 
+        with pytest.raises(Exception), conn.transaction():
+            conn.execute(
+                """
+                UPDATE daily_evaluation_runs
+                SET derived_stage_metadata = '{"features": {}}'::jsonb
+                WHERE id=%s
+                """,
+                (run.run_id,),
+            )
+
 
 def test_database_rejects_published_when_required_metadata_is_incomplete():
     from daily_evaluation_ledger import transition_daily_run
@@ -380,6 +505,58 @@ def test_database_rejects_published_when_required_metadata_is_incomplete():
             conn.execute(
                 "UPDATE daily_evaluation_runs SET status='published' WHERE id=%s",
                 (run.run_id,),
+            )
+
+
+@pytest.mark.parametrize("required_stages", [["features"], []])
+def test_database_rejects_direct_insert_as_published_without_readiness(required_stages):
+    import uuid
+
+    with test_connection() as conn:
+        token = uuid.uuid4()
+        with pytest.raises(Exception), conn.transaction():
+            conn.execute(
+                """
+                INSERT INTO daily_evaluation_runs(
+                    id,run_identity,target_session,evaluator_name,evaluator_version,
+                    universe_snapshot_id,required_stage_names,status
+                ) VALUES (%s,%s,'2099-03-02','direct','1','direct',%s,'published')
+                """,
+                (token, token.hex, required_stages),
+            )
+
+
+@pytest.mark.parametrize(
+    ("raw_hash", "object_ref"),
+    [
+        ("A" * 64, None),
+        ("short", None),
+        (None, ""),
+        (None, "   "),
+        (None, None),
+        ("a" * 64, "s3://immutable/key"),
+    ],
+)
+def test_database_rejects_noncanonical_manifest_payload_identity(raw_hash, object_ref):
+    from psycopg.types.json import Jsonb
+
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id=f"direct-manifest-{len(str(raw_hash))}")
+        with pytest.raises(Exception), conn.transaction():
+            conn.execute(
+                """
+                INSERT INTO ingestion_run_manifests(
+                    run_id,dataset,target_session,provider,source_endpoint,
+                    entitlement_class,delay_class,started_at,completed_at,
+                    expected_symbol_count,received_symbol_count,expected_row_count,
+                    received_row_count,retry_count,status,raw_payload_sha256,
+                    immutable_object_ref,parser_version,schema_version,quality_gate,provenance
+                ) VALUES (
+                    %s,'prices','2099-03-02','provider','endpoint','free','t1',%s,%s,
+                    1,1,1,1,0,'completed',%s,%s,'1','1','passed',%s
+                )
+                """,
+                (run.run_id, _now(), _now(), raw_hash, object_ref, Jsonb({})),
             )
 
 

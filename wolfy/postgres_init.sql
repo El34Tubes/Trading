@@ -1067,9 +1067,28 @@ CREATE TABLE IF NOT EXISTS ingestion_run_manifests (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((raw_payload_sha256 IS NULL) <> (immutable_object_ref IS NULL)),
     CHECK (raw_payload_sha256 IS NULL OR raw_payload_sha256 ~ '^[0-9a-f]{64}$'),
+    CHECK (
+        immutable_object_ref IS NULL
+        OR (immutable_object_ref <> '' AND immutable_object_ref = btrim(immutable_object_ref))
+    ),
     CHECK (status <> 'completed' OR completed_at IS NOT NULL),
     UNIQUE (run_id, dataset, provider, source_endpoint)
 );
+
+ALTER TABLE ingestion_run_manifests
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_raw_payload_sha256_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_immutable_object_ref_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_payload_identity_check;
+ALTER TABLE ingestion_run_manifests
+    ADD CONSTRAINT ingestion_run_manifests_payload_identity_check CHECK (
+        (raw_payload_sha256 IS NULL) <> (immutable_object_ref IS NULL)
+        AND (raw_payload_sha256 IS NULL OR raw_payload_sha256 ~ '^[0-9a-f]{64}$')
+        AND (
+            immutable_object_ref IS NULL
+            OR (immutable_object_ref <> '' AND immutable_object_ref = btrim(immutable_object_ref))
+        )
+    );
 
 CREATE INDEX IF NOT EXISTS idx_ingestion_run_manifests_run_status
     ON ingestion_run_manifests(run_id, status, quality_gate);
@@ -1081,13 +1100,12 @@ CREATE TABLE IF NOT EXISTS setup_gate_evaluations (
     strategy TEXT NOT NULL,
     passed BOOLEAN NOT NULL,
     reason_code_version INTEGER NOT NULL CHECK (reason_code_version = 1),
-    reason_codes TEXT[] NOT NULL CHECK (
-        cardinality(reason_codes) > 0
-        AND reason_codes <@ ARRAY[
-            'breakout_failed', 'data_incomplete', 'gate_passed',
-            'insufficient_history', 'liquidity_failed', 'market_regime_failed',
-            'relative_strength_failed', 'risk_invalid', 'volume_confirmation_failed'
-        ]::TEXT[]
+    reason_codes TEXT[] NOT NULL,
+    terminal_reason TEXT NOT NULL,
+    failed_gates JSONB NOT NULL,
+    gate_facts JSONB NOT NULL CHECK (jsonb_typeof(gate_facts) = 'object'),
+    source_fingerprint TEXT NOT NULL CHECK (
+        source_fingerprint <> '' AND source_fingerprint = btrim(source_fingerprint)
     ),
     evaluated_at TIMESTAMPTZ NOT NULL,
     metrics JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metrics) = 'object'),
@@ -1096,6 +1114,72 @@ CREATE TABLE IF NOT EXISTS setup_gate_evaluations (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (run_id, ticker, strategy)
 );
+
+ALTER TABLE setup_gate_evaluations
+    ADD COLUMN IF NOT EXISTS terminal_reason TEXT;
+ALTER TABLE setup_gate_evaluations
+    ADD COLUMN IF NOT EXISTS failed_gates JSONB;
+ALTER TABLE setup_gate_evaluations
+    ADD COLUMN IF NOT EXISTS gate_facts JSONB;
+ALTER TABLE setup_gate_evaluations
+    ADD COLUMN IF NOT EXISTS source_fingerprint TEXT;
+ALTER TABLE setup_gate_evaluations
+    ALTER COLUMN terminal_reason SET NOT NULL,
+    ALTER COLUMN failed_gates SET NOT NULL,
+    ALTER COLUMN gate_facts SET NOT NULL,
+    ALTER COLUMN source_fingerprint SET NOT NULL;
+ALTER TABLE setup_gate_evaluations
+    DROP CONSTRAINT IF EXISTS setup_gate_evaluations_reason_codes_check;
+
+CREATE OR REPLACE FUNCTION wolfy_validate_setup_gate_evaluation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    canonical_reasons CONSTANT TEXT[] := ARRAY[
+        'passed', 'missing_current_price', 'missing_current_features',
+        'insufficient_history', 'security_ineligible', 'liquidity_failed',
+        'market_regime_failed', 'trend_failed', 'breakout_not_confirmed',
+        'pullback_shape_failed', 'relative_strength_failed', 'volume_failed',
+        'stop_risk_too_wide', 'overextended', 'breadth_unavailable',
+        'breadth_failed', 'sector_confirmation_failed', 'event_landmine',
+        'option_chain_missing', 'option_liquidity_failed',
+        'portfolio_correlation_block', 'daily_limit_block'
+    ]::TEXT[];
+    sorted_reasons TEXT[];
+BEGIN
+    SELECT array_agg(reason ORDER BY reason)
+    INTO sorted_reasons
+    FROM unnest(NEW.reason_codes) AS reason;
+
+    IF NEW.reason_code_version <> 1
+       OR cardinality(NEW.reason_codes) = 0
+       OR NOT NEW.reason_codes <@ canonical_reasons
+       OR NEW.reason_codes <> sorted_reasons
+       OR cardinality(NEW.reason_codes) <> (
+           SELECT count(DISTINCT reason) FROM unnest(NEW.reason_codes) AS reason
+       )
+       OR (NEW.passed AND NEW.reason_codes <> ARRAY['passed']::TEXT[])
+       OR (NOT NEW.passed AND 'passed' = ANY(NEW.reason_codes))
+       OR NEW.terminal_reason <> ALL(NEW.reason_codes)
+       OR (NEW.passed AND NEW.terminal_reason <> 'passed')
+       OR jsonb_typeof(NEW.failed_gates) <> 'array'
+       OR (NEW.passed AND NEW.failed_gates <> '[]'::jsonb)
+       OR (NOT NEW.passed AND NEW.failed_gates <> to_jsonb(NEW.reason_codes))
+       OR jsonb_typeof(NEW.gate_facts) <> 'object'
+       OR jsonb_typeof(NEW.metrics) <> 'object'
+       OR jsonb_typeof(NEW.provenance) <> 'object'
+       OR NEW.source_fingerprint = ''
+       OR NEW.source_fingerprint <> btrim(NEW.source_fingerprint)
+    THEN
+        RAISE EXCEPTION 'noncanonical setup gate evaluation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_validate_setup_gate_evaluation ON setup_gate_evaluations;
+CREATE TRIGGER trg_validate_setup_gate_evaluation
+    BEFORE INSERT OR UPDATE ON setup_gate_evaluations
+    FOR EACH ROW EXECUTE FUNCTION wolfy_validate_setup_gate_evaluation();
 
 CREATE INDEX IF NOT EXISTS idx_setup_gate_evaluations_run_passed
     ON setup_gate_evaluations(run_id, passed, ticker, strategy);
@@ -1126,15 +1210,14 @@ DECLARE
     source_distinct INTEGER;
     source_bad INTEGER;
 BEGIN
-    IF NEW.status = OLD.status THEN
-        RETURN NEW;
-    END IF;
-    IF NOT (
-        (OLD.status = 'started' AND NEW.status IN ('data_incomplete', 'evaluated', 'failed'))
-        OR (OLD.status = 'data_incomplete' AND NEW.status IN ('evaluated', 'failed'))
-        OR (OLD.status = 'evaluated' AND NEW.status IN ('published', 'failed'))
-    ) THEN
-        RAISE EXCEPTION 'invalid daily evaluation run transition: % -> %', OLD.status, NEW.status;
+    IF TG_OP = 'UPDATE' AND NEW.status <> OLD.status THEN
+        IF NOT (
+            (OLD.status = 'started' AND NEW.status IN ('data_incomplete', 'evaluated', 'failed'))
+            OR (OLD.status = 'data_incomplete' AND NEW.status IN ('evaluated', 'failed'))
+            OR (OLD.status = 'evaluated' AND NEW.status IN ('published', 'failed'))
+        ) THEN
+            RAISE EXCEPTION 'invalid daily evaluation run transition: % -> %', OLD.status, NEW.status;
+        END IF;
     END IF;
     IF NEW.status = 'published' THEN
         SELECT count(*) INTO manifest_ready
@@ -1210,5 +1293,5 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_daily_evaluation_run_transition ON daily_evaluation_runs;
 CREATE TRIGGER trg_daily_evaluation_run_transition
-    BEFORE UPDATE OF status ON daily_evaluation_runs
+    BEFORE INSERT OR UPDATE ON daily_evaluation_runs
     FOR EACH ROW EXECUTE FUNCTION wolfy_validate_daily_run_transition();
