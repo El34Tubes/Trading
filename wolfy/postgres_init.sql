@@ -1003,3 +1003,212 @@ SELECT
   backfill_enabled,
   tier_notes
 FROM universe_symbols;
+CREATE TABLE IF NOT EXISTS daily_evaluation_runs (
+    id UUID PRIMARY KEY,
+    run_identity TEXT NOT NULL UNIQUE,
+    target_session DATE NOT NULL,
+    evaluator_name TEXT NOT NULL,
+    evaluator_version TEXT NOT NULL,
+    universe_snapshot_id TEXT NOT NULL,
+    required_stage_names TEXT[] NOT NULL DEFAULT ARRAY['features']::TEXT[],
+    derived_stage_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'started',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (target_session, evaluator_name, evaluator_version, universe_snapshot_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_evaluation_runs_session_status
+    ON daily_evaluation_runs(target_session DESC, status);
+
+ALTER TABLE daily_evaluation_runs
+    ADD COLUMN IF NOT EXISTS required_stage_names TEXT[] NOT NULL DEFAULT ARRAY['features']::TEXT[];
+ALTER TABLE daily_evaluation_runs
+    ADD COLUMN IF NOT EXISTS derived_stage_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'daily_evaluation_runs_status_check'
+          AND conrelid = 'daily_evaluation_runs'::regclass
+    ) THEN
+        ALTER TABLE daily_evaluation_runs
+            ADD CONSTRAINT daily_evaluation_runs_status_check
+            CHECK (status IN ('started', 'data_incomplete', 'evaluated', 'published', 'failed'));
+    END IF;
+END
+$$;
+
+CREATE TABLE IF NOT EXISTS ingestion_run_manifests (
+    id BIGSERIAL PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES daily_evaluation_runs(id) ON DELETE CASCADE,
+    dataset TEXT NOT NULL,
+    target_session DATE NOT NULL,
+    provider TEXT NOT NULL,
+    source_endpoint TEXT NOT NULL,
+    entitlement_class TEXT NOT NULL,
+    delay_class TEXT NOT NULL,
+    started_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ,
+    expected_symbol_count INTEGER NOT NULL CHECK (expected_symbol_count >= 0),
+    received_symbol_count INTEGER NOT NULL CHECK (received_symbol_count >= 0),
+    expected_row_count BIGINT NOT NULL CHECK (expected_row_count >= 0),
+    received_row_count BIGINT NOT NULL CHECK (received_row_count >= 0),
+    retry_count INTEGER NOT NULL CHECK (retry_count >= 0),
+    status TEXT NOT NULL CHECK (status IN ('started', 'completed', 'data_incomplete', 'failed')),
+    raw_payload_sha256 TEXT,
+    immutable_object_ref TEXT,
+    parser_version TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    quality_gate TEXT NOT NULL CHECK (quality_gate IN ('not_run', 'passed', 'failed')),
+    provenance JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(provenance) = 'object'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((raw_payload_sha256 IS NULL) <> (immutable_object_ref IS NULL)),
+    CHECK (raw_payload_sha256 IS NULL OR raw_payload_sha256 ~ '^[0-9a-f]{64}$'),
+    CHECK (status <> 'completed' OR completed_at IS NOT NULL),
+    UNIQUE (run_id, dataset, provider, source_endpoint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingestion_run_manifests_run_status
+    ON ingestion_run_manifests(run_id, status, quality_gate);
+
+CREATE TABLE IF NOT EXISTS setup_gate_evaluations (
+    id BIGSERIAL PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES daily_evaluation_runs(id) ON DELETE CASCADE,
+    ticker TEXT NOT NULL CHECK (ticker = upper(ticker)),
+    strategy TEXT NOT NULL,
+    passed BOOLEAN NOT NULL,
+    reason_code_version INTEGER NOT NULL CHECK (reason_code_version = 1),
+    reason_codes TEXT[] NOT NULL CHECK (
+        cardinality(reason_codes) > 0
+        AND reason_codes <@ ARRAY[
+            'breakout_failed', 'data_incomplete', 'gate_passed',
+            'insufficient_history', 'liquidity_failed', 'market_regime_failed',
+            'relative_strength_failed', 'risk_invalid', 'volume_confirmation_failed'
+        ]::TEXT[]
+    ),
+    evaluated_at TIMESTAMPTZ NOT NULL,
+    metrics JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metrics) = 'object'),
+    provenance JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(provenance) = 'object'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (run_id, ticker, strategy)
+);
+
+CREATE INDEX IF NOT EXISTS idx_setup_gate_evaluations_run_passed
+    ON setup_gate_evaluations(run_id, passed, ticker, strategy);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'daily_evaluation_runs_stage_metadata_check'
+          AND conrelid = 'daily_evaluation_runs'::regclass
+    ) THEN
+        ALTER TABLE daily_evaluation_runs
+            ADD CONSTRAINT daily_evaluation_runs_stage_metadata_check CHECK (
+                cardinality(required_stage_names) > 0
+                AND jsonb_typeof(derived_stage_metadata) = 'object'
+            );
+    END IF;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION wolfy_validate_daily_run_transition()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    manifest_ready INTEGER;
+    stage_name TEXT;
+    stage_data JSONB;
+    source_total INTEGER;
+    source_distinct INTEGER;
+    source_bad INTEGER;
+BEGIN
+    IF NEW.status = OLD.status THEN
+        RETURN NEW;
+    END IF;
+    IF NOT (
+        (OLD.status = 'started' AND NEW.status IN ('data_incomplete', 'evaluated', 'failed'))
+        OR (OLD.status = 'data_incomplete' AND NEW.status IN ('evaluated', 'failed'))
+        OR (OLD.status = 'evaluated' AND NEW.status IN ('published', 'failed'))
+    ) THEN
+        RAISE EXCEPTION 'invalid daily evaluation run transition: % -> %', OLD.status, NEW.status;
+    END IF;
+    IF NEW.status = 'published' THEN
+        SELECT count(*) INTO manifest_ready
+        FROM ingestion_run_manifests
+        WHERE run_id = NEW.id
+          AND target_session = NEW.target_session
+          AND status = 'completed'
+          AND completed_at IS NOT NULL
+          AND quality_gate = 'passed'
+          AND expected_symbol_count = received_symbol_count
+          AND expected_row_count = received_row_count;
+        IF manifest_ready = 0 THEN
+            RAISE EXCEPTION 'published run requires complete passed ingestion manifest for target session';
+        END IF;
+        IF cardinality(NEW.required_stage_names) = 0
+           OR EXISTS (
+               SELECT 1 FROM unnest(NEW.required_stage_names) AS required_stage(value)
+               WHERE required_stage.value = ''
+                  OR required_stage.value <> btrim(required_stage.value)
+           )
+           OR cardinality(NEW.required_stage_names) <> (
+               SELECT count(DISTINCT required_stage.value)
+               FROM unnest(NEW.required_stage_names) AS required_stage(value)
+           )
+        THEN
+            RAISE EXCEPTION 'published run has invalid required derived stages';
+        END IF;
+        FOREACH stage_name IN ARRAY NEW.required_stage_names LOOP
+            stage_data := NEW.derived_stage_metadata -> stage_name;
+            IF stage_data IS NULL
+               OR jsonb_typeof(stage_data) <> 'object'
+               OR (SELECT count(*) FROM jsonb_object_keys(stage_data)) <> 8
+               OR NOT stage_data ?& ARRAY[
+                   'input_session', 'computed_at', 'available_at',
+                   'transformation_version', 'source_run_ids', 'input_hash',
+                   'universe_snapshot_id', 'provenance'
+               ]
+               OR stage_data->>'input_session' <> NEW.target_session::text
+               OR stage_data->>'computed_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+]00:00)$'
+               OR stage_data->>'available_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+]00:00)$'
+               OR (stage_data->>'available_at')::timestamptz < (stage_data->>'computed_at')::timestamptz
+               OR COALESCE(stage_data->>'transformation_version', '') = ''
+               OR stage_data->>'transformation_version' <> btrim(stage_data->>'transformation_version')
+               OR jsonb_typeof(stage_data->'source_run_ids') <> 'array'
+               OR jsonb_array_length(stage_data->'source_run_ids') = 0
+               OR stage_data->>'input_hash' !~ '^[0-9a-f]{64}$'
+               OR COALESCE(stage_data->>'universe_snapshot_id', '') = ''
+               OR stage_data->>'universe_snapshot_id' <> btrim(stage_data->>'universe_snapshot_id')
+               OR stage_data->>'universe_snapshot_id' <> NEW.universe_snapshot_id
+               OR jsonb_typeof(stage_data->'provenance') <> 'object'
+            THEN
+                RAISE EXCEPTION 'published run missing complete derived stage metadata: %', stage_name;
+            END IF;
+            SELECT count(*), count(DISTINCT source_id), count(*) FILTER (
+                WHERE jsonb_typeof(source_value) <> 'string'
+                   OR source_id = ''
+                   OR source_id <> btrim(source_id)
+            )
+            INTO source_total, source_distinct, source_bad
+            FROM (
+                SELECT source_value, source_value #>> '{}' AS source_id
+                FROM jsonb_array_elements(stage_data->'source_run_ids') AS source_value
+            ) AS source_ids;
+            IF source_bad > 0 OR source_total <> source_distinct THEN
+                RAISE EXCEPTION 'published run has invalid derived stage source IDs: %', stage_name;
+            END IF;
+        END LOOP;
+    END IF;
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_daily_evaluation_run_transition ON daily_evaluation_runs;
+CREATE TRIGGER trg_daily_evaluation_run_transition
+    BEFORE UPDATE OF status ON daily_evaluation_runs
+    FOR EACH ROW EXECUTE FUNCTION wolfy_validate_daily_run_transition();
