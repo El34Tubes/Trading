@@ -182,6 +182,28 @@ def test_test_dsn_allows_benign_unrelated_environment(monkeypatch):
     assert resolve_test_dsn() == dsn
 
 
+def test_schema_modules_cache_only_the_isolated_test_dsn():
+    from psycopg.conninfo import conninfo_to_dict
+
+    import eod_backtest
+    import eod_monitoring
+    import eod_price_features
+    import eod_signals
+    import recommendation_outcome_review
+
+    modules = (
+        eod_price_features,
+        eod_backtest,
+        eod_monitoring,
+        eod_signals,
+        recommendation_outcome_review,
+    )
+
+    for module in modules:
+        assert conninfo_to_dict(module.DEFAULT_DSN).get("dbname") == "wolfy_test"
+        assert conninfo_to_dict(module.DEFAULT_DSN).get("dbname") != "wolfy"
+
+
 @pytest.mark.parametrize(
     "entrypoint",
     ["admin", "create_subprocess", "extension_subprocess", "schema_connect"],
