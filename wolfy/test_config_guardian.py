@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 GUARDIAN = ROOT / "guardian" / "config_guardian.py"
+DISABLED_METRICS_DSN = "dbname=wolfy_test_config_guardian_disabled connect_timeout=1"
 
 
 def write_min_home(home: Path) -> None:
@@ -39,7 +39,7 @@ def test_config_guardian_restores_known_good_on_broken_config_and_expired_probat
     write_min_home(home)
 
     first = subprocess.run(
-        [sys.executable, str(GUARDIAN), "--home", str(home), "--skip-cli", "--snapshot", "--dsn", "dbname=wolfy user=root host=/var/run/postgresql"],
+        [sys.executable, str(GUARDIAN), "--home", str(home), "--skip-cli", "--snapshot", "--dsn", DISABLED_METRICS_DSN],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -56,7 +56,7 @@ def test_config_guardian_restores_known_good_on_broken_config_and_expired_probat
     probation.write_text(json.dumps({"change": "test-broken-config", "expires_at": expired}) + "\n")
 
     second = subprocess.run(
-        [sys.executable, str(GUARDIAN), "--home", str(home), "--skip-cli", "--dsn", "dbname=wolfy user=root host=/var/run/postgresql"],
+        [sys.executable, str(GUARDIAN), "--home", str(home), "--skip-cli", "--dsn", DISABLED_METRICS_DSN],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

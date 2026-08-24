@@ -43,6 +43,10 @@ ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS definition_of_done TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS error_message TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS blocker_reason TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS payload JSONB;
+-- These provenance columns are referenced by the compatibility payload refresh
+-- below, so they must exist on a clean database as well as an upgraded one.
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source_table TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source_id TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS agent TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS assigned_agent TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS type TEXT;
@@ -903,7 +907,25 @@ WHERE job LIKE 'eod-%' OR job LIKE 'feature%';
 
 -- Universe compatibility for read-only ops probes. Canonical tables are
 -- universe_symbols and universe_backfill_targets; diagnostics sometimes use
--- shorter names/aliases such as universe.enabled or targets.enabled.
+-- shorter names/aliases such as universe.enabled or targets.enabled. Define the
+-- canonical target relation first so this schema also applies to a clean test DB.
+CREATE TABLE IF NOT EXISTS universe_backfill_targets (
+  symbol TEXT PRIMARY KEY,
+  tier TEXT NOT NULL,
+  source TEXT NOT NULL,
+  name TEXT,
+  priority INTEGER NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT true,
+  reason TEXT NOT NULL,
+  selected_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_universe_backfill_targets_tier_priority
+  ON universe_backfill_targets(tier, priority);
+ALTER TABLE universe_symbols ADD COLUMN IF NOT EXISTS wolfy_tier TEXT;
+ALTER TABLE universe_symbols ADD COLUMN IF NOT EXISTS tier_source TEXT;
+ALTER TABLE universe_symbols ADD COLUMN IF NOT EXISTS backfill_priority INTEGER;
+ALTER TABLE universe_symbols ADD COLUMN IF NOT EXISTS backfill_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE universe_symbols ADD COLUMN IF NOT EXISTS tier_notes TEXT;
 ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS enabled BOOLEAN;
 ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS wolfy_tier TEXT;
 ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS tier_source TEXT;

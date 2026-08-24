@@ -5,12 +5,13 @@ from decimal import Decimal
 
 import pytest
 
+from test_db import test_connection
+
 
 def test_research_only_options_signal_can_create_explicit_experimental_recommendation():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import ensure_signal_schema, seed_default_strategies, write_experimental_options_recommendations
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     signal_dt = date(2099, 3, 3)
     ticker = "ZZEXPOPT"
     evaluation = {
@@ -23,7 +24,7 @@ def test_research_only_options_signal_can_create_explicit_experimental_recommend
             "max_profit_per_contract": "820", "defined_risk": True,
         },
     }
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_signal_schema(conn)
         seed_default_strategies(conn)
         strategy_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_options_volatility_v1'").fetchone()[0]
@@ -60,12 +61,11 @@ def test_research_only_options_signal_can_create_explicit_experimental_recommend
 
 
 def test_experimental_writer_does_not_recommend_when_selector_rejects_all_options():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import ensure_signal_schema, seed_default_strategies, write_experimental_options_recommendations
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     signal_dt = date(2099, 3, 4)
     ticker = "ZZNOOPT"
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_signal_schema(conn)
         seed_default_strategies(conn)
         strategy_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_options_volatility_v1'").fetchone()[0]

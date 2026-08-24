@@ -4,6 +4,8 @@ from datetime import date, timedelta
 
 import pytest
 
+from test_db import test_connection
+
 
 def _cleanup(conn, tickers: list[str]) -> None:
     conn.execute("DELETE FROM recommendation_outcomes WHERE recommendation_id IN (SELECT id::text FROM recommendations WHERE ticker = ANY(%s))", (tickers,))
@@ -13,13 +15,12 @@ def _cleanup(conn, tickers: list[str]) -> None:
 
 
 def test_review_open_paper_trade_grades_underlying_setup_and_closes_on_target():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from recommendation_outcome_review import review_open_paper_trade_setups
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZREV1"
     entry_dt = date(2099, 3, 1)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             _cleanup(conn, [ticker])
             rec_id = conn.execute(
@@ -66,13 +67,12 @@ def test_review_open_paper_trade_grades_underlying_setup_and_closes_on_target():
 
 
 def test_review_open_paper_trade_setups_is_idempotent():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from recommendation_outcome_review import review_open_paper_trade_setups
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZREV2"
     entry_dt = date(2099, 3, 1)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             _cleanup(conn, [ticker])
             rec_id = conn.execute(

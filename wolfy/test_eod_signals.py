@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 from eod_price_features import PriceBar, compute_and_store_features, ingest_price_bars
+from test_db import test_connection
 
 
 def _bars(ticker: str, *, start: date = date(2099, 1, 1), n: int = 35, volume: int = 2_000_000) -> list[PriceBar]:
@@ -64,13 +65,12 @@ def _restore_default_strategy_statuses(conn) -> None:
 
 
 def test_recommendation_universe_uses_broad_current_universe_with_data_gates():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import recommendation_universe_tickers, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZBLUE", "ZZSMALL", "ZZNONE", "ZZINACT", "ZZSTALE", "ZZTHIN"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
@@ -110,13 +110,12 @@ def test_recommendation_universe_uses_broad_current_universe_with_data_gates():
 
 
 def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers_omitted():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZAUTO", "SPY"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -141,11 +140,10 @@ def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers
 
 
 def test_seed_default_strategies_includes_rs_breakout_as_research_only():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         seed_default_strategies(conn)
         _restore_default_strategy_statuses(conn)
         rows = conn.execute(
@@ -170,13 +168,12 @@ def test_seed_default_strategies_includes_rs_breakout_as_research_only():
 
 
 def test_generate_liquid_rs_breakout_continuation_signal():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZRSBO", "SPY"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -216,13 +213,12 @@ def test_generate_liquid_rs_breakout_continuation_signal():
 
 
 def test_generate_eod_signals_seeds_research_only_strategies_and_writes_deterministic_signals():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZSIG", "ZZMOM"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -256,19 +252,27 @@ def test_generate_eod_signals_seeds_research_only_strategies_and_writes_determin
 
 
 def test_write_approved_paper_recommendations_only_uses_approved_signals_and_caps_daily_rows():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import seed_default_strategies, write_approved_paper_recommendations
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     signal_dt = date(2099, 2, 4)
     tickers = ["ZZREC1", "ZZREC2", "ZZREC3", "ZZREC4", "ZZBLOCK"]
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
             approved_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_close_confirm_1r'").fetchone()[0]
             blocked_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_continuation'").fetchone()[0]
-            conn.execute("UPDATE strategies SET status='approved' WHERE id=%s", (approved_id,))
+            conn.execute(
+                """
+                UPDATE strategies
+                SET status='approved',
+                    metadata=coalesce(metadata, '{}'::jsonb) ||
+                        '{"approval_scope":"paper_only_no_live_execution","paper_recommendation_approval":true}'::jsonb
+                WHERE id=%s
+                """,
+                (approved_id,),
+            )
             conn.execute("UPDATE strategies SET status='research_only' WHERE id=%s", (blocked_id,))
             for idx, ticker in enumerate(tickers, start=1):
                 ingest_price_bars(conn, _breakout_bars(ticker, start_close=Decimal("50") + idx), source="unit-recommendation-writer")
@@ -312,18 +316,26 @@ def test_write_approved_paper_recommendations_only_uses_approved_signals_and_cap
 
 
 def test_log_approved_paper_recommendation_trades_creates_open_paper_rows_idempotently():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import log_approved_paper_recommendation_trades, seed_default_strategies, write_approved_paper_recommendations
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     signal_dt = date(2099, 2, 4)
     tickers = ["ZZPLOG1", "ZZPLOG2", "ZZPLOG3", "ZZPLOG4"]
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
             approved_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_close_confirm_1r'").fetchone()[0]
-            conn.execute("UPDATE strategies SET status='approved' WHERE id=%s", (approved_id,))
+            conn.execute(
+                """
+                UPDATE strategies
+                SET status='approved',
+                    metadata=coalesce(metadata, '{}'::jsonb) ||
+                        '{"approval_scope":"paper_only_no_live_execution","paper_recommendation_approval":true}'::jsonb
+                WHERE id=%s
+                """,
+                (approved_id,),
+            )
             for idx, ticker in enumerate(tickers, start=1):
                 raw = {
                     "strategy": "liquid_rs_breakout_close_confirm_1r",
@@ -377,13 +389,12 @@ def test_log_approved_paper_recommendation_trades_creates_open_paper_rows_idempo
 
 
 def test_approved_strategy_gate_creates_setups_only_for_approved_signals():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, propose_approved_setups, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZGATE"
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -415,13 +426,12 @@ def test_approved_strategy_gate_creates_setups_only_for_approved_signals():
 
 
 def test_nightly_screening_dry_run_ranks_setups_without_writing_rows():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, propose_approved_setups, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZDRY"
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -455,13 +465,12 @@ def test_nightly_screening_dry_run_ranks_setups_without_writing_rows():
 
 
 def test_nightly_screening_blocks_liquidity_events_options_and_portfolio_breakers():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, propose_approved_setups, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZILLQ", "ZZEVNT", "ZZOPT", "ZZHEAT"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -511,13 +520,12 @@ def test_nightly_screening_blocks_liquidity_events_options_and_portfolio_breaker
 
 
 def test_nightly_screening_applies_cumulative_heat_and_position_slots():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, propose_approved_setups, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZSLOT1", "ZZSLOT2", "ZZSLOT3", "ZZSLOT4"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
 
+from test_db import test_connection
+
 
 def test_option_research_ledger_persists_full_snapshot_candidates_and_is_idempotent():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from options_research_ledger import ensure_options_research_schema, store_options_structure_evaluation
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     signal_dt = date(2099, 3, 2)
     chain = [{"symbol": "ZZOPT20990320C00100000", "bid": "2", "ask": "2.2", "quote_at": "2099-03-02T20:00:00Z"}]
     evaluation = {
@@ -23,7 +23,7 @@ def test_option_research_ledger_persists_full_snapshot_candidates_and_is_idempot
         "no_live_execution": True,
         "broker_order_submitted": False,
     }
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_options_research_schema(conn)
         try:
             first = store_options_structure_evaluation(

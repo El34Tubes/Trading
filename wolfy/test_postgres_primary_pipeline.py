@@ -2,13 +2,15 @@
 """Smoke tests for Wolfy's Postgres-primary operational pipeline helpers."""
 from __future__ import annotations
 
-import json
-
 import pytest
 
 import wolfy_postgres_pipeline as pgpipe
 from recommendation_logger import log_recommendation
 from wolfy_scanner import persist_scan
+
+
+def _assert_test_database(conn):
+    assert conn.execute("select current_database()").fetchone()[0] == "wolfy_test"
 
 
 def _sample_ranked():
@@ -58,6 +60,7 @@ def _complete_idea():
 
 def test_postgres_operational_schema_has_scanner_recommendation_and_ledger_tables():
     with pgpipe.connect_postgres() as conn:
+        _assert_test_database(conn)
         pgpipe.ensure_operational_tables(conn)
         with conn.cursor() as cur:
             cur.execute(
@@ -81,6 +84,7 @@ def test_postgres_operational_schema_has_scanner_recommendation_and_ledger_table
 def test_scanner_persist_dual_writes_postgres_first_and_keeps_sqlite_compatibility(tmp_path):
     sqlite_db = tmp_path / "wolfy.db"
     with pgpipe.connect_postgres() as conn:
+        _assert_test_database(conn)
         before = pgpipe.count_rows(conn, "scanner_runs")
 
     sqlite_run_id = persist_scan(_sample_ranked(), sqlite_db, "ticker-list", notes="pytest-postgres-primary")
@@ -99,6 +103,7 @@ def test_scanner_persist_dual_writes_postgres_first_and_keeps_sqlite_compatibili
 def test_recommendation_logger_dual_writes_postgres_and_returns_fallback_free_metadata(tmp_path):
     sqlite_db = tmp_path / "wolfy.db"
     with pgpipe.connect_postgres() as conn:
+        _assert_test_database(conn)
         before = pgpipe.count_rows(conn, "recommendations")
 
     result = log_recommendation(sqlite_db, _complete_idea())

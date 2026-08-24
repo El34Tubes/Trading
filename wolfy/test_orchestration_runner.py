@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 from datetime import date
 
+from test_db import test_connection
+
 
 def test_paper_recommendation_lifecycle_writes_and_logs_approved_signal_without_broker_action():
-    import psycopg
     from orchestration_runner import run_paper_recommendation_lifecycle
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     strategy_name = "unit_paper_recommendation_lifecycle"
     ticker = "ZZRLC"
     signal_dt = date(2099, 3, 2)
@@ -19,7 +19,7 @@ def test_paper_recommendation_lifecycle_writes_and_logs_approved_signal_without_
         "max_paper_recs_per_day": 3,
         "risk_per_trade_fraction": 0.05,
     }
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         conn.execute("DELETE FROM paper_trades WHERE ticker=%s", (ticker,))
         conn.execute("DELETE FROM recommendations WHERE ticker=%s", (ticker,))
         conn.execute("DELETE FROM signals WHERE ticker=%s", (ticker,))

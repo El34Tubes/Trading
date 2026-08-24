@@ -7,6 +7,8 @@ import json
 
 import pytest
 
+from test_db import test_connection
+
 
 def _versioned_approved_gate(gate: dict) -> dict:
     return {
@@ -30,13 +32,11 @@ def _cleanup(conn, ticker: str, strategy_names: list[str] | None = None) -> None
 
 
 def test_preopen_monitoring_flags_invalidation_and_event_landmines_without_promoting():
-    import psycopg
     from eod_monitoring import ensure_monitoring_schema, run_preopen_monitoring
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZMON"
     today = date(2026, 6, 3)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_monitoring_schema(conn)
         _cleanup(conn, ticker)
         conn.execute(
@@ -80,15 +80,13 @@ def test_preopen_monitoring_flags_invalidation_and_event_landmines_without_promo
 
 
 def test_monthly_revalidation_demotes_stale_or_failed_approved_strategies_only():
-    import psycopg
     from eod_monitoring import ensure_monitoring_schema, run_monthly_strategy_revalidation
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     as_of = date(2026, 6, 30)
     stale = "unit_stale_approved"
     fresh = "unit_fresh_approved"
     failed = "unit_failed_approved"
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_monitoring_schema(conn)
         _cleanup(conn, "ZZREV", [stale, fresh, failed])
         conn.execute(
@@ -119,10 +117,8 @@ def test_monthly_revalidation_demotes_stale_or_failed_approved_strategies_only()
 
 
 def test_setup_outcome_revalidation_reactivates_only_previously_authorized_candidate():
-    import psycopg
     from eod_monitoring import run_setup_outcome_strategy_revalidation
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     strategy_name = "unit_setup_outcome_reactivation"
     tickers = ["ZZRV1", "ZZRV2", "ZZRV3"]
     signal_dates = [date(2026, 8, 10), date(2026, 8, 11), date(2026, 8, 12)]
@@ -145,7 +141,7 @@ def test_setup_outcome_revalidation_reactivates_only_previously_authorized_candi
         },
     }
     metadata["approved_setup_outcome_gate"] = _versioned_approved_gate(metadata["latest_setup_outcome_gate"])
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         conn.execute("DELETE FROM research_log WHERE hypothesis=%s", (f"setup outcome revalidation:{strategy_name}",))
         conn.execute("DELETE FROM backtests WHERE strategy_id IN (SELECT id FROM strategies WHERE name=%s)", (strategy_name,))
         conn.execute("DELETE FROM signals WHERE ticker = ANY(%s)", (tickers,))
@@ -213,10 +209,8 @@ def test_setup_outcome_revalidation_reactivates_only_previously_authorized_candi
 
 
 def test_monthly_revalidation_refreshes_authorized_setup_strategy_before_demotion():
-    import psycopg
     from eod_monitoring import run_monthly_strategy_revalidation
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     strategy_name = "unit_monthly_setup_refresh"
     ticker = "ZZRVM"
     as_of = date(2026, 8, 19)
@@ -238,7 +232,7 @@ def test_monthly_revalidation_refreshes_authorized_setup_strategy_before_demotio
         },
     }
     metadata["approved_setup_outcome_gate"] = _versioned_approved_gate(metadata["latest_setup_outcome_gate"])
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         conn.execute("DELETE FROM research_log WHERE hypothesis LIKE %s", (f"%{strategy_name}",))
         conn.execute("DELETE FROM backtests WHERE strategy_id IN (SELECT id FROM strategies WHERE name=%s)", (strategy_name,))
         conn.execute("DELETE FROM signals WHERE ticker=%s", (ticker,))
@@ -285,7 +279,6 @@ def test_monthly_revalidation_refreshes_authorized_setup_strategy_before_demotio
 
 
 def test_monthly_revalidation_routes_fresh_approved_invalid_gate_through_fail_closed_demotion():
-    import psycopg
     from eod_monitoring import run_monthly_strategy_revalidation
 
     strategy_name = "unit_fresh_invalid_approved_gate"
@@ -309,7 +302,7 @@ def test_monthly_revalidation_routes_fresh_approved_invalid_gate_through_fail_cl
             },
         },
     }
-    with psycopg.connect("dbname=wolfy user=root host=/var/run/postgresql") as conn:
+    with test_connection() as conn:
         conn.execute("DELETE FROM research_log WHERE hypothesis LIKE %s", (f"%{strategy_name}",))
         conn.execute("DELETE FROM backtests WHERE strategy_id IN (SELECT id FROM strategies WHERE name=%s)", (strategy_name,))
         conn.execute("DELETE FROM strategies WHERE name=%s", (strategy_name,))
@@ -344,10 +337,8 @@ def test_monthly_revalidation_routes_fresh_approved_invalid_gate_through_fail_cl
 
 
 def test_failed_revalidation_preserves_approval_gate_for_later_same_gate_reactivation():
-    import psycopg
     from eod_monitoring import run_monthly_strategy_revalidation
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     strategy_name = "unit_revalidation_recovery"
     tickers = ["ZZRVF", "ZZRVP1", "ZZRVP2"]
     metadata = {
@@ -370,7 +361,7 @@ def test_failed_revalidation_preserves_approval_gate_for_later_same_gate_reactiv
     metadata["approved_setup_outcome_gate"] = _versioned_approved_gate(metadata["latest_setup_outcome_gate"])
     first_as_of = date(2026, 8, 10)
     second_as_of = date(2026, 8, 15)
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         conn.execute("DELETE FROM research_log WHERE hypothesis LIKE %s", (f"%{strategy_name}",))
         conn.execute("DELETE FROM backtests WHERE strategy_id IN (SELECT id FROM strategies WHERE name=%s)", (strategy_name,))
         conn.execute("DELETE FROM signals WHERE ticker = ANY(%s)", (tickers,))
@@ -436,10 +427,8 @@ def test_failed_revalidation_preserves_approval_gate_for_later_same_gate_reactiv
 
 
 def test_setup_outcome_revalidation_rejects_invalid_target_and_holding_metadata():
-    import psycopg
     from eod_monitoring import run_setup_outcome_strategy_revalidation
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     strategy_name = "unit_invalid_revalidation_metadata"
     ticker = "ZZRVINV"
     signal_dt = date(2026, 8, 10)
@@ -452,7 +441,7 @@ def test_setup_outcome_revalidation_rejects_invalid_target_and_holding_metadata(
             "thresholds": {"min_sample": 1, "min_oos_sample": 1},
         },
     }
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         conn.execute("DELETE FROM research_log WHERE hypothesis LIKE %s", (f"%{strategy_name}",))
         conn.execute("DELETE FROM backtests WHERE strategy_id IN (SELECT id FROM strategies WHERE name=%s)", (strategy_name,))
         conn.execute("DELETE FROM signals WHERE ticker=%s", (ticker,))
@@ -493,10 +482,8 @@ def test_setup_outcome_revalidation_rejects_invalid_target_and_holding_metadata(
 
 
 def test_incomplete_approved_gate_cannot_authorize_candidate_reactivation():
-    import psycopg
     from eod_monitoring import run_setup_outcome_strategy_revalidation
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     strategy_name = "unit_incomplete_approval_gate"
     ticker = "ZZRVGAP"
     signal_dt = date(2026, 8, 10)
@@ -516,7 +503,7 @@ def test_incomplete_approved_gate_cannot_authorize_candidate_reactivation():
         "approved_setup_outcome_gate": {"passed": True, "thresholds": incomplete_thresholds},
         "latest_setup_outcome_gate": {"passed": True, "thresholds": incomplete_thresholds},
     }
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         conn.execute("DELETE FROM research_log WHERE hypothesis LIKE %s", (f"%{strategy_name}",))
         conn.execute("DELETE FROM backtests WHERE strategy_id IN (SELECT id FROM strategies WHERE name=%s)", (strategy_name,))
         conn.execute("DELETE FROM signals WHERE ticker=%s", (ticker,))
@@ -626,11 +613,10 @@ def test_signal_value_selection_does_not_fallback_when_explicit_invalid_value_is
 
 
 def test_strategy_revalidation_treats_non_object_metadata_as_invalid_without_aborting():
-    import psycopg
     from eod_monitoring import run_setup_outcome_strategy_revalidation
 
     strategy_name = "unit_scalar_strategy_metadata"
-    with psycopg.connect("dbname=wolfy user=root host=/var/run/postgresql") as conn:
+    with test_connection() as conn:
         conn.execute("DELETE FROM research_log WHERE hypothesis LIKE %s", (f"%{strategy_name}",))
         conn.execute("DELETE FROM backtests WHERE strategy_id IN (SELECT id FROM strategies WHERE name=%s)", (strategy_name,))
         conn.execute("DELETE FROM strategies WHERE name=%s", (strategy_name,))
