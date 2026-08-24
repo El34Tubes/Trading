@@ -1075,25 +1075,6 @@ ALTER TABLE ingestion_run_manifests
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
 ALTER TABLE ingestion_run_manifests
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
-ALTER TABLE ingestion_run_manifests
-    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_check,
-    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_raw_payload_sha256_check,
-    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_immutable_object_ref_check,
-    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_payload_identity_check,
-    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_chronology_check,
-    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_contract_check;
-ALTER TABLE ingestion_run_manifests
-    ADD CONSTRAINT ingestion_run_manifests_payload_identity_check CHECK (
-        (raw_payload_sha256 IS NULL) <> (immutable_object_ref IS NULL)
-        AND (raw_payload_sha256 IS NULL OR raw_payload_sha256 ~ '^[0-9a-f]{64}$')
-        AND (
-            immutable_object_ref IS NULL
-            OR (immutable_object_ref <> '' AND immutable_object_ref = btrim(immutable_object_ref))
-        )
-    ),
-    ADD CONSTRAINT ingestion_run_manifests_chronology_check CHECK (
-        completed_at IS NULL OR completed_at >= started_at
-    );
 
 CREATE INDEX IF NOT EXISTS idx_ingestion_run_manifests_run_status
     ON ingestion_run_manifests(run_id, status, quality_gate);
@@ -1136,6 +1117,143 @@ ALTER TABLE setup_gate_evaluations
     ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
 ALTER TABLE setup_gate_evaluations
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+-- Fail closed on populated partial run/manifest schemas before any backfill.
+-- Newly introduced nullable audit columns may be NULL and are backfilled below;
+-- every value that was already populated must already be canonical.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM daily_evaluation_runs AS run
+        WHERE run.run_identity IS NULL
+           OR btrim(run.run_identity) = ''
+           OR run.run_identity <> btrim(run.run_identity)
+           OR run.evaluator_name IS NULL
+           OR btrim(run.evaluator_name) = ''
+           OR run.evaluator_name <> btrim(run.evaluator_name)
+           OR run.evaluator_version IS NULL
+           OR btrim(run.evaluator_version) = ''
+           OR run.evaluator_version <> btrim(run.evaluator_version)
+           OR run.universe_snapshot_id IS NULL
+           OR btrim(run.universe_snapshot_id) = ''
+           OR run.universe_snapshot_id <> btrim(run.universe_snapshot_id)
+           OR (run.status IS NOT NULL AND run.status NOT IN (
+               'started', 'data_incomplete', 'evaluated', 'published', 'failed'
+           ))
+           OR (
+               run.required_stage_names IS NOT NULL
+               AND (
+                   cardinality(run.required_stage_names) = 0
+                   OR EXISTS (
+                       SELECT 1 FROM unnest(run.required_stage_names) AS stage(value)
+                       WHERE stage.value IS NULL
+                          OR btrim(stage.value) = ''
+                          OR stage.value <> btrim(stage.value)
+                   )
+                   OR run.required_stage_names IS DISTINCT FROM (
+                       SELECT array_agg(stage.value ORDER BY stage.value)
+                       FROM unnest(run.required_stage_names) AS stage(value)
+                   )
+                   OR cardinality(run.required_stage_names) <> (
+                       SELECT count(DISTINCT stage.value)
+                       FROM unnest(run.required_stage_names) AS stage(value)
+                   )
+               )
+           )
+           OR (
+               run.derived_stage_metadata IS NOT NULL
+               AND jsonb_typeof(run.derived_stage_metadata) IS DISTINCT FROM 'object'
+           )
+           OR (
+               run.created_at IS NOT NULL AND run.updated_at IS NOT NULL
+               AND run.updated_at < run.created_at
+           )
+    ) OR EXISTS (
+        SELECT 1 FROM daily_evaluation_runs
+        GROUP BY run_identity HAVING count(*) > 1
+    ) OR EXISTS (
+        SELECT 1 FROM daily_evaluation_runs
+        GROUP BY target_session, evaluator_name, evaluator_version, universe_snapshot_id
+        HAVING count(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'cannot migrate legacy daily_evaluation_runs: row violates canonical run contract';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM ingestion_run_manifests AS manifest
+        LEFT JOIN daily_evaluation_runs AS run ON run.id = manifest.run_id
+        WHERE run.id IS NULL
+           OR manifest.target_session IS DISTINCT FROM run.target_session
+           OR manifest.dataset IS NULL
+           OR btrim(manifest.dataset) = ''
+           OR manifest.dataset <> btrim(manifest.dataset)
+           OR manifest.provider IS NULL
+           OR btrim(manifest.provider) = ''
+           OR manifest.provider <> btrim(manifest.provider)
+           OR manifest.source_endpoint IS NULL
+           OR btrim(manifest.source_endpoint) = ''
+           OR manifest.source_endpoint <> btrim(manifest.source_endpoint)
+           OR manifest.entitlement_class IS NULL
+           OR btrim(manifest.entitlement_class) = ''
+           OR manifest.entitlement_class <> btrim(manifest.entitlement_class)
+           OR manifest.delay_class IS NULL
+           OR btrim(manifest.delay_class) = ''
+           OR manifest.delay_class <> btrim(manifest.delay_class)
+           OR manifest.parser_version IS NULL
+           OR btrim(manifest.parser_version) = ''
+           OR manifest.parser_version <> btrim(manifest.parser_version)
+           OR manifest.schema_version IS NULL
+           OR btrim(manifest.schema_version) = ''
+           OR manifest.schema_version <> btrim(manifest.schema_version)
+           OR manifest.expected_symbol_count IS NULL
+           OR manifest.expected_symbol_count < 0
+           OR manifest.received_symbol_count IS NULL
+           OR manifest.received_symbol_count < 0
+           OR manifest.expected_row_count IS NULL
+           OR manifest.expected_row_count < 0
+           OR manifest.received_row_count IS NULL
+           OR manifest.received_row_count < 0
+           OR manifest.retry_count IS NULL
+           OR manifest.retry_count < 0
+           OR manifest.status IS NULL
+           OR manifest.status NOT IN ('started', 'completed', 'data_incomplete', 'failed')
+           OR manifest.quality_gate IS NULL
+           OR manifest.quality_gate NOT IN ('not_run', 'passed', 'failed')
+           OR (manifest.status = 'completed' AND manifest.completed_at IS NULL)
+           OR manifest.started_at IS NULL
+           OR (manifest.completed_at IS NOT NULL AND manifest.completed_at < manifest.started_at)
+           OR (
+               manifest.provenance IS NOT NULL
+               AND jsonb_typeof(manifest.provenance) IS DISTINCT FROM 'object'
+           )
+           OR NOT (
+               (manifest.raw_payload_sha256 IS NOT NULL)
+               <> (manifest.immutable_object_ref IS NOT NULL)
+           )
+           OR (
+               manifest.raw_payload_sha256 IS NOT NULL
+               AND manifest.raw_payload_sha256 !~ '^[0-9a-f]{64}$'
+           )
+           OR (
+               manifest.immutable_object_ref IS NOT NULL
+               AND (
+                   btrim(manifest.immutable_object_ref) = ''
+                   OR manifest.immutable_object_ref <> btrim(manifest.immutable_object_ref)
+               )
+           )
+           OR (
+               manifest.created_at IS NOT NULL AND manifest.updated_at IS NOT NULL
+               AND manifest.updated_at < manifest.created_at
+           )
+    ) OR EXISTS (
+        SELECT 1 FROM ingestion_run_manifests
+        GROUP BY run_id, dataset, provider, source_endpoint HAVING count(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'cannot migrate legacy ingestion_run_manifests: row violates canonical manifest contract';
+    END IF;
+END
+$$;
 
 -- Validate all populated legacy rows before any clock-dependent backfill.  NULL
 -- terminal fields are accepted only where the canonical value is unambiguous.
@@ -1214,6 +1332,11 @@ SET required_stage_names = COALESCE(required_stage_names, ARRAY['features']::TEX
 WHERE required_stage_names IS NULL OR derived_stage_metadata IS NULL
    OR status IS NULL OR created_at IS NULL OR updated_at IS NULL;
 ALTER TABLE daily_evaluation_runs
+    ALTER COLUMN run_identity SET NOT NULL,
+    ALTER COLUMN target_session SET NOT NULL,
+    ALTER COLUMN evaluator_name SET NOT NULL,
+    ALTER COLUMN evaluator_version SET NOT NULL,
+    ALTER COLUMN universe_snapshot_id SET NOT NULL,
     ALTER COLUMN required_stage_names SET DEFAULT ARRAY['features']::TEXT[],
     ALTER COLUMN required_stage_names SET NOT NULL,
     ALTER COLUMN derived_stage_metadata SET DEFAULT '{}'::jsonb,
@@ -1228,16 +1351,49 @@ ALTER TABLE daily_evaluation_runs
 CREATE INDEX IF NOT EXISTS idx_daily_evaluation_runs_session_status
     ON daily_evaluation_runs(target_session DESC, status);
 
+ALTER TABLE daily_evaluation_runs
+    DROP CONSTRAINT IF EXISTS daily_evaluation_runs_status_check,
+    DROP CONSTRAINT IF EXISTS daily_evaluation_runs_identity_contract_check,
+    DROP CONSTRAINT IF EXISTS daily_evaluation_runs_stage_metadata_check,
+    DROP CONSTRAINT IF EXISTS daily_evaluation_runs_chronology_check;
+ALTER TABLE daily_evaluation_runs
+    ADD CONSTRAINT daily_evaluation_runs_status_check CHECK (
+        status IN ('started', 'data_incomplete', 'evaluated', 'published', 'failed')
+    ),
+    ADD CONSTRAINT daily_evaluation_runs_identity_contract_check CHECK (
+        run_identity <> '' AND run_identity = btrim(run_identity)
+        AND evaluator_name <> '' AND evaluator_name = btrim(evaluator_name)
+        AND evaluator_version <> '' AND evaluator_version = btrim(evaluator_version)
+        AND universe_snapshot_id <> ''
+        AND universe_snapshot_id = btrim(universe_snapshot_id)
+    ),
+    ADD CONSTRAINT daily_evaluation_runs_stage_metadata_check CHECK (
+        cardinality(required_stage_names) > 0
+        AND jsonb_typeof(derived_stage_metadata) = 'object'
+    ),
+    ADD CONSTRAINT daily_evaluation_runs_chronology_check CHECK (
+        updated_at >= created_at
+    );
+
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'daily_evaluation_runs_status_check'
+        WHERE conname = 'daily_evaluation_runs_run_identity_canonical_key'
           AND conrelid = 'daily_evaluation_runs'::regclass
     ) THEN
         ALTER TABLE daily_evaluation_runs
-            ADD CONSTRAINT daily_evaluation_runs_status_check
-            CHECK (status IN ('started', 'data_incomplete', 'evaluated', 'published', 'failed'));
+            ADD CONSTRAINT daily_evaluation_runs_run_identity_canonical_key
+            UNIQUE (run_identity);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'daily_evaluation_runs_identity_tuple_canonical_key'
+          AND conrelid = 'daily_evaluation_runs'::regclass
+    ) THEN
+        ALTER TABLE daily_evaluation_runs
+            ADD CONSTRAINT daily_evaluation_runs_identity_tuple_canonical_key
+            UNIQUE (target_session, evaluator_name, evaluator_version, universe_snapshot_id);
     END IF;
 END
 $$;
@@ -1248,12 +1404,80 @@ SET provenance = COALESCE(provenance, '{}'::jsonb),
     updated_at = COALESCE(updated_at, now())
 WHERE provenance IS NULL OR created_at IS NULL OR updated_at IS NULL;
 ALTER TABLE ingestion_run_manifests
+    ALTER COLUMN run_id SET NOT NULL,
+    ALTER COLUMN dataset SET NOT NULL,
+    ALTER COLUMN target_session SET NOT NULL,
+    ALTER COLUMN provider SET NOT NULL,
+    ALTER COLUMN source_endpoint SET NOT NULL,
+    ALTER COLUMN entitlement_class SET NOT NULL,
+    ALTER COLUMN delay_class SET NOT NULL,
+    ALTER COLUMN started_at SET NOT NULL,
+    ALTER COLUMN expected_symbol_count SET NOT NULL,
+    ALTER COLUMN received_symbol_count SET NOT NULL,
+    ALTER COLUMN expected_row_count SET NOT NULL,
+    ALTER COLUMN received_row_count SET NOT NULL,
+    ALTER COLUMN retry_count SET NOT NULL,
+    ALTER COLUMN status SET NOT NULL,
+    ALTER COLUMN parser_version SET NOT NULL,
+    ALTER COLUMN schema_version SET NOT NULL,
+    ALTER COLUMN quality_gate SET NOT NULL,
     ALTER COLUMN provenance SET DEFAULT '{}'::jsonb,
     ALTER COLUMN provenance SET NOT NULL,
     ALTER COLUMN created_at SET DEFAULT now(),
     ALTER COLUMN created_at SET NOT NULL,
     ALTER COLUMN updated_at SET DEFAULT now(),
     ALTER COLUMN updated_at SET NOT NULL;
+
+ALTER TABLE ingestion_run_manifests
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_raw_payload_sha256_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_immutable_object_ref_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_payload_identity_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_chronology_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_contract_check;
+ALTER TABLE ingestion_run_manifests
+    ADD CONSTRAINT ingestion_run_manifests_payload_identity_check CHECK (
+        (raw_payload_sha256 IS NULL) <> (immutable_object_ref IS NULL)
+        AND (raw_payload_sha256 IS NULL OR raw_payload_sha256 ~ '^[0-9a-f]{64}$')
+        AND (
+            immutable_object_ref IS NULL
+            OR (immutable_object_ref <> '' AND immutable_object_ref = btrim(immutable_object_ref))
+        )
+    ),
+    ADD CONSTRAINT ingestion_run_manifests_chronology_check CHECK (
+        completed_at IS NULL OR completed_at >= started_at
+    ),
+    ADD CONSTRAINT ingestion_run_manifests_contract_check CHECK (
+        dataset <> '' AND dataset = btrim(dataset)
+        AND provider <> '' AND provider = btrim(provider)
+        AND source_endpoint <> '' AND source_endpoint = btrim(source_endpoint)
+        AND entitlement_class <> '' AND entitlement_class = btrim(entitlement_class)
+        AND delay_class <> '' AND delay_class = btrim(delay_class)
+        AND parser_version <> '' AND parser_version = btrim(parser_version)
+        AND schema_version <> '' AND schema_version = btrim(schema_version)
+        AND expected_symbol_count >= 0 AND received_symbol_count >= 0
+        AND expected_row_count >= 0 AND received_row_count >= 0
+        AND retry_count >= 0
+        AND status IN ('started', 'completed', 'data_incomplete', 'failed')
+        AND quality_gate IN ('not_run', 'passed', 'failed')
+        AND (status <> 'completed' OR completed_at IS NOT NULL)
+        AND jsonb_typeof(provenance) = 'object'
+        AND updated_at >= created_at
+    );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ingestion_run_manifests_identity_canonical_key'
+          AND conrelid = 'ingestion_run_manifests'::regclass
+    ) THEN
+        ALTER TABLE ingestion_run_manifests
+            ADD CONSTRAINT ingestion_run_manifests_identity_canonical_key
+            UNIQUE (run_id, dataset, provider, source_endpoint);
+    END IF;
+END
+$$;
 
 UPDATE setup_gate_evaluations
 SET terminal_reason = CASE
@@ -1336,6 +1560,27 @@ ALTER TABLE setup_gate_evaluations
     ALTER COLUMN updated_at SET NOT NULL;
 ALTER TABLE setup_gate_evaluations
     DROP CONSTRAINT IF EXISTS setup_gate_evaluations_reason_codes_check;
+
+CREATE OR REPLACE FUNCTION wolfy_validate_ingestion_manifest()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    parent_session DATE;
+BEGIN
+    SELECT target_session INTO parent_session
+    FROM daily_evaluation_runs
+    WHERE id = NEW.run_id;
+
+    IF parent_session IS NULL OR NEW.target_session IS DISTINCT FROM parent_session THEN
+        RAISE EXCEPTION 'ingestion manifest target_session must match parent run';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_validate_ingestion_manifest ON ingestion_run_manifests;
+CREATE TRIGGER trg_validate_ingestion_manifest
+    BEFORE INSERT OR UPDATE ON ingestion_run_manifests
+    FOR EACH ROW EXECUTE FUNCTION wolfy_validate_ingestion_manifest();
 
 CREATE OR REPLACE FUNCTION wolfy_reject_published_ledger_change()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -1471,6 +1716,25 @@ BEGIN
         END IF;
         -- Preserve a truly idempotent no-op without changing updated_at.
         RETURN OLD;
+    END IF;
+    IF cardinality(NEW.required_stage_names) = 0
+       OR EXISTS (
+           SELECT 1 FROM unnest(NEW.required_stage_names) AS stage(value)
+           WHERE stage.value IS NULL
+              OR btrim(stage.value) = ''
+              OR stage.value <> btrim(stage.value)
+       )
+       OR NEW.required_stage_names IS DISTINCT FROM (
+           SELECT array_agg(stage.value ORDER BY stage.value)
+           FROM unnest(NEW.required_stage_names) AS stage(value)
+       )
+       OR cardinality(NEW.required_stage_names) <> (
+           SELECT count(DISTINCT stage.value)
+           FROM unnest(NEW.required_stage_names) AS stage(value)
+       )
+       OR jsonb_typeof(NEW.derived_stage_metadata) IS DISTINCT FROM 'object'
+    THEN
+        RAISE EXCEPTION 'noncanonical daily evaluation run stages or metadata';
     END IF;
     IF TG_OP = 'UPDATE' AND NEW.status <> OLD.status THEN
         IF NOT (

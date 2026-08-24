@@ -584,7 +584,6 @@ def test_database_rejects_noncanonical_manifest_payload_identity(raw_hash, objec
 @pytest.mark.parametrize(
     "manifest_overrides",
     [
-        {"target_session": date(2099, 3, 1)},
         {"received_symbol_count": 99},
         {"received_row_count": 99},
         {"quality_gate": "failed"},
@@ -611,6 +610,19 @@ def test_published_rejects_manifest_that_is_not_complete_for_target_session(
         transition_daily_run(conn, run.run_id, "evaluated")
         with pytest.raises(LedgerValidationError, match="manifest"):
             transition_daily_run(conn, run.run_id, "published")
+
+
+def test_database_rejects_manifest_target_session_that_differs_from_parent_run():
+    from daily_evaluation_ledger import upsert_ingestion_manifest
+
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id="manifest-session-guard")
+        with pytest.raises(Exception, match="target_session must match parent run"):
+            upsert_ingestion_manifest(
+                conn,
+                run.run_id,
+                _manifest(target_session=date(2099, 3, 1)),
+            )
 
 
 @pytest.mark.parametrize(
@@ -1040,7 +1052,12 @@ def _task3_schema_sql() -> str:
 
 
 def _create_partial_task3_schema(
-    conn, schema_name: str, *, gate_overrides: dict[str, object] | None = None
+    conn,
+    schema_name: str,
+    *,
+    gate_overrides: dict[str, object] | None = None,
+    run_overrides: dict[str, object] | None = None,
+    manifest_overrides: dict[str, object] | None = None,
 ):
     from psycopg import sql
     from psycopg.types.json import Jsonb
@@ -1087,6 +1104,23 @@ def _create_partial_task3_schema(
         "INSERT INTO daily_evaluation_runs(id,run_identity,target_session,evaluator_name,evaluator_version,universe_snapshot_id) VALUES (%s,%s,'2099-03-02','legacy','1','legacy-universe')",
         (run_id, run_id.hex),
     )
+    if run_overrides:
+        if "required_stage_names" in run_overrides:
+            conn.execute("ALTER TABLE daily_evaluation_runs ADD COLUMN required_stage_names TEXT[]")
+        if "derived_stage_metadata" in run_overrides:
+            conn.execute("ALTER TABLE daily_evaluation_runs ADD COLUMN derived_stage_metadata JSONB")
+        assignments = []
+        values = []
+        for column, value in run_overrides.items():
+            assignments.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
+            values.append(Jsonb(value) if column == "derived_stage_metadata" else value)
+        values.append(run_id)
+        conn.execute(
+            sql.SQL("UPDATE daily_evaluation_runs SET {} WHERE id = %s").format(
+                sql.SQL(", ").join(assignments)
+            ),
+            values,
+        )
     conn.execute(
         """
         INSERT INTO ingestion_run_manifests(
@@ -1099,6 +1133,33 @@ def _create_partial_task3_schema(
         """,
         (run_id, _now(), _now(), "a" * 64),
     )
+    if manifest_overrides:
+        if "immutable_object_ref" in manifest_overrides:
+            conn.execute(
+                "ALTER TABLE ingestion_run_manifests ADD COLUMN immutable_object_ref TEXT"
+            )
+        if "provenance" in manifest_overrides:
+            conn.execute("ALTER TABLE ingestion_run_manifests ADD COLUMN provenance JSONB")
+        if "created_at" in manifest_overrides:
+            conn.execute(
+                "ALTER TABLE ingestion_run_manifests ADD COLUMN created_at TIMESTAMPTZ"
+            )
+        if "updated_at" in manifest_overrides:
+            conn.execute(
+                "ALTER TABLE ingestion_run_manifests ADD COLUMN updated_at TIMESTAMPTZ"
+            )
+        assignments = []
+        values = []
+        for column, value in manifest_overrides.items():
+            assignments.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
+            values.append(Jsonb(value) if column == "provenance" else value)
+        values.append(run_id)
+        conn.execute(
+            sql.SQL("UPDATE ingestion_run_manifests SET {} WHERE run_id = %s").format(
+                sql.SQL(", ").join(assignments)
+            ),
+            values,
+        )
     gate = {
         "ticker": "ZZLEGACY",
         "strategy": "legacy",
@@ -1140,6 +1201,126 @@ def _create_partial_task3_schema(
     return run_id
 
 
+def _partial_task3_snapshot(conn):
+    columns = conn.execute(
+        "SELECT table_name,column_name,data_type,is_nullable,column_default "
+        "FROM information_schema.columns WHERE table_schema=current_schema() "
+        "AND table_name IN ('daily_evaluation_runs','ingestion_run_manifests') "
+        "ORDER BY table_name,ordinal_position"
+    ).fetchall()
+    constraints = conn.execute(
+        "SELECT c.relname,con.conname,pg_get_constraintdef(con.oid) "
+        "FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid "
+        "JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE n.nspname=current_schema() AND c.relname IN "
+        "('daily_evaluation_runs','ingestion_run_manifests') "
+        "ORDER BY c.relname,con.conname"
+    ).fetchall()
+    runs = conn.execute(
+        "SELECT to_jsonb(r) FROM daily_evaluation_runs r ORDER BY id"
+    ).fetchall()
+    manifests = conn.execute(
+        "SELECT to_jsonb(m) FROM ingestion_run_manifests m ORDER BY id"
+    ).fetchall()
+    return columns, constraints, runs, manifests
+
+
+@pytest.mark.parametrize(
+    "run_overrides",
+    [
+        {"status": "complete"},
+        {"run_identity": " legacy "},
+        {"evaluator_name": ""},
+        {"evaluator_version": " 1"},
+        {"universe_snapshot_id": "   "},
+        {"required_stage_names": []},
+        {"required_stage_names": ["features", "features"]},
+        {"required_stage_names": [" features"]},
+        {"required_stage_names": ["ranking", "features"]},
+        {"required_stage_names": [None]},
+        {"derived_stage_metadata": []},
+        {"updated_at": datetime(2000, 1, 1, tzinfo=UTC)},
+    ],
+)
+def test_task3_schema_rejects_noncanonical_populated_partial_run_atomically(
+    run_overrides,
+):
+    import psycopg
+    from psycopg import sql
+
+    with psycopg.connect(resolve_test_dsn(), autocommit=True) as conn:
+        schema_name = f"task3_bad_run_{uuid.uuid4().hex}"
+        try:
+            _create_partial_task3_schema(conn, schema_name, run_overrides=run_overrides)
+            before = _partial_task3_snapshot(conn)
+            with pytest.raises(Exception, match="cannot migrate legacy daily_evaluation_runs"):
+                conn.execute(_task3_schema_sql())
+            conn.rollback()
+            assert _partial_task3_snapshot(conn) == before
+        finally:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema_name)
+                )
+            )
+
+
+@pytest.mark.parametrize(
+    "manifest_overrides",
+    [
+        {"dataset": ""},
+        {"provider": " provider "},
+        {"source_endpoint": "   "},
+        {"entitlement_class": " free"},
+        {"delay_class": "t1 "},
+        {"parser_version": ""},
+        {"schema_version": " 1 "},
+        {"target_session": date(2099, 3, 1)},
+        {"expected_symbol_count": -1},
+        {"received_symbol_count": -1},
+        {"expected_row_count": -1},
+        {"received_row_count": -1},
+        {"retry_count": -1},
+        {"status": "complete"},
+        {"quality_gate": "ok"},
+        {"completed_at": None},
+        {"completed_at": _now() - timedelta(seconds=1)},
+        {"provenance": []},
+        {"raw_payload_sha256": "A" * 64},
+        {"raw_payload_sha256": None},
+        {"immutable_object_ref": "   ", "raw_payload_sha256": None},
+        {"immutable_object_ref": " s3://bucket/key ", "raw_payload_sha256": None},
+        {"immutable_object_ref": "s3://bucket/key"},
+        {"created_at": _now(), "updated_at": _now() - timedelta(seconds=1)},
+    ],
+)
+def test_task3_schema_rejects_noncanonical_populated_partial_manifest_atomically(
+    manifest_overrides,
+):
+    import psycopg
+    from psycopg import sql
+
+    with psycopg.connect(resolve_test_dsn(), autocommit=True) as conn:
+        schema_name = f"task3_bad_manifest_{uuid.uuid4().hex}"
+        try:
+            _create_partial_task3_schema(
+                conn, schema_name, manifest_overrides=manifest_overrides
+            )
+            before = _partial_task3_snapshot(conn)
+            with pytest.raises(
+                Exception, match="cannot migrate legacy ingestion_run_manifests"
+            ):
+                conn.execute(_task3_schema_sql())
+            conn.rollback()
+            assert _partial_task3_snapshot(conn) == before
+        finally:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema_name)
+                )
+            )
+
+
 def test_task3_schema_migrates_populated_partial_schema_twice_without_data_loss():
     import psycopg
     from psycopg import sql
@@ -1165,9 +1346,118 @@ def test_task3_schema_migrates_populated_partial_schema_twice_without_data_loss(
             assert gate == ("trend_failed", ["trend_failed"], {}, "legacy-fingerprint")
             assert manifest == (None, {})
             assert daily == (["features"], {})
+            canonical_constraints = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT conname FROM pg_constraint WHERE conrelid IN "
+                    "('daily_evaluation_runs'::regclass,'ingestion_run_manifests'::regclass)"
+                ).fetchall()
+            }
+            assert {
+                "daily_evaluation_runs_status_check",
+                "daily_evaluation_runs_identity_contract_check",
+                "daily_evaluation_runs_stage_metadata_check",
+                "daily_evaluation_runs_chronology_check",
+                "daily_evaluation_runs_run_identity_canonical_key",
+                "daily_evaluation_runs_identity_tuple_canonical_key",
+                "ingestion_run_manifests_payload_identity_check",
+                "ingestion_run_manifests_chronology_check",
+                "ingestion_run_manifests_contract_check",
+                "ingestion_run_manifests_identity_canonical_key",
+            } <= canonical_constraints
             assert conn.execute("SELECT count(*) FROM setup_gate_evaluations").fetchone() == (
                 1,
             )
+        finally:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema_name)
+                )
+            )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "status='complete'",
+        "run_identity=' legacy '",
+        "evaluator_name=''",
+        "evaluator_version=' 1'",
+        "universe_snapshot_id='   '",
+        "required_stage_names=ARRAY[]::text[]",
+        "required_stage_names=ARRAY['features','features']",
+        "required_stage_names=ARRAY[' features']",
+        "required_stage_names=ARRAY['ranking','features']",
+        "required_stage_names=ARRAY[NULL]::text[]",
+        "derived_stage_metadata='[]'::jsonb",
+        "created_at=updated_at + interval '1 second'",
+    ],
+)
+def test_task3_upgraded_partial_run_rejects_future_direct_sql_bypasses(mutation):
+    import psycopg
+    from psycopg import sql
+
+    with psycopg.connect(resolve_test_dsn(), autocommit=True) as conn:
+        schema_name = f"task3_run_guard_{uuid.uuid4().hex}"
+        try:
+            run_id = _create_partial_task3_schema(conn, schema_name)
+            conn.execute(_task3_schema_sql())
+            with pytest.raises(Exception), conn.transaction():
+                conn.execute(
+                    f"UPDATE daily_evaluation_runs SET {mutation} WHERE id=%s",
+                    (run_id,),
+                )
+        finally:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema_name)
+                )
+            )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "dataset=''",
+        "provider=' provider '",
+        "source_endpoint='   '",
+        "entitlement_class=' free'",
+        "delay_class='t1 '",
+        "parser_version=''",
+        "schema_version=' 1 '",
+        "target_session=DATE '2099-03-01'",
+        "expected_symbol_count=-1",
+        "received_symbol_count=-1",
+        "expected_row_count=-1",
+        "received_row_count=-1",
+        "retry_count=-1",
+        "status='complete'",
+        "quality_gate='ok'",
+        "completed_at=NULL",
+        "completed_at=started_at - interval '1 second'",
+        "provenance='[]'::jsonb",
+        "raw_payload_sha256=repeat('A',64)",
+        "raw_payload_sha256=NULL",
+        "immutable_object_ref='s3://bucket/key'",
+        "raw_payload_sha256=NULL,immutable_object_ref='   '",
+        "raw_payload_sha256=NULL,immutable_object_ref=' s3://bucket/key '",
+        "created_at=updated_at + interval '1 second'",
+    ],
+)
+def test_task3_upgraded_partial_manifest_rejects_future_direct_sql_bypasses(mutation):
+    import psycopg
+    from psycopg import sql
+
+    with psycopg.connect(resolve_test_dsn(), autocommit=True) as conn:
+        schema_name = f"task3_manifest_guard_{uuid.uuid4().hex}"
+        try:
+            run_id = _create_partial_task3_schema(conn, schema_name)
+            conn.execute(_task3_schema_sql())
+            with pytest.raises(Exception), conn.transaction():
+                conn.execute(
+                    f"UPDATE ingestion_run_manifests SET {mutation} WHERE run_id=%s",
+                    (run_id,),
+                )
         finally:
             conn.execute(
                 sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
