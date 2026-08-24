@@ -1018,13 +1018,38 @@ CREATE TABLE IF NOT EXISTS daily_evaluation_runs (
     UNIQUE (target_session, evaluator_name, evaluator_version, universe_snapshot_id)
 );
 
+ALTER TABLE daily_evaluation_runs
+    ADD COLUMN IF NOT EXISTS required_stage_names TEXT[];
+ALTER TABLE daily_evaluation_runs
+    ADD COLUMN IF NOT EXISTS derived_stage_metadata JSONB;
+ALTER TABLE daily_evaluation_runs
+    ADD COLUMN IF NOT EXISTS status TEXT;
+ALTER TABLE daily_evaluation_runs
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+ALTER TABLE daily_evaluation_runs
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+UPDATE daily_evaluation_runs
+SET required_stage_names = COALESCE(required_stage_names, ARRAY['features']::TEXT[]),
+    derived_stage_metadata = COALESCE(derived_stage_metadata, '{}'::jsonb),
+    status = COALESCE(status, 'started'),
+    created_at = COALESCE(created_at, now()),
+    updated_at = COALESCE(updated_at, now())
+WHERE required_stage_names IS NULL OR derived_stage_metadata IS NULL
+   OR status IS NULL OR created_at IS NULL OR updated_at IS NULL;
+ALTER TABLE daily_evaluation_runs
+    ALTER COLUMN required_stage_names SET DEFAULT ARRAY['features']::TEXT[],
+    ALTER COLUMN required_stage_names SET NOT NULL,
+    ALTER COLUMN derived_stage_metadata SET DEFAULT '{}'::jsonb,
+    ALTER COLUMN derived_stage_metadata SET NOT NULL,
+    ALTER COLUMN status SET DEFAULT 'started',
+    ALTER COLUMN status SET NOT NULL,
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL,
+    ALTER COLUMN updated_at SET DEFAULT now(),
+    ALTER COLUMN updated_at SET NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_daily_evaluation_runs_session_status
     ON daily_evaluation_runs(target_session DESC, status);
-
-ALTER TABLE daily_evaluation_runs
-    ADD COLUMN IF NOT EXISTS required_stage_names TEXT[] NOT NULL DEFAULT ARRAY['features']::TEXT[];
-ALTER TABLE daily_evaluation_runs
-    ADD COLUMN IF NOT EXISTS derived_stage_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 DO $$
 BEGIN
@@ -1076,10 +1101,33 @@ CREATE TABLE IF NOT EXISTS ingestion_run_manifests (
 );
 
 ALTER TABLE ingestion_run_manifests
+    ADD COLUMN IF NOT EXISTS immutable_object_ref TEXT;
+ALTER TABLE ingestion_run_manifests
+    ADD COLUMN IF NOT EXISTS provenance JSONB;
+ALTER TABLE ingestion_run_manifests
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+ALTER TABLE ingestion_run_manifests
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+UPDATE ingestion_run_manifests
+SET provenance = COALESCE(provenance, '{}'::jsonb),
+    created_at = COALESCE(created_at, now()),
+    updated_at = COALESCE(updated_at, now())
+WHERE provenance IS NULL OR created_at IS NULL OR updated_at IS NULL;
+ALTER TABLE ingestion_run_manifests
+    ALTER COLUMN provenance SET DEFAULT '{}'::jsonb,
+    ALTER COLUMN provenance SET NOT NULL,
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL,
+    ALTER COLUMN updated_at SET DEFAULT now(),
+    ALTER COLUMN updated_at SET NOT NULL;
+
+ALTER TABLE ingestion_run_manifests
     DROP CONSTRAINT IF EXISTS ingestion_run_manifests_check,
     DROP CONSTRAINT IF EXISTS ingestion_run_manifests_raw_payload_sha256_check,
     DROP CONSTRAINT IF EXISTS ingestion_run_manifests_immutable_object_ref_check,
-    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_payload_identity_check;
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_payload_identity_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_chronology_check,
+    DROP CONSTRAINT IF EXISTS ingestion_run_manifests_contract_check;
 ALTER TABLE ingestion_run_manifests
     ADD CONSTRAINT ingestion_run_manifests_payload_identity_check CHECK (
         (raw_payload_sha256 IS NULL) <> (immutable_object_ref IS NULL)
@@ -1088,6 +1136,9 @@ ALTER TABLE ingestion_run_manifests
             immutable_object_ref IS NULL
             OR (immutable_object_ref <> '' AND immutable_object_ref = btrim(immutable_object_ref))
         )
+    ),
+    ADD CONSTRAINT ingestion_run_manifests_chronology_check CHECK (
+        completed_at IS NULL OR completed_at >= started_at
     );
 
 CREATE INDEX IF NOT EXISTS idx_ingestion_run_manifests_run_status
@@ -1124,12 +1175,88 @@ ALTER TABLE setup_gate_evaluations
 ALTER TABLE setup_gate_evaluations
     ADD COLUMN IF NOT EXISTS source_fingerprint TEXT;
 ALTER TABLE setup_gate_evaluations
+    ADD COLUMN IF NOT EXISTS metrics JSONB;
+ALTER TABLE setup_gate_evaluations
+    ADD COLUMN IF NOT EXISTS provenance JSONB;
+ALTER TABLE setup_gate_evaluations
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+ALTER TABLE setup_gate_evaluations
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+
+UPDATE setup_gate_evaluations
+SET terminal_reason = CASE
+        WHEN terminal_reason IS NOT NULL THEN terminal_reason
+        WHEN passed AND reason_codes = ARRAY['passed']::TEXT[] THEN 'passed'
+        WHEN NOT passed AND cardinality(reason_codes) = 1 THEN reason_codes[1]
+        ELSE NULL
+    END,
+    failed_gates = COALESCE(
+        failed_gates,
+        CASE WHEN passed THEN '[]'::jsonb ELSE to_jsonb(reason_codes) END
+    ),
+    metrics = COALESCE(metrics, '{}'::jsonb),
+    provenance = COALESCE(provenance, '{}'::jsonb),
+    created_at = COALESCE(created_at, now()),
+    updated_at = COALESCE(updated_at, now())
+WHERE terminal_reason IS NULL OR failed_gates IS NULL OR metrics IS NULL
+   OR provenance IS NULL OR created_at IS NULL OR updated_at IS NULL;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM setup_gate_evaluations
+        WHERE terminal_reason IS NULL
+           OR failed_gates IS NULL
+           OR gate_facts IS NULL
+           OR source_fingerprint IS NULL
+    ) THEN
+        RAISE EXCEPTION 'cannot migrate legacy setup_gate_evaluations: canonical terminal reason, failed gates, gate facts, or source fingerprint is unavailable';
+    END IF;
+END
+$$;
+
+ALTER TABLE setup_gate_evaluations
     ALTER COLUMN terminal_reason SET NOT NULL,
     ALTER COLUMN failed_gates SET NOT NULL,
     ALTER COLUMN gate_facts SET NOT NULL,
-    ALTER COLUMN source_fingerprint SET NOT NULL;
+    ALTER COLUMN source_fingerprint SET NOT NULL,
+    ALTER COLUMN metrics SET DEFAULT '{}'::jsonb,
+    ALTER COLUMN metrics SET NOT NULL,
+    ALTER COLUMN provenance SET DEFAULT '{}'::jsonb,
+    ALTER COLUMN provenance SET NOT NULL,
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN created_at SET NOT NULL,
+    ALTER COLUMN updated_at SET DEFAULT now(),
+    ALTER COLUMN updated_at SET NOT NULL;
 ALTER TABLE setup_gate_evaluations
     DROP CONSTRAINT IF EXISTS setup_gate_evaluations_reason_codes_check;
+
+CREATE OR REPLACE FUNCTION wolfy_reject_published_ledger_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    parent_run_id UUID := CASE WHEN TG_OP = 'DELETE' THEN OLD.run_id ELSE NEW.run_id END;
+    parent_status TEXT;
+BEGIN
+    SELECT status INTO parent_status
+    FROM daily_evaluation_runs
+    WHERE id = parent_run_id
+    FOR UPDATE;
+    IF parent_status = 'published' THEN
+        RAISE EXCEPTION 'published daily evaluation run is immutable';
+    END IF;
+    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_immutable_published_manifest ON ingestion_run_manifests;
+CREATE TRIGGER trg_immutable_published_manifest
+    BEFORE INSERT OR UPDATE OR DELETE ON ingestion_run_manifests
+    FOR EACH ROW EXECUTE FUNCTION wolfy_reject_published_ledger_change();
+
+DROP TRIGGER IF EXISTS trg_immutable_published_gate ON setup_gate_evaluations;
+CREATE TRIGGER trg_immutable_published_gate
+    BEFORE INSERT OR UPDATE OR DELETE ON setup_gate_evaluations
+    FOR EACH ROW EXECUTE FUNCTION wolfy_reject_published_ledger_change();
 
 CREATE OR REPLACE FUNCTION wolfy_validate_setup_gate_evaluation()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -1210,6 +1337,12 @@ DECLARE
     source_distinct INTEGER;
     source_bad INTEGER;
 BEGIN
+    IF TG_OP = 'UPDATE'
+       AND OLD.status = 'published'
+       AND NEW.derived_stage_metadata IS DISTINCT FROM OLD.derived_stage_metadata
+    THEN
+        RAISE EXCEPTION 'published daily evaluation run derived metadata is immutable';
+    END IF;
     IF TG_OP = 'UPDATE' AND NEW.status <> OLD.status THEN
         IF NOT (
             (OLD.status = 'started' AND NEW.status IN ('data_incomplete', 'evaluated', 'failed'))

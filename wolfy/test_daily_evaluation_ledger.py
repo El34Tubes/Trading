@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import threading
+import time
+import uuid
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
-from test_db import test_connection
+from test_db import resolve_test_dsn, test_connection
 
 UTC = timezone.utc
 
@@ -381,6 +385,23 @@ def _derived(**overrides):
     return DerivedStageMetadata(**values)
 
 
+def _make_publishable(conn, run_id, *, universe_snapshot_id="publish-ready"):
+    from daily_evaluation_ledger import (
+        record_derived_stage_metadata,
+        transition_daily_run,
+        upsert_ingestion_manifest,
+    )
+
+    upsert_ingestion_manifest(conn, run_id, _manifest())
+    record_derived_stage_metadata(
+        conn,
+        run_id,
+        _derived(universe_snapshot_id=universe_snapshot_id),
+    )
+    transition_daily_run(conn, run_id, "evaluated")
+    transition_daily_run(conn, run_id, "published")
+
+
 def test_derived_stage_metadata_persists_required_audit_fields_idempotently():
     from daily_evaluation_ledger import record_derived_stage_metadata
 
@@ -635,3 +656,351 @@ def test_database_publish_trigger_revalidates_canonical_stage_metadata(metadata_
                 "UPDATE daily_evaluation_runs SET status='published' WHERE id=%s",
                 (run.run_id,),
             )
+
+
+@pytest.mark.parametrize(
+    ("kind", "field"),
+    [
+        ("run", "target_session"),
+        ("manifest", "target_session"),
+        ("derived", "input_session"),
+    ],
+)
+def test_date_only_fields_reject_datetime_without_touching_transaction(kind, field):
+    from daily_evaluation_ledger import (
+        DailyRunIdentity,
+        LedgerValidationError,
+        create_daily_run,
+        record_derived_stage_metadata,
+        upsert_ingestion_manifest,
+    )
+
+    with test_connection() as conn:
+        universe = f"date-only-{kind}"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        value = datetime(2099, 3, 2, tzinfo=UTC)
+        with pytest.raises(LedgerValidationError, match="must be a date"):
+            if kind == "run":
+                create_daily_run(
+                    conn,
+                    DailyRunIdentity(
+                        target_session=value,
+                        evaluator_name="daily-multi-setup",
+                        evaluator_version="1.0.0",
+                        universe_snapshot_id="datetime-run",
+                    ),
+                )
+            elif kind == "manifest":
+                upsert_ingestion_manifest(conn, run.run_id, _manifest(**{field: value}))
+            else:
+                record_derived_stage_metadata(
+                    conn,
+                    run.run_id,
+                    _derived(universe_snapshot_id=universe, **{field: value}),
+                )
+        assert conn.execute("SELECT 1").fetchone() == (1,)
+
+
+@pytest.mark.parametrize(
+    ("writer", "field"),
+    [
+        ("manifest", "provenance"),
+        ("gate", "metrics"),
+        ("gate", "gate_facts"),
+        ("gate", "provenance"),
+        ("derived", "provenance"),
+    ],
+)
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_json_mappings_reject_nonfinite_values_before_db(writer, field, invalid):
+    from daily_evaluation_ledger import (
+        LedgerValidationError,
+        record_derived_stage_metadata,
+        upsert_gate_evaluation,
+        upsert_ingestion_manifest,
+    )
+
+    with test_connection() as conn:
+        universe = f"json-{writer}-{field}-{invalid}"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        payload = {"outer": [{"invalid": invalid}]}
+        with pytest.raises(LedgerValidationError, match=field):
+            if writer == "manifest":
+                upsert_ingestion_manifest(conn, run.run_id, _manifest(**{field: payload}))
+            elif writer == "gate":
+                upsert_gate_evaluation(conn, run.run_id, _gate(**{field: payload}))
+            else:
+                record_derived_stage_metadata(
+                    conn,
+                    run.run_id,
+                    _derived(universe_snapshot_id=universe, **{field: payload}),
+                )
+        assert conn.execute("SELECT 1").fetchone() == (1,)
+
+
+def test_manifest_rejects_completion_before_start_without_touching_transaction():
+    from daily_evaluation_ledger import LedgerValidationError, upsert_ingestion_manifest
+
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id="manifest-chronology")
+        with pytest.raises(LedgerValidationError, match="completed_at"):
+            upsert_ingestion_manifest(
+                conn, run.run_id, _manifest(completed_at=_now() - timedelta(seconds=1))
+            )
+        assert conn.execute("SELECT 1").fetchone() == (1,)
+
+
+def test_database_rejects_manifest_completion_before_start():
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id="direct-manifest-chronology")
+        with pytest.raises(Exception), conn.transaction():
+            conn.execute(
+                """
+                INSERT INTO ingestion_run_manifests(
+                    run_id,dataset,target_session,provider,source_endpoint,
+                    entitlement_class,delay_class,started_at,completed_at,
+                    expected_symbol_count,received_symbol_count,expected_row_count,
+                    received_row_count,retry_count,status,raw_payload_sha256,
+                    parser_version,schema_version,quality_gate,provenance
+                ) VALUES (%s,'prices','2099-03-02','provider','endpoint','free','t1',
+                          %s,%s,1,1,1,1,0,'completed',%s,'1','1','passed','{}')
+                """,
+                (run.run_id, _now(), _now() - timedelta(seconds=1), "f" * 64),
+            )
+
+
+@pytest.mark.parametrize("writer", ["manifest", "gate", "derived"])
+def test_python_writers_reject_changes_after_publication(writer):
+    from daily_evaluation_ledger import (
+        LedgerValidationError,
+        record_derived_stage_metadata,
+        upsert_gate_evaluation,
+        upsert_ingestion_manifest,
+    )
+
+    with test_connection() as conn:
+        universe = f"published-python-{writer}"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        _make_publishable(conn, run.run_id, universe_snapshot_id=universe)
+        with pytest.raises(LedgerValidationError, match="published"):
+            if writer == "manifest":
+                upsert_ingestion_manifest(conn, run.run_id, _manifest(retry_count=2))
+            elif writer == "gate":
+                upsert_gate_evaluation(conn, run.run_id, _gate())
+            else:
+                record_derived_stage_metadata(
+                    conn, run.run_id, _derived(universe_snapshot_id=universe)
+                )
+
+
+@pytest.mark.parametrize(
+    "table",
+    ["ingestion_run_manifests", "setup_gate_evaluations"],
+)
+@pytest.mark.parametrize("operation", ["insert", "update", "delete"])
+def test_database_rejects_child_ledger_changes_after_publication(table, operation):
+    from daily_evaluation_ledger import upsert_gate_evaluation
+
+    with test_connection() as conn:
+        universe = f"published-sql-{table}-{operation}"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        gate_id = upsert_gate_evaluation(conn, run.run_id, _gate())
+        _make_publishable(conn, run.run_id, universe_snapshot_id=universe)
+        manifest_id = conn.execute(
+            "SELECT id FROM ingestion_run_manifests WHERE run_id=%s", (run.run_id,)
+        ).fetchone()[0]
+        if table == "ingestion_run_manifests":
+            statements = {
+                "insert": (
+                    "INSERT INTO ingestion_run_manifests(run_id,dataset,target_session,provider,source_endpoint,entitlement_class,delay_class,started_at,completed_at,expected_symbol_count,received_symbol_count,expected_row_count,received_row_count,retry_count,status,raw_payload_sha256,parser_version,schema_version,quality_gate,provenance) SELECT run_id,dataset,target_session,provider,source_endpoint || '-new',entitlement_class,delay_class,started_at,completed_at,expected_symbol_count,received_symbol_count,expected_row_count,received_row_count,retry_count,status,raw_payload_sha256,parser_version,schema_version,quality_gate,provenance FROM ingestion_run_manifests WHERE id=%s",
+                    (manifest_id,),
+                ),
+                "update": ("UPDATE ingestion_run_manifests SET retry_count=retry_count+1 WHERE id=%s", (manifest_id,)),
+                "delete": ("DELETE FROM ingestion_run_manifests WHERE id=%s", (manifest_id,)),
+            }
+        else:
+            statements = {
+                "insert": (
+                    "INSERT INTO setup_gate_evaluations(run_id,ticker,strategy,passed,reason_code_version,reason_codes,terminal_reason,failed_gates,gate_facts,source_fingerprint,evaluated_at,metrics,provenance) VALUES (%s,'ZZNEW','strategy',false,1,ARRAY['trend_failed'],'trend_failed','[\"trend_failed\"]','{}','fingerprint',%s,'{}','{}')",
+                    (run.run_id, _now()),
+                ),
+                "update": ("UPDATE setup_gate_evaluations SET evaluated_at=evaluated_at + interval '1 second' WHERE id=%s", (gate_id,)),
+                "delete": ("DELETE FROM setup_gate_evaluations WHERE id=%s", (gate_id,)),
+            }
+        sql, params = statements[operation]
+        with pytest.raises(Exception, match="published"), conn.transaction():
+            conn.execute(sql, params)
+
+
+def test_database_rejects_derived_metadata_change_after_publication():
+    with test_connection() as conn:
+        universe = "published-sql-derived"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        _make_publishable(conn, run.run_id, universe_snapshot_id=universe)
+        with pytest.raises(Exception, match="published"), conn.transaction():
+            conn.execute(
+                "UPDATE daily_evaluation_runs SET derived_stage_metadata=jsonb_set(derived_stage_metadata,'{features,transformation_version}','\"changed\"') WHERE id=%s",
+                (run.run_id,),
+            )
+
+
+def test_writer_waiting_behind_publication_observes_published_and_fails_closed():
+    import psycopg
+
+    from daily_evaluation_ledger import (
+        LedgerValidationError,
+        record_derived_stage_metadata,
+        transition_daily_run,
+        upsert_ingestion_manifest,
+    )
+
+    dsn = resolve_test_dsn()
+    setup = psycopg.connect(dsn, autocommit=True)
+    publisher = psycopg.connect(dsn)
+    writer = psycopg.connect(dsn)
+    run = None
+    try:
+        universe = f"publication-race-{uuid.uuid4().hex}"
+        run = _create_run(setup, universe_snapshot_id=universe)
+        upsert_ingestion_manifest(setup, run.run_id, _manifest())
+        record_derived_stage_metadata(
+            setup, run.run_id, _derived(universe_snapshot_id=universe)
+        )
+        transition_daily_run(setup, run.run_id, "evaluated")
+        publisher.execute(
+            "UPDATE daily_evaluation_runs SET status='published' WHERE id=%s",
+            (run.run_id,),
+        )
+        result = {}
+
+        def write_manifest():
+            try:
+                upsert_ingestion_manifest(writer, run.run_id, _manifest(retry_count=9))
+            except Exception as exc:  # asserted across the thread boundary
+                result["error"] = exc
+
+        thread = threading.Thread(target=write_manifest)
+        thread.start()
+        time.sleep(0.2)
+        assert thread.is_alive(), "writer must wait for the publisher's parent-row lock"
+        publisher.commit()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert isinstance(result.get("error"), LedgerValidationError)
+        assert "published" in str(result["error"])
+    finally:
+        publisher.rollback()
+        writer.rollback()
+        if run is not None:
+            setup.execute("DELETE FROM daily_evaluation_runs WHERE id=%s", (run.run_id,))
+        setup.close()
+        publisher.close()
+        writer.close()
+
+
+def _task3_schema_sql() -> str:
+    schema = (Path(__file__).resolve().parent / "postgres_init.sql").read_text()
+    return schema[schema.index("CREATE TABLE IF NOT EXISTS daily_evaluation_runs") :]
+
+
+def _create_partial_task3_schema(conn, schema_name: str, *, invalid_gate: bool = False):
+    from psycopg import sql
+
+    conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name)))
+    conn.execute(
+        sql.SQL("SET LOCAL search_path TO {}, public").format(sql.Identifier(schema_name))
+    )
+    conn.execute(
+        """
+        CREATE TABLE daily_evaluation_runs (
+            id UUID PRIMARY KEY, run_identity TEXT NOT NULL UNIQUE,
+            target_session DATE NOT NULL, evaluator_name TEXT NOT NULL,
+            evaluator_version TEXT NOT NULL, universe_snapshot_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'started', created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE(target_session,evaluator_name,evaluator_version,universe_snapshot_id)
+        );
+        CREATE TABLE ingestion_run_manifests (
+            id BIGSERIAL PRIMARY KEY, run_id UUID NOT NULL REFERENCES daily_evaluation_runs(id),
+            dataset TEXT NOT NULL, target_session DATE NOT NULL, provider TEXT NOT NULL,
+            source_endpoint TEXT NOT NULL, entitlement_class TEXT NOT NULL,
+            delay_class TEXT NOT NULL, started_at TIMESTAMPTZ NOT NULL,
+            completed_at TIMESTAMPTZ, expected_symbol_count INTEGER NOT NULL,
+            received_symbol_count INTEGER NOT NULL, expected_row_count BIGINT NOT NULL,
+            received_row_count BIGINT NOT NULL, retry_count INTEGER NOT NULL,
+            status TEXT NOT NULL, raw_payload_sha256 TEXT, parser_version TEXT NOT NULL,
+            schema_version TEXT NOT NULL, quality_gate TEXT NOT NULL
+        );
+        CREATE TABLE setup_gate_evaluations (
+            id BIGSERIAL PRIMARY KEY, run_id UUID NOT NULL REFERENCES daily_evaluation_runs(id),
+            ticker TEXT NOT NULL, strategy TEXT NOT NULL, passed BOOLEAN NOT NULL,
+            reason_code_version INTEGER NOT NULL, reason_codes TEXT[] NOT NULL,
+            terminal_reason TEXT, failed_gates JSONB, gate_facts JSONB,
+            source_fingerprint TEXT, evaluated_at TIMESTAMPTZ NOT NULL,
+            metrics JSONB NOT NULL DEFAULT '{}', provenance JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE(run_id,ticker,strategy)
+        )
+        """
+    )
+    run_id = uuid.uuid4()
+    conn.execute(
+        "INSERT INTO daily_evaluation_runs(id,run_identity,target_session,evaluator_name,evaluator_version,universe_snapshot_id) VALUES (%s,%s,'2099-03-02','legacy','1','legacy-universe')",
+        (run_id, run_id.hex),
+    )
+    conn.execute(
+        """
+        INSERT INTO ingestion_run_manifests(
+            run_id,dataset,target_session,provider,source_endpoint,entitlement_class,
+            delay_class,started_at,completed_at,expected_symbol_count,received_symbol_count,
+            expected_row_count,received_row_count,retry_count,status,raw_payload_sha256,
+            parser_version,schema_version,quality_gate
+        ) VALUES (%s,'prices','2099-03-02','provider','endpoint','free','t1',%s,%s,
+                  1,1,1,1,0,'completed',%s,'1','1','passed')
+        """,
+        (run_id, _now(), _now(), "a" * 64),
+    )
+    reasons = ["trend_failed", "volume_failed"] if invalid_gate else ["trend_failed"]
+    conn.execute(
+        """
+        INSERT INTO setup_gate_evaluations(
+            run_id,ticker,strategy,passed,reason_code_version,reason_codes,
+            gate_facts,source_fingerprint,evaluated_at
+        ) VALUES (%s,'ZZLEGACY','legacy',false,1,%s,'{}',%s,%s)
+        """,
+        (run_id, reasons, "legacy-fingerprint", _now()),
+    )
+    return run_id
+
+
+def test_task3_schema_migrates_populated_partial_schema_twice_without_data_loss():
+    with test_connection() as conn:
+        schema_name = f"task3_upgrade_{uuid.uuid4().hex}"
+        run_id = _create_partial_task3_schema(conn, schema_name)
+        conn.execute(_task3_schema_sql())
+        conn.execute(_task3_schema_sql())
+        gate = conn.execute(
+            "SELECT terminal_reason,failed_gates,gate_facts,source_fingerprint FROM setup_gate_evaluations WHERE run_id=%s",
+            (run_id,),
+        ).fetchone()
+        manifest = conn.execute(
+            "SELECT immutable_object_ref,provenance FROM ingestion_run_manifests WHERE run_id=%s",
+            (run_id,),
+        ).fetchone()
+        daily = conn.execute(
+            "SELECT required_stage_names,derived_stage_metadata FROM daily_evaluation_runs WHERE id=%s",
+            (run_id,),
+        ).fetchone()
+        assert gate == ("trend_failed", ["trend_failed"], {}, "legacy-fingerprint")
+        assert manifest == (None, {})
+        assert daily == (["features"], {})
+        assert conn.execute("SELECT count(*) FROM setup_gate_evaluations").fetchone() == (1,)
+
+
+def test_task3_schema_fails_closed_for_unmappable_legacy_gate_row():
+    with test_connection() as conn:
+        schema_name = f"task3_invalid_{uuid.uuid4().hex}"
+        _create_partial_task3_schema(conn, schema_name, invalid_gate=True)
+        with pytest.raises(Exception, match="cannot migrate legacy setup_gate_evaluations"):
+            with conn.transaction():
+                conn.execute(_task3_schema_sql())

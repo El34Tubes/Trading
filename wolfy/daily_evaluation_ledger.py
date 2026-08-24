@@ -145,6 +145,8 @@ def _identity_key(identity: DailyRunIdentity) -> str:
 
 def create_daily_run(conn, identity: DailyRunIdentity) -> DailyRun:
     """Create or return the uniquely identified daily run."""
+    if type(identity.target_session) is not date:
+        raise LedgerValidationError("target_session must be a date")
     if any(
         not isinstance(value, str) or not value
         for value in (
@@ -237,7 +239,9 @@ def _validate_json_mapping(value: object, field: str) -> None:
     if not isinstance(value, Mapping):
         raise LedgerValidationError(f"{field} must be a JSON object")
     try:
-        json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
+        json.dumps(
+            dict(value), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
     except (TypeError, ValueError) as exc:
         raise LedgerValidationError(f"{field} must contain JSON values") from exc
 
@@ -252,10 +256,10 @@ def _validate_manifest(manifest: IngestionManifest) -> None:
         "parser_version",
         "schema_version",
     ):
-        if not isinstance(getattr(manifest, field), str) or not getattr(
-            manifest, field
-        ):
-            raise LedgerValidationError(f"{field} must be a non-empty string")
+        if not _is_canonical_string(getattr(manifest, field)):
+            raise LedgerValidationError(f"{field} must be a non-empty canonical string")
+    if type(manifest.target_session) is not date:
+        raise LedgerValidationError("target_session must be a date")
     _require_utc(manifest.started_at, "started_at")
     _require_utc(manifest.completed_at, "completed_at")
     counts = (
@@ -275,6 +279,8 @@ def _validate_manifest(manifest: IngestionManifest) -> None:
         raise LedgerValidationError(f"unknown quality gate: {manifest.quality_gate!r}")
     if manifest.status == "completed" and manifest.completed_at is None:
         raise LedgerValidationError("completed manifest requires completed_at")
+    if manifest.completed_at is not None and manifest.completed_at < manifest.started_at:
+        raise LedgerValidationError("completed_at must not precede started_at")
     if (manifest.raw_payload_sha256 is None) == (manifest.immutable_object_ref is None):
         raise LedgerValidationError(
             "exactly one raw payload hash or immutable object ref is required"
@@ -292,6 +298,16 @@ def _validate_manifest(manifest: IngestionManifest) -> None:
     _validate_json_mapping(manifest.provenance, "provenance")
 
 
+def _lock_mutable_run(conn, run_id: uuid.UUID) -> None:
+    row = conn.execute(
+        "SELECT status FROM daily_evaluation_runs WHERE id=%s FOR UPDATE", (run_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"daily evaluation run not found: {run_id}")
+    if row[0] == "published":
+        raise LedgerValidationError("published daily evaluation run is immutable")
+
+
 def upsert_ingestion_manifest(
     conn, run_id: uuid.UUID, manifest: IngestionManifest
 ) -> int:
@@ -299,6 +315,7 @@ def upsert_ingestion_manifest(
     from psycopg.types.json import Jsonb
 
     _validate_manifest(manifest)
+    _lock_mutable_run(conn, run_id)
     row = conn.execute(
         """
         INSERT INTO ingestion_run_manifests(
@@ -397,6 +414,7 @@ def upsert_gate_evaluation(conn, run_id: uuid.UUID, evaluation: GateEvaluation) 
     from psycopg.types.json import Jsonb
 
     _validate_gate(evaluation)
+    _lock_mutable_run(conn, run_id)
     row = conn.execute(
         """
         INSERT INTO setup_gate_evaluations(
@@ -441,9 +459,7 @@ def _validate_derived_stage(metadata: DerivedStageMetadata) -> None:
     for field in ("stage_name", "transformation_version", "universe_snapshot_id"):
         if not _is_canonical_string(getattr(metadata, field)):
             raise LedgerValidationError(f"{field} must be a non-empty canonical string")
-    if not isinstance(metadata.input_session, date) or isinstance(
-        metadata.input_session, datetime
-    ):
+    if type(metadata.input_session) is not date:
         raise LedgerValidationError("input_session must be a date")
     if not isinstance(metadata.computed_at, datetime) or not isinstance(
         metadata.available_at, datetime
@@ -478,14 +494,16 @@ def record_derived_stage_metadata(
     _validate_derived_stage(metadata)
     run = conn.execute(
         """
-        SELECT target_session, universe_snapshot_id, required_stage_names
+        SELECT target_session, universe_snapshot_id, required_stage_names, status
         FROM daily_evaluation_runs WHERE id=%s FOR UPDATE
         """,
         (run_id,),
     ).fetchone()
     if run is None:
         raise LookupError(f"daily evaluation run not found: {run_id}")
-    target_session, universe_snapshot_id, required_stage_names = run
+    target_session, universe_snapshot_id, required_stage_names, status = run
+    if status == "published":
+        raise LedgerValidationError("published daily evaluation run is immutable")
     if metadata.stage_name not in required_stage_names:
         raise LedgerValidationError("stage_name is not required by the immutable run")
     if metadata.universe_snapshot_id != universe_snapshot_id:
