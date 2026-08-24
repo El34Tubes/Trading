@@ -1007,6 +1007,77 @@ FROM universe_symbols;
 BEGIN;
 SELECT pg_advisory_xact_lock(hashtextextended('wolfy_task3_migration', 0));
 
+-- Match Python json.dumps(..., sort_keys=True, separators=(',', ':')) exactly,
+-- including ensure_ascii=True escaping for non-ASCII identity values.
+CREATE OR REPLACE FUNCTION wolfy_python_json_string(value TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+DECLARE
+    result TEXT := '"';
+    character TEXT;
+    codepoint INTEGER;
+    surrogate INTEGER;
+BEGIN
+    FOR position IN 1..char_length(value) LOOP
+        character := substr(value, position, 1);
+        codepoint := ascii(character);
+        IF codepoint = 34 THEN
+            result := result || E'\\"';
+        ELSIF codepoint = 92 THEN
+            result := result || E'\\\\';
+        ELSIF codepoint = 8 THEN
+            result := result || E'\\b';
+        ELSIF codepoint = 9 THEN
+            result := result || E'\\t';
+        ELSIF codepoint = 10 THEN
+            result := result || E'\\n';
+        ELSIF codepoint = 12 THEN
+            result := result || E'\\f';
+        ELSIF codepoint = 13 THEN
+            result := result || E'\\r';
+        ELSIF codepoint < 32 OR (codepoint BETWEEN 127 AND 65535) THEN
+            result := result || E'\\u' || lpad(to_hex(codepoint), 4, '0');
+        ELSIF codepoint > 65535 THEN
+            surrogate := codepoint - 65536;
+            result := result
+                || E'\\u' || lpad(to_hex(55296 + (surrogate / 1024)), 4, '0')
+                || E'\\u' || lpad(to_hex(56320 + (surrogate % 1024)), 4, '0');
+        ELSE
+            result := result || character;
+        END IF;
+    END LOOP;
+    RETURN result || '"';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION wolfy_daily_run_identity(
+    target_session DATE,
+    evaluator_name TEXT,
+    evaluator_version TEXT,
+    universe_snapshot_id TEXT
+)
+RETURNS TEXT
+LANGUAGE SQL
+IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+    SELECT encode(
+        sha256(convert_to(
+            '{"evaluator_name":' || wolfy_python_json_string(evaluator_name)
+            || ',"evaluator_version":' || wolfy_python_json_string(evaluator_version)
+            || ',"target_session":"'
+            || lpad(extract(year FROM target_session)::INTEGER::TEXT, 4, '0') || '-'
+            || lpad(extract(month FROM target_session)::INTEGER::TEXT, 2, '0') || '-'
+            || lpad(extract(day FROM target_session)::INTEGER::TEXT, 2, '0') || '"'
+            || ',"universe_snapshot_id":'
+            || wolfy_python_json_string(universe_snapshot_id) || '}',
+            'UTF8'
+        )),
+        'hex'
+    )
+$$;
+
 CREATE TABLE IF NOT EXISTS daily_evaluation_runs (
     id UUID PRIMARY KEY,
     run_identity TEXT NOT NULL UNIQUE,
@@ -1126,6 +1197,12 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM daily_evaluation_runs AS run
         WHERE run.run_identity IS NULL
+           OR run.run_identity IS DISTINCT FROM wolfy_daily_run_identity(
+               run.target_session,
+               run.evaluator_name,
+               run.evaluator_version,
+               run.universe_snapshot_id
+           )
            OR btrim(run.run_identity) = ''
            OR run.run_identity <> btrim(run.run_identity)
            OR run.evaluator_name IS NULL
@@ -1716,6 +1793,23 @@ BEGIN
         END IF;
         -- Preserve a truly idempotent no-op without changing updated_at.
         RETURN OLD;
+    END IF;
+    IF TG_OP = 'UPDATE' AND (
+        NEW.run_identity IS DISTINCT FROM OLD.run_identity
+        OR NEW.target_session IS DISTINCT FROM OLD.target_session
+        OR NEW.evaluator_name IS DISTINCT FROM OLD.evaluator_name
+        OR NEW.evaluator_version IS DISTINCT FROM OLD.evaluator_version
+        OR NEW.universe_snapshot_id IS DISTINCT FROM OLD.universe_snapshot_id
+    ) THEN
+        RAISE EXCEPTION 'daily evaluation run identity tuple is immutable after insert';
+    END IF;
+    IF NEW.run_identity IS DISTINCT FROM wolfy_daily_run_identity(
+        NEW.target_session,
+        NEW.evaluator_name,
+        NEW.evaluator_version,
+        NEW.universe_snapshot_id
+    ) THEN
+        RAISE EXCEPTION 'daily evaluation run_identity does not match deterministic identity tuple';
     END IF;
     IF cardinality(NEW.required_stage_names) = 0
        OR EXISTS (

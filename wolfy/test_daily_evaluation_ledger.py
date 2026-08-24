@@ -43,6 +43,100 @@ def test_create_daily_run_has_deterministic_unique_identity_and_idempotent_rerun
         assert count == 1
 
 
+def test_database_identity_vector_exactly_matches_python_canonical_json_hash():
+    from daily_evaluation_ledger import DailyRunIdentity, _identity_key
+
+    identity = DailyRunIdentity(
+        target_session=date(2099, 12, 31),
+        evaluator_name='daily "multi" \\ setup ☃',
+        evaluator_version="v1\nβ",
+        universe_snapshot_id="universe\t𐀀",
+    )
+    with test_connection() as conn:
+        database_key = conn.execute(
+            "SELECT wolfy_daily_run_identity(%s,%s,%s,%s)",
+            (
+                identity.target_session,
+                identity.evaluator_name,
+                identity.evaluator_version,
+                identity.universe_snapshot_id,
+            ),
+        ).fetchone()[0]
+    assert database_key == _identity_key(identity)
+
+
+def test_database_rejects_arbitrary_valid_looking_run_identity_on_insert():
+    with test_connection() as conn:
+        with pytest.raises(Exception, match="run_identity"):
+            conn.execute(
+                """
+                INSERT INTO daily_evaluation_runs(
+                    id,run_identity,target_session,evaluator_name,evaluator_version,
+                    universe_snapshot_id,required_stage_names
+                ) VALUES (%s,%s,'2099-03-02','direct','1','direct',ARRAY['features'])
+                """,
+                (uuid.uuid4(), "f" * 64),
+            )
+
+
+@pytest.mark.parametrize(
+    ("column", "value_sql"),
+    [
+        ("run_identity", "repeat('f',64)"),
+        ("target_session", "target_session + 1"),
+        ("evaluator_name", "evaluator_name || '-changed'"),
+        ("evaluator_version", "evaluator_version || '-changed'"),
+        ("universe_snapshot_id", "universe_snapshot_id || '-changed'"),
+    ],
+)
+def test_database_freezes_run_identity_tuple_immediately_after_insert(column, value_sql):
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id=f"immediate-identity-{column}")
+        with pytest.raises(Exception, match="identity"):
+            conn.execute(
+                f"UPDATE daily_evaluation_runs SET {column}={value_sql} WHERE id=%s",
+                (run.run_id,),
+            )
+
+
+def test_frozen_parent_session_preserves_existing_manifest_session_consistency():
+    from daily_evaluation_ledger import upsert_ingestion_manifest
+
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id="frozen-parent-manifest-session")
+        manifest_id = upsert_ingestion_manifest(conn, run.run_id, _manifest())
+        with pytest.raises(Exception, match="identity"), conn.transaction():
+            conn.execute(
+                "UPDATE daily_evaluation_runs SET target_session=target_session + 1 WHERE id=%s",
+                (run.run_id,),
+            )
+        sessions = conn.execute(
+            """
+            SELECT run.target_session, manifest.target_session
+            FROM daily_evaluation_runs AS run
+            JOIN ingestion_run_manifests AS manifest ON manifest.run_id=run.id
+            WHERE manifest.id=%s
+            """,
+            (manifest_id,),
+        ).fetchone()
+        assert sessions == (date(2099, 3, 2), date(2099, 3, 2))
+
+
+@pytest.mark.parametrize("status", ["started", "data_incomplete", "evaluated", "failed"])
+def test_database_identity_is_frozen_in_every_nonpublished_status(status):
+    from daily_evaluation_ledger import transition_daily_run
+
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id=f"identity-status-{status}")
+        if status != "started":
+            transition_daily_run(conn, run.run_id, status)
+        with pytest.raises(Exception, match="identity"):
+            conn.execute(
+                "UPDATE daily_evaluation_runs SET target_session=target_session + 1 WHERE id=%s",
+                (run.run_id,),
+            )
+
+
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
@@ -1099,10 +1193,20 @@ def _create_partial_task3_schema(
         )
         """
     )
+    from daily_evaluation_ledger import DailyRunIdentity, _identity_key
+
     run_id = uuid.uuid4()
+    run_identity = _identity_key(
+        DailyRunIdentity(
+            target_session=date(2099, 3, 2),
+            evaluator_name="legacy",
+            evaluator_version="1",
+            universe_snapshot_id="legacy-universe",
+        )
+    )
     conn.execute(
         "INSERT INTO daily_evaluation_runs(id,run_identity,target_session,evaluator_name,evaluator_version,universe_snapshot_id) VALUES (%s,%s,'2099-03-02','legacy','1','legacy-universe')",
-        (run_id, run_id.hex),
+        (run_id, run_identity),
     )
     if run_overrides:
         if "required_stage_names" in run_overrides:
@@ -1230,6 +1334,7 @@ def _partial_task3_snapshot(conn):
     [
         {"status": "complete"},
         {"run_identity": " legacy "},
+        {"run_identity": "f" * 64},
         {"evaluator_name": ""},
         {"evaluator_version": " 1"},
         {"universe_snapshot_id": "   "},
@@ -1257,6 +1362,18 @@ def test_task3_schema_rejects_noncanonical_populated_partial_run_atomically(
                 conn.execute(_task3_schema_sql())
             conn.rollback()
             assert _partial_task3_snapshot(conn) == before
+            assert conn.execute(
+                """
+                SELECT count(*)
+                FROM pg_proc AS procedure
+                JOIN pg_namespace AS namespace ON namespace.oid=procedure.pronamespace
+                WHERE namespace.nspname=%s
+                  AND procedure.proname IN (
+                      'wolfy_python_json_string', 'wolfy_daily_run_identity'
+                  )
+                """,
+                (schema_name,),
+            ).fetchone() == (0,)
         finally:
             conn.execute(
                 sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
