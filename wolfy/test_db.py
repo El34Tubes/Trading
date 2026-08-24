@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Mapping, cast
 
 TEST_DATABASE_NAME = "wolfy_test"
 DEFAULT_TEST_POSTGRES_DSN = (
@@ -16,17 +16,35 @@ DEFAULT_TEST_POSTGRES_DSN = (
 )
 
 
-def resolve_test_dsn() -> str:
-    """Return a DSN that is guaranteed to target Wolfy's dedicated test DB."""
+def _validated_local_peer_params(dsn: str) -> Mapping[str, object]:
+    """Parse and fail closed unless *dsn* is the dedicated local peer-auth DB."""
     from psycopg.conninfo import conninfo_to_dict
 
-    dsn = os.environ.get("WOLFY_TEST_POSTGRES_DSN", DEFAULT_TEST_POSTGRES_DSN)
-    database = conninfo_to_dict(dsn).get("dbname")
+    params = conninfo_to_dict(dsn)
+    database = params.get("dbname")
     if database != TEST_DATABASE_NAME:
         raise ValueError(
             f"WOLFY_TEST_POSTGRES_DSN must target the dedicated test database "
             f"{TEST_DATABASE_NAME!r}; got {database!r}"
         )
+    allowed = {"dbname", "host", "user"}
+    if (
+        params.get("host") != "/var/run/postgresql"
+        or params.get("user") != "root"
+        or set(params) - allowed
+    ):
+        raise ValueError(
+            "WOLFY_TEST_POSTGRES_DSN must use local peer-auth only: "
+            "host=/var/run/postgresql user=root with no service, password, "
+            "SSL, or other connection overrides"
+        )
+    return params
+
+
+def resolve_test_dsn() -> str:
+    """Return a DSN guaranteed to target the local dedicated test DB."""
+    dsn = os.environ.get("WOLFY_TEST_POSTGRES_DSN", DEFAULT_TEST_POSTGRES_DSN)
+    _validated_local_peer_params(dsn)
     return dsn
 
 
@@ -50,9 +68,9 @@ def future_fixture(namespace: str = "fixture") -> FutureFixture:
 
 
 def _admin_dsn(test_dsn: str) -> str:
-    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+    from psycopg.conninfo import make_conninfo
 
-    params = conninfo_to_dict(test_dsn)
+    params = cast(dict[str, str], dict(_validated_local_peer_params(test_dsn)))
     params["dbname"] = "postgres"
     return make_conninfo(**params)
 
