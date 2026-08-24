@@ -60,9 +60,7 @@ def test_test_dsn_rejects_live_wolfy_database(monkeypatch):
 @pytest.mark.parametrize(
     "dsn",
     [
-        "postgresql://root@localhost/wolfy",
         "dbname=wolfy_prod user=root host=/var/run/postgresql",
-        "postgresql://root@localhost/wolfy-production",
     ],
 )
 def test_test_dsn_rejects_production_like_database_names(monkeypatch, dsn):
@@ -83,9 +81,6 @@ def test_test_dsn_rejects_production_like_database_names(monkeypatch, dsn):
         "host=localhost dbname=wolfy_test user=root password=dummy",
         "service=wolfy_prod dbname=wolfy_test user=root",
         "host=/var/run/postgresql dbname=wolfy_test user=prod_admin",
-        "postgresql://prod_admin:dummy@production-db.internal/wolfy_test",
-        "postgresql://root@10.20.30.40/wolfy_test?sslmode=require",
-        "postgresql://root@localhost/wolfy_test",
     ],
 )
 def test_test_dsn_rejects_unsafe_endpoint_credentials_and_users(monkeypatch, dsn):
@@ -95,6 +90,130 @@ def test_test_dsn_rejects_unsafe_endpoint_credentials_and_users(monkeypatch, dsn
 
     with pytest.raises(ValueError, match="local peer-auth"):
         resolve_test_dsn()
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://root@localhost/wolfy",
+        "postgresql://root@localhost/wolfy-production",
+        "postgresql://prod_admin:***@production-db.internal/wolfy_test",
+        "postgresql://root@10.20.30.40/wolfy_test?sslmode=require",
+        "postgresql://root@localhost/wolfy_test",
+        "postgresql://root@/wolfy_test?host=/var/run/postgresql",
+        "postgresql:///wolfy_test?host=/var/run/postgresql&user=root",
+        "postgres://root@/wolfy_test?host=/var/run/postgresql",
+    ],
+)
+def test_test_dsn_rejects_all_uri_syntax_even_for_local_peer_auth(monkeypatch, dsn):
+    from test_db import resolve_test_dsn
+
+    monkeypatch.setenv("WOLFY_TEST_POSTGRES_DSN", dsn)
+
+    with pytest.raises(ValueError, match="keyword DSN"):
+        resolve_test_dsn()
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("PGHOST", "production-db.internal"),
+        ("PGHOSTADDR", "10.20.30.40"),
+        ("PGPORT", "6543"),
+        ("PGDATABASE", "wolfy"),
+        ("PGUSER", "prod_admin"),
+        ("PGPASSWORD", "dummy"),
+        ("PGPASSFILE", "/tmp/production.pgpass"),
+        ("PGSERVICE", "wolfy_prod"),
+        ("PGSERVICEFILE", "/tmp/production.pg_service.conf"),
+        ("PGOPTIONS", "-c search_path=unsafe"),
+        ("PGSSLMODE", "require"),
+        ("PGREQUIRESSL", "1"),
+        ("PGSSLCERT", "/tmp/client.crt"),
+        ("PGSSLKEY", "/tmp/client.key"),
+        ("PGSSLCERTMODE", "require"),
+        ("PGSSLROOTCERT", "/tmp/root.crt"),
+        ("PGSSLCRL", "/tmp/root.crl"),
+        ("PGSSLCRLDIR", "/tmp/crls"),
+        ("PGREQUIREPEER", "postgres"),
+        ("PGREQUIREAUTH", "scram-sha-256"),
+        ("PGMINPROTOCOLVERSION", "3.0"),
+        ("PGMAXPROTOCOLVERSION", "3.0"),
+        ("PGGSSENCMODE", "require"),
+        ("PGKRBSRVNAME", "postgres-production"),
+        ("PGGSSLIB", "gssapi"),
+        ("PGGSSDELEGATION", "1"),
+        ("PGCHANNELBINDING", "require"),
+        ("PGTARGETSESSIONATTRS", "read-write"),
+        ("PGLOADBALANCEHOSTS", "random"),
+    ],
+)
+@pytest.mark.parametrize("entrypoint", ["resolve", "provision"])
+def test_test_database_entrypoints_reject_ambient_libpq_overrides_before_connect(
+    monkeypatch, variable, value, entrypoint
+):
+    import psycopg
+
+    from test_db import provision_test_database, resolve_test_dsn
+
+    monkeypatch.setenv(variable, value)
+    connection_attempted = False
+
+    def fail_if_connected(*args, **kwargs):
+        nonlocal connection_attempted
+        connection_attempted = True
+        raise AssertionError("database connection attempted before environment validation")
+
+    monkeypatch.setattr(psycopg, "connect", fail_if_connected)
+    operation = resolve_test_dsn if entrypoint == "resolve" else provision_test_database
+
+    with pytest.raises(ValueError, match="ambient libpq"):
+        operation()
+    assert connection_attempted is False
+
+
+def test_test_dsn_allows_benign_unrelated_environment(monkeypatch):
+    from test_db import resolve_test_dsn
+
+    dsn = "host=/var/run/postgresql dbname=wolfy_test user=root"
+    monkeypatch.setenv("WOLFY_TEST_POSTGRES_DSN", dsn)
+    monkeypatch.setenv("UNRELATED_APPLICATION_SETTING", "allowed")
+
+    assert resolve_test_dsn() == dsn
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["admin", "create_subprocess", "extension_subprocess", "schema_connect"],
+)
+def test_internal_database_paths_reject_ambient_overrides_before_side_effects(
+    monkeypatch, entrypoint
+):
+    import psycopg
+
+    import test_db
+
+    dsn = "host=/var/run/postgresql dbname=wolfy_test user=root"
+    monkeypatch.setenv("PGPASSWORD", "dummy")
+    side_effect_attempted = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal side_effect_attempted
+        side_effect_attempted = True
+        raise AssertionError("side effect attempted before environment validation")
+
+    monkeypatch.setattr(psycopg, "connect", fail_if_called)
+    monkeypatch.setattr(test_db.subprocess, "run", fail_if_called)
+    operation = {
+        "admin": lambda: test_db._admin_dsn(dsn),
+        "create_subprocess": lambda: test_db._create_database_with_local_peer_auth(dsn),
+        "extension_subprocess": lambda: test_db._ensure_local_extensions(dsn),
+        "schema_connect": lambda: test_db._apply_schema(dsn),
+    }[entrypoint]
+
+    with pytest.raises(ValueError, match="ambient libpq"):
+        operation()
+    assert side_effect_attempted is False
 
 
 def test_test_dsn_accepts_explicit_local_peer_auth_root(monkeypatch):

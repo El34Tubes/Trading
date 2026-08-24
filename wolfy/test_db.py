@@ -14,12 +14,67 @@ TEST_DATABASE_NAME = "wolfy_test"
 DEFAULT_TEST_POSTGRES_DSN = (
     f"dbname={TEST_DATABASE_NAME} user=root host=/var/run/postgresql"
 )
+_LIBPQ_ENVIRONMENT_OVERRIDES = frozenset(
+    {
+        "PGAPPNAME",
+        "PGCHANNELBINDING",
+        "PGCLIENTENCODING",
+        "PGCONNECT_TIMEOUT",
+        "PGDATABASE",
+        "PGGSSENCMODE",
+        "PGGSSDELEGATION",
+        "PGGSSLIB",
+        "PGHOST",
+        "PGHOSTADDR",
+        "PGKRBSRVNAME",
+        "PGLOADBALANCE",
+        "PGLOADBALANCEHOSTS",
+        "PGMAXPROTOCOLVERSION",
+        "PGMINPROTOCOLVERSION",
+        "PGOPTIONS",
+        "PGPASSFILE",
+        "PGPASSWORD",
+        "PGPORT",
+        "PGREQUIREPEER",
+        "PGREQUIREAUTH",
+        "PGREQUIRESSL",
+        "PGSERVICE",
+        "PGSERVICEFILE",
+        "PGSSLCERT",
+        "PGSSLCERTMODE",
+        "PGSSLCOMPRESSION",
+        "PGSSLCRL",
+        "PGSSLCRLDIR",
+        "PGSSLKEY",
+        "PGSSLMAXPROTOCOLVERSION",
+        "PGSSLMINPROTOCOLVERSION",
+        "PGSSLMODE",
+        "PGSSLNEGOTIATION",
+        "PGSSLROOTCERT",
+        "PGSSLSNI",
+        "PGTARGETSESSIONATTRS",
+        "PGUSER",
+    }
+)
+
+
+def _reject_ambient_libpq_overrides() -> None:
+    overrides = sorted(_LIBPQ_ENVIRONMENT_OVERRIDES.intersection(os.environ))
+    if overrides:
+        raise ValueError(
+            "refusing ambient libpq connection overrides: " + ", ".join(overrides)
+        )
 
 
 def _validated_local_peer_params(dsn: str) -> Mapping[str, object]:
     """Parse and fail closed unless *dsn* is the dedicated local peer-auth DB."""
     from psycopg.conninfo import conninfo_to_dict
 
+    _reject_ambient_libpq_overrides()
+    if dsn.lstrip().lower().startswith(("postgresql://", "postgres://")):
+        raise ValueError(
+            "WOLFY_TEST_POSTGRES_DSN must use an explicit keyword DSN, not URI syntax"
+        )
     params = conninfo_to_dict(dsn)
     database = params.get("dbname")
     if database != TEST_DATABASE_NAME:
@@ -78,6 +133,7 @@ def _admin_dsn(test_dsn: str) -> str:
 def _apply_schema(dsn: str) -> None:
     import psycopg
 
+    _validated_local_peer_params(dsn)
     base = Path(__file__).resolve().parent
     with psycopg.connect(dsn, autocommit=True) as conn:
         if conn.execute("SELECT current_database()").fetchone()[0] != TEST_DATABASE_NAME:
@@ -114,9 +170,7 @@ def _apply_schema(dsn: str) -> None:
 
 
 def _create_database_with_local_peer_auth(dsn: str) -> None:
-    from psycopg.conninfo import conninfo_to_dict
-
-    params = conninfo_to_dict(dsn)
+    params = _validated_local_peer_params(dsn)
     if (
         os.geteuid() != 0
         or params.get("host") != "/var/run/postgresql"
@@ -144,9 +198,7 @@ def _create_database_with_local_peer_auth(dsn: str) -> None:
 
 
 def _ensure_local_extensions(dsn: str) -> None:
-    from psycopg.conninfo import conninfo_to_dict
-
-    params = conninfo_to_dict(dsn)
+    params = _validated_local_peer_params(dsn)
     if (
         os.geteuid() != 0
         or params.get("host") != "/var/run/postgresql"
