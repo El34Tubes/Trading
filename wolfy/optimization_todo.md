@@ -12,6 +12,16 @@ Durable trail for the daily Wolfy/Hermes optimization planner. Items here are pl
 - Postgres is live source of truth; run `/root/.hermes/wolfy/check_postgres_requirements.py` before Postgres package/schema maintenance.
 - Daily optimization runs should send a short completion report when done: what changed, verification, commit/KPI, blockers/next action only.
 
+## 2026-08-30 daily optimizer OWS-4 run
+
+- Time: 2026-08-30 02:16 ET / 06:16 UTC; outside all protected market/report windows.
+- Budget/guardian: `budget_gate.py --no-record` returned `BUDGET=ok tokens_today=0 cap=200000 headroom_pct=100.00`; guardian and gateway were healthy with no prior probation.
+- Change: claimed task `3546` / run `396928`; snapshotted `config.yaml` and `cron/jobs.json` at `wolfy/guardian/known_good/20260830T061807249428Z`, then changed only Jonah job `07253dc09350` from `*/20 * * * *` to hourly `0 * * * *` and set probation through the next optimizer confirmation window.
+- Verification: YAML/JSON parse assertions passed; `hermes cron list` showed Jonah hourly with valid next run `2026-08-30T03:00:00-04:00`; guardian returned `probation_active`; gateway was running; optimizer remained enabled.
+- KPI: projected Jonah LLM starts fall from 72/day to 24/day (48/day, 66.7% reduction); no strategy, signal, trading, broker, package, credential, or database mutation.
+- Lesson: when applying a probationary cron edit, keep the guardian manifest anchored to the pre-change snapshot while hashing the probationary live state, preventing the periodic guardian from promoting the unconfirmed state before next-run confirmation.
+- NEXT ACTION: on the 2026-08-31 optimizer run, confirm the scheduled optimizer and gateway are healthy, then promote OWS-4 to known-good and clear probation; otherwise retain the guardian rollback and never retry the identical failed change.
+
 ## 2026-08-29 daily optimizer plan-only run
 
 - Time: 2026-08-29 02:16 ET / 06:16 UTC.

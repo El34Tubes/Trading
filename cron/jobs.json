@@ -101,10 +101,10 @@
       "context_from": null,
       "schedule": {
         "kind": "cron",
-        "expr": "*/20 * * * *",
-        "display": "*/20 * * * *"
+        "expr": "0 * * * *",
+        "display": "0 * * * *"
       },
-      "schedule_display": "*/20 * * * *",
+      "schedule_display": "0 * * * *",
       "repeat": {
         "times": 1000000,
         "completed": 1483
