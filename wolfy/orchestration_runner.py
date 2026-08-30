@@ -141,10 +141,10 @@ def run_eod_ingest_shard(shard_id: int) -> int:
 
 
 def next_business_day(day: dt.date) -> dt.date:
-    day = day + dt.timedelta(days=1)
-    while day.weekday() >= 5:
-        day += dt.timedelta(days=1)
-    return day
+    """Compatibility wrapper returning the next actual NYSE session."""
+    from eod_readiness import next_nyse_session
+
+    return next_nyse_session(day)
 
 
 def latest_price_date(conn, tickers: list[str]) -> dt.date:
@@ -152,6 +152,54 @@ def latest_price_date(conn, tickers: list[str]) -> dt.date:
     if not row or row[0] is None:
         raise RuntimeError("no EOD prices available for signal generation")
     return row[0]
+
+
+def evaluate_current_eod_readiness(conn, *, tickers: Sequence[str]):
+    """Evaluate the free-provider gate against the session due right now."""
+    from eod_readiness import NY, SourceMode, evaluate_eod_readiness
+
+    return evaluate_eod_readiness(
+        conn,
+        as_of=dt.datetime.now(NY),
+        universe=tickers,
+        source_mode=SourceMode.FREE_T_PLUS_1,
+    )
+
+
+def evaluate_replay_eod_readiness(
+    conn,
+    *,
+    tickers: Sequence[str],
+    signal_dt: dt.date,
+):
+    """Evaluate a replay's exact date without verifying today's provider state."""
+    from eod_readiness import NY, SourceMode, evaluate_eod_readiness
+
+    return evaluate_eod_readiness(
+        conn,
+        as_of=dt.datetime.now(NY),
+        universe=tickers,
+        source_mode=SourceMode.FREE_T_PLUS_1,
+        provider_availability_verified=False,
+        expected_session=signal_dt,
+    )
+
+
+def eod_readiness_payload(readiness) -> dict:
+    """Return stable JSON-safe diagnostics for the readiness decision."""
+    return {
+        "expected_session": readiness.expected_session.isoformat(),
+        "latest_complete_session": (
+            readiness.latest_complete_session.isoformat()
+            if readiness.latest_complete_session is not None
+            else None
+        ),
+        "coverage_numerator": readiness.coverage_numerator,
+        "coverage_denominator": readiness.coverage_denominator,
+        "missing_symbols": list(readiness.missing_symbols),
+        "source_mode": readiness.source_mode.value,
+        "publishable": readiness.publishable,
+    }
 
 
 def run_paper_recommendation_lifecycle(
@@ -215,8 +263,30 @@ def run_eod_features_signals(
 
     tickers = parse_tickers(tickers_csv_value, default=CORE_EOD_UNIVERSE)
     with psycopg.connect("dbname=wolfy user=root host=/var/run/postgresql") as conn:
-        signal_dt = dt.date.fromisoformat(signal_dt_value) if signal_dt_value else latest_price_date(conn, tickers)
+        if signal_dt_value is None:
+            readiness = evaluate_current_eod_readiness(conn, tickers=tickers)
+            signal_dt = readiness.expected_session
+        else:
+            signal_dt = dt.date.fromisoformat(signal_dt_value)
+            readiness = evaluate_replay_eod_readiness(
+                conn,
+                tickers=tickers,
+                signal_dt=signal_dt,
+            )
         for_session = next_business_day(signal_dt)
+        if not readiness.publishable:
+            print(
+                json.dumps(
+                    {
+                        "dry_run": dry_run,
+                        "writes": False,
+                        "status": "blocked_incomplete_eod_readiness",
+                        "eod_readiness": eod_readiness_payload(readiness),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 3
         if dry_run:
             gate = propose_approved_setups(
                 conn,
@@ -232,6 +302,7 @@ def run_eod_features_signals(
                         "writes": False,
                         "signal_dt": str(signal_dt),
                         "for_session": str(for_session),
+                        "eod_readiness": eod_readiness_payload(readiness),
                         "approved_gate": gate,
                     },
                     sort_keys=True,
