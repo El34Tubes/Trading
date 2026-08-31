@@ -1,5 +1,14 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-08-31 daily optimizer OWS-5a run
+
+- Time: 2026-08-31 02:15 ET / 06:15 UTC; outside all protected market/report windows.
+- Phase 1: promoted OWS-4 after the gateway stayed healthy, the optimizer fired on schedule, and Jonah completed hourly at 00:00, 01:00, and 02:00 ET; promoted snapshot `wolfy/guardian/known_good/20260831T061628173307Z` and cleared its probation.
+- Budget/guardian: `budget_gate.py --no-record` returned `BUDGET=ok tokens_today=97179 cap=200000 headroom_pct=51.41`; full guardian and `hermes cron list` passed.
+- Change: task `4026` / run `397342`; snapshotted config and cron at `wolfy/guardian/known_good/20260831T061717490322Z`, then changed only `agent.max_turns` from 90 to 30. YAML semantic-delta assertion, unchanged cron JSON assertion, cron list, and gateway status passed. Probation expires at the next optimizer confirmation window (`2026-09-01T06:19:00Z`).
+- Lesson: probation promotion must be based on observed post-change scheduled runs, not only parse/health checks; keep task 4026 pending until the next optimizer proves completion under the 30-turn cap.
+- NEXT ACTION: on the 2026-09-01 optimizer run, confirm gateway/scheduled-run health under `agent.max_turns=30`; promote and complete task 4026 if healthy, otherwise retain the guardian rollback and record a permanent no-retry lesson.
+
 Durable trail for the daily Wolfy/Hermes optimization planner. Items here are planning/implementation notes only; they do not authorize trading, broker access, money movement, or strategy approval.
 
 ## Operating constraints
