@@ -1,5 +1,14 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-01 daily optimizer plan-only run
+
+- Time: 2026-09-01 02:15 ET / 06:15 UTC; outside all protected market/report windows.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block low_headroom_pct=4.69 threshold=15.00` (exit 1), so this run followed PLAN-ONLY: review/state/KPI updates only, with no code/config/cron/migration implementation.
+- Guardian/probation: no probation marker existed; `python3 wolfy/guardian/config_guardian.py --home /root/.hermes --skip-cli` returned `GUARDIAN=ok checks=config_yaml_ok;optimizer_enabled;no_probation` (exit 0). Config YAML and cron JSON parsed, `hermes cron list` succeeded, the gateway was running, and optimizer `92f31b95fccc` plus guardian `e55c9cc39d8d` remained enabled.
+- State: created/claimed Postgres task `4028` and run `397946`; prior task `4026` remains blocked after verified rollback commit `8c70b88` restored `agent.max_turns=90` and cleared unsafe probation. Postgres requirements and visible-progress ledger checks passed. This run records the full 25-KPI set with measured/carried-forward provenance and makes only a ledger local commit.
+- Lesson: deterministic provider/daily-cap headroom below the 15% threshold is an absolute implementation stop; the guardian probation-anchor defect also makes further config probation unsafe, and the identical OWS-5a change remains permanently excluded.
+- NEXT ACTION: when budget headroom recovers, keep orchestration unchanged and take bounded non-config task `3212` / DQ-1 split-safe ingest, with fixture, idempotency, and full-suite verification.
+
 ## 2026-08-31 daily optimizer OWS-5a run
 
 - Time: 2026-08-31 02:15 ET / 06:15 UTC; outside all protected market/report windows.
