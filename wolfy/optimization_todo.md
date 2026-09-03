@@ -1,5 +1,15 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-03 daily optimizer plan-only run
+
+- Time: 2026-09-03 02:15 ET / 06:15 UTC; outside all protected market/report windows.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=231248 cap=200000` (exit 1), so this run followed PLAN-ONLY: review/state/KPI updates only, with no code/config/cron/migration implementation.
+- Guardian/probation: no probation marker existed; both pinned-home guardian checks returned `GUARDIAN=ok`, config YAML and cron JSON parsed, `hermes cron list` succeeded, the gateway was running, and optimizer `92f31b95fccc` plus guardian `e55c9cc39d8d` remained enabled.
+- State: created/claimed Postgres task `4036` and run `398859`; prior task `4035` and ledger-only commit `8c70132dbad14b7e9d42afd6494f1dda989e0890` passed DoD review. Postgres requirements and visible-progress ledger checks passed. Exactly 25 KPI keys were stored with measured/carried-forward provenance; decision/final capture remained 231248 completed tokens and 0% headroom.
+- Human gate: task `416` was normalized to `blocked:needs-human-approval`; exact ask remains confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: token-cap exhaustion remains an absolute implementation stop; with OWS-1 through OWS-4 healthy and the OWS-5a retry permanently excluded, preserve the next bounded non-config correctness slice rather than spending beyond the cap.
+- NEXT ACTION: when budget headroom recovers, keep orchestration unchanged and take task `3212` / DQ-1 split-safe ingest, with fixture, idempotency, and full-suite verification. Do not retry identical OWS-5a while the probation-anchor defect remains unresolved.
+
 ## 2026-09-02 daily optimizer plan-only run
 
 - Time: 2026-09-02 02:15 ET / 06:15 UTC; outside all protected market/report windows.
