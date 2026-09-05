@@ -1,5 +1,15 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-05 daily optimizer plan-only run
+
+- Time: 2026-09-05 02:16 ET / 06:16 UTC; outside all protected market/report windows.
+- Budget gate: `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=218090 cap=200000` (exit 1), so this run followed PLAN-ONLY: review/state/KPI updates only, with no code/config/cron/migration implementation.
+- Guardian/probation: no probation marker existed; the production-home guardian returned `GUARDIAN=ok`, config YAML and cron JSON parsed, `hermes cron list` succeeded, the gateway was running, and optimizer `92f31b95fccc` plus guardian `e55c9cc39d8d` remained enabled.
+- State: created/claimed Postgres task `4047` and run `399747`; prior task `4043` and ledger-only commit `cea7abb84a8508675cb27a1b4af0b1e18defc37b` passed DoD review. Postgres requirements, guardian tests, and visible-progress ledger checks passed. Exactly 25 KPI keys were stored with measured/carried-forward provenance; KPI capture remained over cap at 218090 completed tokens and 0% headroom.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: repeated token-cap exhaustion remains an absolute implementation stop; preserve the deterministic gate, keep orchestration unchanged, and never retry the permanently excluded OWS-5a `agent.max_turns` change.
+- NEXT ACTION: after budget headroom recovers, execute one reversible OWS-5 slice under the self-modification protocol: lower `delegation.max_iterations` from 50 to 15; do not alter `agent.max_turns`.
+
 ## 2026-09-04 daily optimizer plan-only run
 
 - Time: 2026-09-04 02:16 ET / 06:16 UTC; outside all protected market/report windows.
