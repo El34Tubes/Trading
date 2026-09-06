@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import importlib
 import os
+import sys
+import types
+from pathlib import Path
 
 import pytest
 
@@ -202,6 +206,59 @@ def test_schema_modules_cache_only_the_isolated_test_dsn():
     for module in modules:
         assert conninfo_to_dict(module.DEFAULT_DSN).get("dbname") == "wolfy_test"
         assert conninfo_to_dict(module.DEFAULT_DSN).get("dbname") != "wolfy"
+
+
+def test_pytest_import_isolation_recovers_from_production_path_pollution(
+    restore_worktree_imports,
+):
+    from psycopg.conninfo import conninfo_to_dict
+
+    worktree_wolfy = Path(__file__).resolve().parent
+    production_wolfy = Path("/root/.hermes/wolfy")
+    default_dsn_modules = (
+        "eod_price_features",
+        "eod_backtest",
+        "eod_monitoring",
+        "eod_signals",
+        "recommendation_outcome_review",
+    )
+    local_modules = (
+        "orchestration_runner",
+        "eod_readiness",
+        *default_dsn_modules,
+    )
+
+    sys.path[:] = [
+        path
+        for path in sys.path
+        if Path(path or ".").resolve() != worktree_wolfy
+    ]
+    sys.path.insert(0, str(production_wolfy))
+    for module_name in local_modules:
+        contaminated = types.ModuleType(module_name)
+        contaminated.__file__ = str(production_wolfy / f"{module_name}.py")
+        if module_name in default_dsn_modules:
+            setattr(contaminated, "DEFAULT_DSN", PRODUCTION_DSN)
+        sys.modules[module_name] = contaminated
+
+    restore_worktree_imports()
+
+    assert Path(sys.path[0]).resolve() == worktree_wolfy
+    assert all(
+        Path(path or ".").resolve() != production_wolfy for path in sys.path
+    )
+    imported = {
+        module_name: importlib.import_module(module_name)
+        for module_name in local_modules
+    }
+    for module in imported.values():
+        assert module.__file__ is not None
+        assert Path(module.__file__).resolve().is_relative_to(worktree_wolfy)
+    for module_name in default_dsn_modules:
+        assert (
+            conninfo_to_dict(imported[module_name].DEFAULT_DSN).get("dbname")
+            == "wolfy_test"
+        )
 
 
 @pytest.mark.parametrize(
