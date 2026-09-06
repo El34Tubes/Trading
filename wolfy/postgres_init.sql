@@ -1112,6 +1112,8 @@ DECLARE
     source_total INTEGER;
     source_distinct INTEGER;
     source_bad INTEGER;
+    source_original JSONB;
+    source_sorted JSONB;
 BEGIN
     IF jsonb_typeof(metadata) IS DISTINCT FROM 'object'
        OR cardinality(required_stage_names) = 0
@@ -1170,15 +1172,21 @@ BEGIN
         END IF;
 
         SELECT count(*), count(DISTINCT source_id), count(*) FILTER (
-            WHERE jsonb_typeof(source_value) IS DISTINCT FROM 'string'
-               OR NOT wolfy_is_canonical_ledger_text(source_id)
-        )
-        INTO source_total, source_distinct, source_bad
+                   WHERE jsonb_typeof(source_value) IS DISTINCT FROM 'string'
+                      OR NOT wolfy_is_canonical_ledger_text(source_id)
+               ),
+               jsonb_agg(source_value ORDER BY ordinal),
+               jsonb_agg(source_value ORDER BY source_id)
+        INTO source_total, source_distinct, source_bad, source_original, source_sorted
         FROM (
-            SELECT source_value, source_value #>> '{}' AS source_id
-            FROM jsonb_array_elements(stage_data->'source_run_ids') AS source_value
+            SELECT source_value, source_value #>> '{}' AS source_id, ordinal
+            FROM jsonb_array_elements(stage_data->'source_run_ids')
+                 WITH ORDINALITY AS item(source_value, ordinal)
         ) AS source_ids;
-        IF source_bad > 0 OR source_total <> source_distinct THEN
+        IF source_bad > 0
+           OR source_total <> source_distinct
+           OR source_original IS DISTINCT FROM source_sorted
+        THEN
             RETURN FALSE;
         END IF;
     END LOOP;

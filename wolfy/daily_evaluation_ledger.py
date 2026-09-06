@@ -487,9 +487,10 @@ def _validate_derived_stage(metadata: DerivedStageMetadata) -> None:
         or not metadata.source_run_ids
         or any(not _is_canonical_string(value) for value in metadata.source_run_ids)
         or len(set(metadata.source_run_ids)) != len(metadata.source_run_ids)
+        or metadata.source_run_ids != tuple(sorted(metadata.source_run_ids))
     ):
         raise LedgerValidationError(
-            "source_run_ids must be non-empty, unique canonical strings"
+            "source_run_ids must be non-empty, sorted, unique canonical strings"
         )
     if not isinstance(metadata.input_hash, str) or not re.fullmatch(
         r"[0-9a-f]{64}", metadata.input_hash

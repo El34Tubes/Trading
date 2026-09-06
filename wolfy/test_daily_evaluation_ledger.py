@@ -830,6 +830,7 @@ def test_database_rejects_noncanonical_derived_metadata_in_every_nonpublished_st
         {"features": _stored_derived_payload(source_run_ids=[123])},
         {"features": _stored_derived_payload(source_run_ids=["source\r"])},
         {"features": _stored_derived_payload(source_run_ids=["source", "source"])},
+        {"features": _stored_derived_payload(source_run_ids=["z-source", "a-source"])},
         {"features": _stored_derived_payload(input_hash="B" * 64)},
         {"features": _stored_derived_payload(universe_snapshot_id="other")},
         {"features": _stored_derived_payload(universe_snapshot_id="publish-ready\t")},
@@ -909,6 +910,7 @@ def test_database_rejects_noncanonical_derived_metadata_on_direct_insert():
         {"source_run_ids": (" source-run ",)},
         {"source_run_ids": ("source-run", 3)},
         {"source_run_ids": ("source-run", "source-run")},
+        {"source_run_ids": ("z-source", "a-source")},
         {"input_hash": "bad"},
         {"input_hash": "B" * 64},
         {"universe_snapshot_id": ""},
@@ -1098,6 +1100,7 @@ def test_database_rejects_manifest_target_session_that_differs_from_parent_run()
         {"available_at": "2099-03-02T20:02:00+00:00"},
         {"transformation_version": ""},
         {"source_run_ids": [" source-run "]},
+        {"source_run_ids": ["z-source", "a-source"]},
         {"input_session": "2099-03-01"},
     ],
 )
