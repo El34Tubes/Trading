@@ -1007,6 +1007,18 @@ FROM universe_symbols;
 BEGIN;
 SELECT pg_advisory_xact_lock(hashtextextended('wolfy_task3_migration', 0));
 
+-- Canonical ledger text strips only ASCII C0 controls (U+0000..U+001F),
+-- ordinary space (U+0020), and DEL (U+007F) from both edges. PostgreSQL text
+-- cannot contain U+0000. Unicode whitespace is intentionally not normalized.
+CREATE OR REPLACE FUNCTION wolfy_is_canonical_ledger_text(value TEXT)
+RETURNS BOOLEAN
+LANGUAGE SQL
+IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+    SELECT value <> ''
+       AND value !~ E'^[\\x01-\\x20\\x7f]|[\\x01-\\x20\\x7f]$'
+$$;
+
 -- Match Python json.dumps(..., sort_keys=True, separators=(',', ':')) exactly,
 -- including ensure_ascii=True escaping for non-ASCII identity values.
 CREATE OR REPLACE FUNCTION wolfy_python_json_string(value TEXT)
@@ -1132,7 +1144,7 @@ CREATE TABLE IF NOT EXISTS ingestion_run_manifests (
     CHECK (raw_payload_sha256 IS NULL OR raw_payload_sha256 ~ '^[0-9a-f]{64}$'),
     CHECK (
         immutable_object_ref IS NULL
-        OR (immutable_object_ref <> '' AND immutable_object_ref = btrim(immutable_object_ref))
+        OR wolfy_is_canonical_ledger_text(immutable_object_ref)
     ),
     CHECK (status <> 'completed' OR completed_at IS NOT NULL),
     UNIQUE (run_id, dataset, provider, source_endpoint)
@@ -1153,8 +1165,10 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_run_manifests_run_status
 CREATE TABLE IF NOT EXISTS setup_gate_evaluations (
     id BIGSERIAL PRIMARY KEY,
     run_id UUID NOT NULL REFERENCES daily_evaluation_runs(id) ON DELETE CASCADE,
-    ticker TEXT NOT NULL CHECK (ticker = upper(ticker)),
-    strategy TEXT NOT NULL,
+    ticker TEXT NOT NULL CHECK (
+        wolfy_is_canonical_ledger_text(ticker) AND ticker = upper(ticker)
+    ),
+    strategy TEXT NOT NULL CHECK (wolfy_is_canonical_ledger_text(strategy)),
     passed BOOLEAN NOT NULL,
     reason_code_version INTEGER NOT NULL CHECK (reason_code_version = 1),
     reason_codes TEXT[] NOT NULL,
@@ -1162,7 +1176,7 @@ CREATE TABLE IF NOT EXISTS setup_gate_evaluations (
     failed_gates JSONB NOT NULL,
     gate_facts JSONB NOT NULL CHECK (jsonb_typeof(gate_facts) = 'object'),
     source_fingerprint TEXT NOT NULL CHECK (
-        source_fingerprint <> '' AND source_fingerprint = btrim(source_fingerprint)
+        wolfy_is_canonical_ledger_text(source_fingerprint)
     ),
     evaluated_at TIMESTAMPTZ NOT NULL,
     metrics JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metrics) = 'object'),
@@ -1203,17 +1217,13 @@ BEGIN
                run.evaluator_version,
                run.universe_snapshot_id
            )
-           OR btrim(run.run_identity) = ''
-           OR run.run_identity <> btrim(run.run_identity)
+           OR NOT wolfy_is_canonical_ledger_text(run.run_identity)
            OR run.evaluator_name IS NULL
-           OR btrim(run.evaluator_name) = ''
-           OR run.evaluator_name <> btrim(run.evaluator_name)
+           OR NOT wolfy_is_canonical_ledger_text(run.evaluator_name)
            OR run.evaluator_version IS NULL
-           OR btrim(run.evaluator_version) = ''
-           OR run.evaluator_version <> btrim(run.evaluator_version)
+           OR NOT wolfy_is_canonical_ledger_text(run.evaluator_version)
            OR run.universe_snapshot_id IS NULL
-           OR btrim(run.universe_snapshot_id) = ''
-           OR run.universe_snapshot_id <> btrim(run.universe_snapshot_id)
+           OR NOT wolfy_is_canonical_ledger_text(run.universe_snapshot_id)
            OR (run.status IS NOT NULL AND run.status NOT IN (
                'started', 'data_incomplete', 'evaluated', 'published', 'failed'
            ))
@@ -1224,8 +1234,7 @@ BEGIN
                    OR EXISTS (
                        SELECT 1 FROM unnest(run.required_stage_names) AS stage(value)
                        WHERE stage.value IS NULL
-                          OR btrim(stage.value) = ''
-                          OR stage.value <> btrim(stage.value)
+                          OR NOT wolfy_is_canonical_ledger_text(stage.value)
                    )
                    OR run.required_stage_names IS DISTINCT FROM (
                        SELECT array_agg(stage.value ORDER BY stage.value)
@@ -1263,26 +1272,19 @@ BEGIN
         WHERE run.id IS NULL
            OR manifest.target_session IS DISTINCT FROM run.target_session
            OR manifest.dataset IS NULL
-           OR btrim(manifest.dataset) = ''
-           OR manifest.dataset <> btrim(manifest.dataset)
+           OR NOT wolfy_is_canonical_ledger_text(manifest.dataset)
            OR manifest.provider IS NULL
-           OR btrim(manifest.provider) = ''
-           OR manifest.provider <> btrim(manifest.provider)
+           OR NOT wolfy_is_canonical_ledger_text(manifest.provider)
            OR manifest.source_endpoint IS NULL
-           OR btrim(manifest.source_endpoint) = ''
-           OR manifest.source_endpoint <> btrim(manifest.source_endpoint)
+           OR NOT wolfy_is_canonical_ledger_text(manifest.source_endpoint)
            OR manifest.entitlement_class IS NULL
-           OR btrim(manifest.entitlement_class) = ''
-           OR manifest.entitlement_class <> btrim(manifest.entitlement_class)
+           OR NOT wolfy_is_canonical_ledger_text(manifest.entitlement_class)
            OR manifest.delay_class IS NULL
-           OR btrim(manifest.delay_class) = ''
-           OR manifest.delay_class <> btrim(manifest.delay_class)
+           OR NOT wolfy_is_canonical_ledger_text(manifest.delay_class)
            OR manifest.parser_version IS NULL
-           OR btrim(manifest.parser_version) = ''
-           OR manifest.parser_version <> btrim(manifest.parser_version)
+           OR NOT wolfy_is_canonical_ledger_text(manifest.parser_version)
            OR manifest.schema_version IS NULL
-           OR btrim(manifest.schema_version) = ''
-           OR manifest.schema_version <> btrim(manifest.schema_version)
+           OR NOT wolfy_is_canonical_ledger_text(manifest.schema_version)
            OR manifest.expected_symbol_count IS NULL
            OR manifest.expected_symbol_count < 0
            OR manifest.received_symbol_count IS NULL
@@ -1314,10 +1316,7 @@ BEGIN
            )
            OR (
                manifest.immutable_object_ref IS NOT NULL
-               AND (
-                   btrim(manifest.immutable_object_ref) = ''
-                   OR manifest.immutable_object_ref <> btrim(manifest.immutable_object_ref)
-               )
+               AND NOT wolfy_is_canonical_ledger_text(manifest.immutable_object_ref)
            )
            OR (
                manifest.created_at IS NOT NULL AND manifest.updated_at IS NOT NULL
@@ -1389,11 +1388,11 @@ BEGIN
            OR jsonb_typeof(gate.metrics) IS DISTINCT FROM 'object'
            OR jsonb_typeof(gate.provenance) IS DISTINCT FROM 'object'
            OR gate.source_fingerprint IS NULL
-           OR gate.source_fingerprint = ''
-           OR gate.source_fingerprint <> btrim(gate.source_fingerprint)
+           OR NOT wolfy_is_canonical_ledger_text(gate.source_fingerprint)
+           OR NOT wolfy_is_canonical_ledger_text(gate.ticker)
            OR gate.ticker <> upper(gate.ticker)
            OR gate.strategy IS NULL
-           OR btrim(gate.strategy) = ''
+           OR NOT wolfy_is_canonical_ledger_text(gate.strategy)
     ) THEN
         RAISE EXCEPTION 'cannot migrate legacy setup_gate_evaluations: row violates canonical version 1 gate contract or lacks a defensible mapping';
     END IF;
@@ -1438,11 +1437,10 @@ ALTER TABLE daily_evaluation_runs
         status IN ('started', 'data_incomplete', 'evaluated', 'published', 'failed')
     ),
     ADD CONSTRAINT daily_evaluation_runs_identity_contract_check CHECK (
-        run_identity <> '' AND run_identity = btrim(run_identity)
-        AND evaluator_name <> '' AND evaluator_name = btrim(evaluator_name)
-        AND evaluator_version <> '' AND evaluator_version = btrim(evaluator_version)
-        AND universe_snapshot_id <> ''
-        AND universe_snapshot_id = btrim(universe_snapshot_id)
+        wolfy_is_canonical_ledger_text(run_identity)
+        AND wolfy_is_canonical_ledger_text(evaluator_name)
+        AND wolfy_is_canonical_ledger_text(evaluator_version)
+        AND wolfy_is_canonical_ledger_text(universe_snapshot_id)
     ),
     ADD CONSTRAINT daily_evaluation_runs_stage_metadata_check CHECK (
         cardinality(required_stage_names) > 0
@@ -1518,20 +1516,20 @@ ALTER TABLE ingestion_run_manifests
         AND (raw_payload_sha256 IS NULL OR raw_payload_sha256 ~ '^[0-9a-f]{64}$')
         AND (
             immutable_object_ref IS NULL
-            OR (immutable_object_ref <> '' AND immutable_object_ref = btrim(immutable_object_ref))
+            OR wolfy_is_canonical_ledger_text(immutable_object_ref)
         )
     ),
     ADD CONSTRAINT ingestion_run_manifests_chronology_check CHECK (
         completed_at IS NULL OR completed_at >= started_at
     ),
     ADD CONSTRAINT ingestion_run_manifests_contract_check CHECK (
-        dataset <> '' AND dataset = btrim(dataset)
-        AND provider <> '' AND provider = btrim(provider)
-        AND source_endpoint <> '' AND source_endpoint = btrim(source_endpoint)
-        AND entitlement_class <> '' AND entitlement_class = btrim(entitlement_class)
-        AND delay_class <> '' AND delay_class = btrim(delay_class)
-        AND parser_version <> '' AND parser_version = btrim(parser_version)
-        AND schema_version <> '' AND schema_version = btrim(schema_version)
+        wolfy_is_canonical_ledger_text(dataset)
+        AND wolfy_is_canonical_ledger_text(provider)
+        AND wolfy_is_canonical_ledger_text(source_endpoint)
+        AND wolfy_is_canonical_ledger_text(entitlement_class)
+        AND wolfy_is_canonical_ledger_text(delay_class)
+        AND wolfy_is_canonical_ledger_text(parser_version)
+        AND wolfy_is_canonical_ledger_text(schema_version)
         AND expected_symbol_count >= 0 AND received_symbol_count >= 0
         AND expected_row_count >= 0 AND received_row_count >= 0
         AND retry_count >= 0
@@ -1611,11 +1609,11 @@ BEGIN
            OR jsonb_typeof(gate.metrics) IS DISTINCT FROM 'object'
            OR jsonb_typeof(gate.provenance) IS DISTINCT FROM 'object'
            OR gate.source_fingerprint IS NULL
-           OR gate.source_fingerprint = ''
-           OR gate.source_fingerprint <> btrim(gate.source_fingerprint)
+           OR NOT wolfy_is_canonical_ledger_text(gate.source_fingerprint)
+           OR NOT wolfy_is_canonical_ledger_text(gate.ticker)
            OR gate.ticker <> upper(gate.ticker)
            OR gate.strategy IS NULL
-           OR btrim(gate.strategy) = ''
+           OR NOT wolfy_is_canonical_ledger_text(gate.strategy)
     ) THEN
         RAISE EXCEPTION 'cannot migrate legacy setup_gate_evaluations: canonical backfill validation failed';
     END IF;
@@ -1636,7 +1634,15 @@ ALTER TABLE setup_gate_evaluations
     ALTER COLUMN updated_at SET DEFAULT now(),
     ALTER COLUMN updated_at SET NOT NULL;
 ALTER TABLE setup_gate_evaluations
-    DROP CONSTRAINT IF EXISTS setup_gate_evaluations_reason_codes_check;
+    DROP CONSTRAINT IF EXISTS setup_gate_evaluations_reason_codes_check,
+    DROP CONSTRAINT IF EXISTS setup_gate_evaluations_text_contract_check;
+ALTER TABLE setup_gate_evaluations
+    ADD CONSTRAINT setup_gate_evaluations_text_contract_check CHECK (
+        wolfy_is_canonical_ledger_text(ticker)
+        AND ticker = upper(ticker)
+        AND wolfy_is_canonical_ledger_text(strategy)
+        AND wolfy_is_canonical_ledger_text(source_fingerprint)
+    );
 
 CREATE OR REPLACE FUNCTION wolfy_validate_ingestion_manifest()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -1736,10 +1742,10 @@ BEGIN
        OR jsonb_typeof(NEW.gate_facts) <> 'object'
        OR jsonb_typeof(NEW.metrics) <> 'object'
        OR jsonb_typeof(NEW.provenance) <> 'object'
-       OR NEW.source_fingerprint = ''
-       OR NEW.source_fingerprint <> btrim(NEW.source_fingerprint)
+       OR NOT wolfy_is_canonical_ledger_text(NEW.source_fingerprint)
+       OR NOT wolfy_is_canonical_ledger_text(NEW.ticker)
        OR NEW.ticker <> upper(NEW.ticker)
-       OR btrim(NEW.strategy) = ''
+       OR NOT wolfy_is_canonical_ledger_text(NEW.strategy)
     THEN
         RAISE EXCEPTION 'noncanonical setup gate evaluation';
     END IF;
@@ -1803,6 +1809,11 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'daily evaluation run identity tuple is immutable after insert';
     END IF;
+    IF TG_OP = 'UPDATE'
+       AND NEW.required_stage_names IS DISTINCT FROM OLD.required_stage_names
+    THEN
+        RAISE EXCEPTION 'daily evaluation run required stages are immutable after insert';
+    END IF;
     IF NEW.run_identity IS DISTINCT FROM wolfy_daily_run_identity(
         NEW.target_session,
         NEW.evaluator_name,
@@ -1815,8 +1826,7 @@ BEGIN
        OR EXISTS (
            SELECT 1 FROM unnest(NEW.required_stage_names) AS stage(value)
            WHERE stage.value IS NULL
-              OR btrim(stage.value) = ''
-              OR stage.value <> btrim(stage.value)
+              OR NOT wolfy_is_canonical_ledger_text(stage.value)
        )
        OR NEW.required_stage_names IS DISTINCT FROM (
            SELECT array_agg(stage.value ORDER BY stage.value)
@@ -1855,8 +1865,7 @@ BEGIN
         IF cardinality(NEW.required_stage_names) = 0
            OR EXISTS (
                SELECT 1 FROM unnest(NEW.required_stage_names) AS required_stage(value)
-               WHERE required_stage.value = ''
-                  OR required_stage.value <> btrim(required_stage.value)
+               WHERE NOT wolfy_is_canonical_ledger_text(required_stage.value)
            )
            OR cardinality(NEW.required_stage_names) <> (
                SELECT count(DISTINCT required_stage.value)
@@ -1879,13 +1888,11 @@ BEGIN
                OR stage_data->>'computed_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+]00:00)$'
                OR stage_data->>'available_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+]00:00)$'
                OR (stage_data->>'available_at')::timestamptz < (stage_data->>'computed_at')::timestamptz
-               OR COALESCE(stage_data->>'transformation_version', '') = ''
-               OR stage_data->>'transformation_version' <> btrim(stage_data->>'transformation_version')
+               OR NOT wolfy_is_canonical_ledger_text(stage_data->>'transformation_version')
                OR jsonb_typeof(stage_data->'source_run_ids') <> 'array'
                OR jsonb_array_length(stage_data->'source_run_ids') = 0
                OR stage_data->>'input_hash' !~ '^[0-9a-f]{64}$'
-               OR COALESCE(stage_data->>'universe_snapshot_id', '') = ''
-               OR stage_data->>'universe_snapshot_id' <> btrim(stage_data->>'universe_snapshot_id')
+               OR NOT wolfy_is_canonical_ledger_text(stage_data->>'universe_snapshot_id')
                OR stage_data->>'universe_snapshot_id' <> NEW.universe_snapshot_id
                OR jsonb_typeof(stage_data->'provenance') <> 'object'
             THEN
@@ -1893,8 +1900,7 @@ BEGIN
             END IF;
             SELECT count(*), count(DISTINCT source_id), count(*) FILTER (
                 WHERE jsonb_typeof(source_value) <> 'string'
-                   OR source_id = ''
-                   OR source_id <> btrim(source_id)
+                   OR NOT wolfy_is_canonical_ledger_text(source_id)
             )
             INTO source_total, source_distinct, source_bad
             FROM (

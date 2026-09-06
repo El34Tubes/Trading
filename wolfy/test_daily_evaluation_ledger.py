@@ -12,6 +12,12 @@ from test_db import resolve_test_dsn, test_connection
 
 UTC = timezone.utc
 
+# The ledger's canonical text contract is intentionally ASCII-only: every C0
+# control, ordinary space, and DEL is forbidden at either edge. PostgreSQL
+# text cannot represent NUL, so it is covered at the Python boundary only.
+ASCII_EDGE_CHARS = tuple(chr(codepoint) for codepoint in range(33)) + ("\x7f",)
+SQL_ASCII_EDGE_CHARS = tuple(chr(codepoint) for codepoint in range(1, 33)) + ("\x7f",)
+
 
 def _now() -> datetime:
     return datetime(2099, 3, 2, 20, tzinfo=UTC)
@@ -134,6 +140,58 @@ def test_database_identity_is_frozen_in_every_nonpublished_status(status):
             conn.execute(
                 "UPDATE daily_evaluation_runs SET target_session=target_session + 1 WHERE id=%s",
                 (run.run_id,),
+            )
+
+
+@pytest.mark.parametrize(
+    "status", ["started", "data_incomplete", "evaluated", "failed", "published"]
+)
+def test_database_freezes_required_stages_after_insert_in_every_status(status):
+    from daily_evaluation_ledger import transition_daily_run
+
+    with test_connection() as conn:
+        universe = f"stage-contract-{status}"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        if status == "published":
+            _make_publishable(conn, run.run_id, universe_snapshot_id=universe)
+        elif status != "started":
+            transition_daily_run(conn, run.run_id, status)
+
+        with pytest.raises(
+            Exception, match="required stages|published.*immutable"
+        ), conn.transaction():
+            conn.execute(
+                "UPDATE daily_evaluation_runs "
+                "SET required_stage_names=ARRAY['ranking'] WHERE id=%s",
+                (run.run_id,),
+            )
+
+        before = conn.execute(
+            "SELECT updated_at FROM daily_evaluation_runs WHERE id=%s", (run.run_id,)
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE daily_evaluation_runs "
+            "SET required_stage_names=required_stage_names WHERE id=%s",
+            (run.run_id,),
+        )
+        rerun = _create_run(conn, universe_snapshot_id=universe)
+        after = conn.execute(
+            "SELECT updated_at FROM daily_evaluation_runs WHERE id=%s", (run.run_id,)
+        ).fetchone()[0]
+        assert rerun.run_id == run.run_id
+        assert after == before
+
+
+def test_python_rerun_still_rejects_distinct_required_stages():
+    from daily_evaluation_ledger import LedgerValidationError
+
+    with test_connection() as conn:
+        _create_run(conn, universe_snapshot_id="stage-rerun-mismatch")
+        with pytest.raises(LedgerValidationError, match="required_stages"):
+            _create_run(
+                conn,
+                universe_snapshot_id="stage-rerun-mismatch",
+                required_stages=("ranking",),
             )
 
 
@@ -459,6 +517,192 @@ def test_database_accepts_only_the_canonical_pass_row_from_direct_sql():
             """,
             (run.run_id, "sha256:" + "e" * 64, _now()),
         )
+
+
+@pytest.mark.parametrize(
+    ("writer", "field"),
+    [
+        ("run", "evaluator_name"),
+        ("run", "evaluator_version"),
+        ("run", "universe_snapshot_id"),
+        ("run", "required_stages"),
+        ("manifest", "dataset"),
+        ("manifest", "provider"),
+        ("manifest", "source_endpoint"),
+        ("manifest", "entitlement_class"),
+        ("manifest", "delay_class"),
+        ("manifest", "parser_version"),
+        ("manifest", "schema_version"),
+        ("manifest", "immutable_object_ref"),
+        ("gate", "ticker"),
+        ("gate", "strategy"),
+        ("gate", "source_fingerprint"),
+        ("derived", "stage_name"),
+        ("derived", "transformation_version"),
+        ("derived", "source_run_ids"),
+        ("derived", "universe_snapshot_id"),
+    ],
+)
+def test_python_ledger_text_rejects_every_ascii_control_or_space_at_edges(
+    writer, field
+):
+    from daily_evaluation_ledger import (
+        LedgerValidationError,
+        record_derived_stage_metadata,
+        upsert_gate_evaluation,
+        upsert_ingestion_manifest,
+    )
+
+    with test_connection() as conn:
+        run = _create_run(
+            conn, universe_snapshot_id=f"ascii-python-{writer}-{field}-{uuid.uuid4().hex}"
+        )
+        for edge in ASCII_EDGE_CHARS:
+            for invalid in (edge + "value", "value" + edge):
+                with pytest.raises(LedgerValidationError):
+                    if writer == "run":
+                        overrides = {field: (invalid,) if field == "required_stages" else invalid}
+                        values = {
+                            "universe_snapshot_id": f"ascii-run-{uuid.uuid4().hex}"
+                        }
+                        values.update(overrides)
+                        _create_run(conn, **values)
+                    elif writer == "manifest":
+                        overrides = {field: invalid}
+                        if field == "immutable_object_ref":
+                            overrides["raw_payload_sha256"] = None
+                        upsert_ingestion_manifest(
+                            conn, run.run_id, _manifest(**overrides)
+                        )
+                    elif writer == "gate":
+                        value = invalid.upper() if field == "ticker" else invalid
+                        upsert_gate_evaluation(conn, run.run_id, _gate(**{field: value}))
+                    else:
+                        value = (invalid,) if field == "source_run_ids" else invalid
+                        record_derived_stage_metadata(
+                            conn,
+                            run.run_id,
+                            _derived(**{field: value}),
+                        )
+
+
+@pytest.mark.parametrize("value", ["canonical", "with interior space", "\u00a0unicode\u00a0"])
+def test_python_and_database_accept_same_canonical_ascii_text_boundaries(value):
+    from daily_evaluation_ledger import _is_canonical_string
+
+    with test_connection() as conn:
+        database_result = conn.execute(
+            "SELECT wolfy_is_canonical_ledger_text(%s)", (value,)
+        ).fetchone()[0]
+    assert _is_canonical_string(value) is database_result is True
+
+
+@pytest.mark.parametrize("edge", SQL_ASCII_EDGE_CHARS)
+def test_python_and_database_reject_same_ascii_text_boundaries(edge):
+    from daily_evaluation_ledger import _is_canonical_string
+
+    with test_connection() as conn:
+        for invalid in (edge + "value", "value" + edge, edge):
+            database_result = conn.execute(
+                "SELECT wolfy_is_canonical_ledger_text(%s)", (invalid,)
+            ).fetchone()[0]
+            assert _is_canonical_string(invalid) is database_result is False
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("daily_evaluation_runs", "evaluator_name"),
+        ("daily_evaluation_runs", "evaluator_version"),
+        ("daily_evaluation_runs", "universe_snapshot_id"),
+        ("ingestion_run_manifests", "dataset"),
+        ("ingestion_run_manifests", "provider"),
+        ("ingestion_run_manifests", "source_endpoint"),
+        ("ingestion_run_manifests", "entitlement_class"),
+        ("ingestion_run_manifests", "delay_class"),
+        ("ingestion_run_manifests", "parser_version"),
+        ("ingestion_run_manifests", "schema_version"),
+        ("setup_gate_evaluations", "ticker"),
+        ("setup_gate_evaluations", "strategy"),
+        ("setup_gate_evaluations", "source_fingerprint"),
+    ],
+)
+@pytest.mark.parametrize("invalid", ["", "\tvalue", "value\n", "\x01value", "value\x7f"])
+def test_database_rejects_noncanonical_ledger_text_from_direct_sql(
+    table, column, invalid
+):
+    from psycopg import sql
+
+    from daily_evaluation_ledger import upsert_gate_evaluation, upsert_ingestion_manifest
+
+    with test_connection() as conn:
+        run = _create_run(
+            conn, universe_snapshot_id=f"ascii-sql-{table}-{column}-{uuid.uuid4().hex}"
+        )
+        manifest_id = upsert_ingestion_manifest(conn, run.run_id, _manifest())
+        gate_id = upsert_gate_evaluation(conn, run.run_id, _gate())
+        row_id = {
+            "daily_evaluation_runs": run.run_id,
+            "ingestion_run_manifests": manifest_id,
+            "setup_gate_evaluations": gate_id,
+        }[table]
+        candidate = invalid.upper() if column == "ticker" else invalid
+        with pytest.raises(Exception), conn.transaction():
+            conn.execute(
+                sql.SQL("UPDATE {} SET {}=%s WHERE id=%s").format(
+                    sql.Identifier(table), sql.Identifier(column)
+                ),
+                (candidate, row_id),
+            )
+
+
+@pytest.mark.parametrize("invalid", ["", "\tref", "ref\n", "\x01ref", "ref\x7f"])
+def test_database_rejects_noncanonical_manifest_object_ref_from_direct_sql(invalid):
+    with test_connection() as conn:
+        run = _create_run(
+            conn, universe_snapshot_id=f"ascii-object-ref-{uuid.uuid4().hex}"
+        )
+        manifest_id = conn.execute(
+            """
+            INSERT INTO ingestion_run_manifests(
+                run_id,dataset,target_session,provider,source_endpoint,
+                entitlement_class,delay_class,started_at,completed_at,
+                expected_symbol_count,received_symbol_count,expected_row_count,
+                received_row_count,retry_count,status,immutable_object_ref,
+                parser_version,schema_version,quality_gate,provenance
+            ) VALUES (%s,'prices','2099-03-02','provider','endpoint','free','t1',
+                      %s,%s,1,1,1,1,0,'completed','canonical-ref','1','1','passed','{}')
+            RETURNING id
+            """,
+            (run.run_id, _now(), _now()),
+        ).fetchone()[0]
+        with pytest.raises(Exception), conn.transaction():
+            conn.execute(
+                "UPDATE ingestion_run_manifests SET immutable_object_ref=%s WHERE id=%s",
+                (invalid, manifest_id),
+            )
+
+
+@pytest.mark.parametrize(
+    "invalid", ["", "\tfeatures", "features\n", "\x01features", "features\x7f"]
+)
+def test_database_rejects_noncanonical_required_stage_names_on_direct_insert(invalid):
+    with test_connection() as conn:
+        token = uuid.uuid4()
+        evaluator = f"direct-stage-{token.hex}"
+        with pytest.raises(Exception, match="noncanonical"), conn.transaction():
+            conn.execute(
+                """
+                INSERT INTO daily_evaluation_runs(
+                    id,run_identity,target_session,evaluator_name,evaluator_version,
+                    universe_snapshot_id,required_stage_names
+                ) VALUES (
+                    %s,wolfy_daily_run_identity('2099-03-02',%s,'1','direct'),
+                    '2099-03-02',%s,'1','direct',ARRAY[%s]
+                )
+                """,
+                (token, evaluator, evaluator, invalid),
+            )
 
 
 def _derived(**overrides):
@@ -1336,11 +1580,15 @@ def _partial_task3_snapshot(conn):
         {"run_identity": " legacy "},
         {"run_identity": "f" * 64},
         {"evaluator_name": ""},
+        {"evaluator_name": "\tevaluator"},
         {"evaluator_version": " 1"},
+        {"evaluator_version": "1\n"},
         {"universe_snapshot_id": "   "},
+        {"universe_snapshot_id": "\x01universe"},
         {"required_stage_names": []},
         {"required_stage_names": ["features", "features"]},
         {"required_stage_names": [" features"]},
+        {"required_stage_names": ["features\x7f"]},
         {"required_stage_names": ["ranking", "features"]},
         {"required_stage_names": [None]},
         {"derived_stage_metadata": []},
@@ -1369,7 +1617,8 @@ def test_task3_schema_rejects_noncanonical_populated_partial_run_atomically(
                 JOIN pg_namespace AS namespace ON namespace.oid=procedure.pronamespace
                 WHERE namespace.nspname=%s
                   AND procedure.proname IN (
-                      'wolfy_python_json_string', 'wolfy_daily_run_identity'
+                      'wolfy_python_json_string', 'wolfy_daily_run_identity',
+                      'wolfy_is_canonical_ledger_text'
                   )
                 """,
                 (schema_name,),
@@ -1386,7 +1635,9 @@ def test_task3_schema_rejects_noncanonical_populated_partial_run_atomically(
     "manifest_overrides",
     [
         {"dataset": ""},
+        {"dataset": "\tdataset"},
         {"provider": " provider "},
+        {"provider": "provider\n"},
         {"source_endpoint": "   "},
         {"entitlement_class": " free"},
         {"delay_class": "t1 "},
@@ -1407,6 +1658,7 @@ def test_task3_schema_rejects_noncanonical_populated_partial_run_atomically(
         {"raw_payload_sha256": None},
         {"immutable_object_ref": "   ", "raw_payload_sha256": None},
         {"immutable_object_ref": " s3://bucket/key ", "raw_payload_sha256": None},
+        {"immutable_object_ref": "\x01s3://bucket/key", "raw_payload_sha256": None},
         {"immutable_object_ref": "s3://bucket/key"},
         {"created_at": _now(), "updated_at": _now() - timedelta(seconds=1)},
     ],
@@ -1467,7 +1719,8 @@ def test_task3_schema_migrates_populated_partial_schema_twice_without_data_loss(
                 row[0]
                 for row in conn.execute(
                     "SELECT conname FROM pg_constraint WHERE conrelid IN "
-                    "('daily_evaluation_runs'::regclass,'ingestion_run_manifests'::regclass)"
+                    "('daily_evaluation_runs'::regclass,'ingestion_run_manifests'::regclass,"
+                    "'setup_gate_evaluations'::regclass)"
                 ).fetchall()
             }
             assert {
@@ -1481,10 +1734,18 @@ def test_task3_schema_migrates_populated_partial_schema_twice_without_data_loss(
                 "ingestion_run_manifests_chronology_check",
                 "ingestion_run_manifests_contract_check",
                 "ingestion_run_manifests_identity_canonical_key",
+                "setup_gate_evaluations_text_contract_check",
             } <= canonical_constraints
             assert conn.execute("SELECT count(*) FROM setup_gate_evaluations").fetchone() == (
                 1,
             )
+            for statement in (
+                "UPDATE daily_evaluation_runs SET required_stage_names=ARRAY['ranking'] WHERE id=%s",
+                "UPDATE ingestion_run_manifests SET dataset=E'\\tdataset' WHERE run_id=%s",
+                "UPDATE setup_gate_evaluations SET ticker=E'\\tZZLEGACY' WHERE run_id=%s",
+            ):
+                with pytest.raises(Exception), conn.transaction():
+                    conn.execute(statement, (run_id,))
         finally:
             conn.execute(
                 sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
@@ -1595,8 +1856,12 @@ def test_task3_upgraded_partial_manifest_rejects_future_direct_sql_bypasses(muta
         {"failed_gates": ["volume_failed"]},
         {"gate_facts": []},
         {"source_fingerprint": " fingerprint "},
+        {"source_fingerprint": "fingerprint\x7f"},
+        {"ticker": ""},
+        {"ticker": "\tZZLEGACY"},
         {"ticker": "zzlegacy"},
         {"strategy": ""},
+        {"strategy": "legacy\n"},
         {"metrics": []},
         {"provenance": []},
         {"reason_codes": ["trend_failed", "volume_failed"]},

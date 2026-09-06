@@ -1,4 +1,9 @@
-"""Typed, transactional persistence for auditable daily setup evaluation runs."""
+"""Typed, transactional persistence for auditable daily setup evaluation runs.
+
+Ledger text is canonical when nonempty and unchanged by stripping ASCII C0
+controls, ordinary space, and DEL from both edges. Unicode whitespace is not
+implicitly normalized, keeping the Python and PostgreSQL contract byte-clear.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ _RUN_TRANSITIONS = {
     "published": frozenset(),
     "failed": frozenset(),
 }
+_ASCII_LEDGER_EDGE_CHARS = "".join(chr(codepoint) for codepoint in range(33)) + "\x7f"
 
 
 class InvalidRunTransition(ValueError):
@@ -148,16 +154,17 @@ def create_daily_run(conn, identity: DailyRunIdentity) -> DailyRun:
     if type(identity.target_session) is not date:
         raise LedgerValidationError("target_session must be a date")
     if any(
-        not isinstance(value, str) or not value
+        not _is_canonical_string(value)
         for value in (
             identity.evaluator_name,
             identity.evaluator_version,
             identity.universe_snapshot_id,
         )
     ):
-        raise LedgerValidationError("run identity strings must be non-empty")
+        raise LedgerValidationError("run identity strings must be non-empty and canonical")
     if (
         not identity.required_stages
+        or any(not _is_canonical_string(stage) for stage in identity.required_stages)
         or tuple(sorted(set(identity.required_stages))) != identity.required_stages
     ):
         raise LedgerValidationError(
@@ -232,7 +239,11 @@ def _require_utc(value: datetime | None, field: str) -> None:
 
 
 def _is_canonical_string(value: object) -> bool:
-    return isinstance(value, str) and bool(value) and value == value.strip()
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip(_ASCII_LEDGER_EDGE_CHARS)
+    )
 
 
 def _validate_json_mapping(value: object, field: str) -> None:
@@ -376,10 +387,12 @@ def upsert_ingestion_manifest(
 
 
 def _validate_gate(evaluation: GateEvaluation) -> None:
-    if not evaluation.ticker or evaluation.ticker != evaluation.ticker.upper():
+    if not _is_canonical_string(evaluation.ticker) or (
+        evaluation.ticker != evaluation.ticker.upper()
+    ):
         raise LedgerValidationError("ticker must be non-empty canonical uppercase")
-    if not evaluation.strategy:
-        raise LedgerValidationError("strategy must be non-empty")
+    if not _is_canonical_string(evaluation.strategy):
+        raise LedgerValidationError("strategy must be a non-empty canonical string")
     if type(evaluation.passed) is not bool:
         raise LedgerValidationError("passed must be a boolean")
     allowed = CANONICAL_REASON_CODES.get(evaluation.reason_code_version)
