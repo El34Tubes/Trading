@@ -723,6 +723,21 @@ def _derived(**overrides):
     return DerivedStageMetadata(**values)
 
 
+def _stored_derived_payload(*, universe_snapshot_id="publish-ready", **overrides):
+    payload = {
+        "input_session": "2099-03-02",
+        "computed_at": "2099-03-02T20:03:00+00:00",
+        "available_at": "2099-03-02T20:04:00+00:00",
+        "transformation_version": "feature-pipeline-5",
+        "source_run_ids": ["massive-ingest-20990302"],
+        "input_hash": "b" * 64,
+        "universe_snapshot_id": universe_snapshot_id,
+        "provenance": {"code_commit": "abc123"},
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _make_publishable(conn, run_id, *, universe_snapshot_id="publish-ready"):
     from daily_evaluation_ledger import (
         record_derived_stage_metadata,
@@ -763,6 +778,119 @@ def test_derived_stage_metadata_persists_required_audit_fields_idempotently():
         assert metadata["input_hash"] == "b" * 64
         assert metadata["universe_snapshot_id"] == "publish-ready"
         assert metadata["provenance"] == {"code_commit": "abc123"}
+
+
+@pytest.mark.parametrize("status", ["started", "data_incomplete", "evaluated", "failed"])
+def test_database_rejects_noncanonical_derived_metadata_in_every_nonpublished_status(
+    status,
+):
+    from psycopg.types.json import Jsonb
+
+    from daily_evaluation_ledger import transition_daily_run
+
+    with test_connection() as conn:
+        universe = f"derived-status-{status}"
+        run = _create_run(conn, universe_snapshot_id=universe)
+        if status != "started":
+            transition_daily_run(conn, run.run_id, status)
+        payload = _stored_derived_payload(
+            universe_snapshot_id=universe,
+            transformation_version="\tbad",
+        )
+        with pytest.raises(Exception, match="derived stage metadata"), conn.transaction():
+            conn.execute(
+                "UPDATE daily_evaluation_runs SET derived_stage_metadata=%s WHERE id=%s",
+                (Jsonb({"features": payload}), run.run_id),
+            )
+        assert conn.execute(
+            "SELECT derived_stage_metadata FROM daily_evaluation_runs WHERE id=%s",
+            (run.run_id,),
+        ).fetchone() == ({},)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"\tfeatures": _stored_derived_payload()},
+        {"ranking": _stored_derived_payload()},
+        {"features": []},
+        {"features": {"transformation_version": "feature-pipeline-5"}},
+        {"features": _stored_derived_payload(input_session="2099-02-30")},
+        {"features": _stored_derived_payload(input_session="2099-03-01")},
+        {"features": _stored_derived_payload(computed_at=123)},
+        {"features": _stored_derived_payload(computed_at="2099-03-02 20:03:00+00:00")},
+        {
+            "features": _stored_derived_payload(
+                computed_at="2099-03-02T20:05:00+00:00"
+            )
+        },
+        {"features": _stored_derived_payload(transformation_version="bad\n")},
+        {"features": _stored_derived_payload(transformation_version=True)},
+        {"features": _stored_derived_payload(source_run_ids=[])},
+        {"features": _stored_derived_payload(source_run_ids=[123])},
+        {"features": _stored_derived_payload(source_run_ids=["source\r"])},
+        {"features": _stored_derived_payload(source_run_ids=["source", "source"])},
+        {"features": _stored_derived_payload(input_hash="B" * 64)},
+        {"features": _stored_derived_payload(universe_snapshot_id="other")},
+        {"features": _stored_derived_payload(universe_snapshot_id="publish-ready\t")},
+        {"features": _stored_derived_payload(provenance=[])},
+        {
+            "features": {
+                **_stored_derived_payload(),
+                "unexpected": "field",
+            }
+        },
+    ],
+)
+def test_database_rejects_every_noncanonical_populated_derived_metadata_shape(metadata):
+    from psycopg.types.json import Jsonb
+
+    with test_connection() as conn:
+        run = _create_run(conn, universe_snapshot_id="publish-ready")
+        with pytest.raises(Exception, match="derived stage metadata"):
+            conn.execute(
+                "UPDATE daily_evaluation_runs SET derived_stage_metadata=%s WHERE id=%s",
+                (Jsonb(metadata), run.run_id),
+            )
+
+
+def test_database_rejects_noncanonical_derived_metadata_on_direct_insert():
+    from psycopg.types.json import Jsonb
+
+    from daily_evaluation_ledger import DailyRunIdentity, _identity_key
+
+    identity = DailyRunIdentity(
+        target_session=date(2099, 3, 2),
+        evaluator_name="direct-derived-insert",
+        evaluator_version="1",
+        universe_snapshot_id="direct-derived-insert",
+    )
+    with test_connection() as conn:
+        with pytest.raises(Exception, match="derived stage metadata"):
+            conn.execute(
+                """
+                INSERT INTO daily_evaluation_runs(
+                    id,run_identity,target_session,evaluator_name,evaluator_version,
+                    universe_snapshot_id,required_stage_names,derived_stage_metadata
+                ) VALUES (%s,%s,%s,%s,%s,%s,ARRAY['features'],%s)
+                """,
+                (
+                    uuid.uuid4(),
+                    _identity_key(identity),
+                    identity.target_session,
+                    identity.evaluator_name,
+                    identity.evaluator_version,
+                    identity.universe_snapshot_id,
+                    Jsonb(
+                        {
+                            "features": _stored_derived_payload(
+                                universe_snapshot_id=identity.universe_snapshot_id,
+                                transformation_version="bad\t",
+                            )
+                        }
+                    ),
+                ),
+            )
 
 
 @pytest.mark.parametrize(
@@ -973,7 +1101,9 @@ def test_database_rejects_manifest_target_session_that_differs_from_parent_run()
         {"input_session": "2099-03-01"},
     ],
 )
-def test_database_publish_trigger_revalidates_canonical_stage_metadata(metadata_patch):
+def test_database_write_trigger_rejects_noncanonical_stage_metadata_before_publication(
+    metadata_patch,
+):
     from psycopg.types.json import Jsonb
 
     from daily_evaluation_ledger import (
@@ -991,21 +1121,23 @@ def test_database_publish_trigger_revalidates_canonical_stage_metadata(metadata_
             _derived(universe_snapshot_id="db-canonical-stage-guard"),
         )
         transition_daily_run(conn, run.run_id, "evaluated")
-        conn.execute(
-            """
-            UPDATE daily_evaluation_runs
-            SET derived_stage_metadata =
-                jsonb_set(derived_stage_metadata, '{features}',
-                          derived_stage_metadata->'features' || %s)
-            WHERE id=%s
-            """,
-            (Jsonb(metadata_patch), run.run_id),
-        )
-        with pytest.raises(Exception), conn.transaction():
+        with pytest.raises(
+            Exception, match="derived stage metadata"
+        ), conn.transaction():
             conn.execute(
-                "UPDATE daily_evaluation_runs SET status='published' WHERE id=%s",
-                (run.run_id,),
+                """
+                UPDATE daily_evaluation_runs
+                SET derived_stage_metadata =
+                    jsonb_set(derived_stage_metadata, '{features}',
+                              derived_stage_metadata->'features' || %s)
+                WHERE id=%s
+                """,
+                (Jsonb(metadata_patch), run.run_id),
             )
+        transition_daily_run(conn, run.run_id, "published")
+        assert conn.execute(
+            "SELECT status FROM daily_evaluation_runs WHERE id=%s", (run.run_id,)
+        ).fetchone() == ("published",)
 
 
 @pytest.mark.parametrize(
@@ -1592,6 +1724,14 @@ def _partial_task3_snapshot(conn):
         {"required_stage_names": ["ranking", "features"]},
         {"required_stage_names": [None]},
         {"derived_stage_metadata": []},
+        {
+            "derived_stage_metadata": {
+                "features": _stored_derived_payload(
+                    universe_snapshot_id="legacy-universe",
+                    transformation_version="bad\n",
+                )
+            }
+        },
         {"updated_at": datetime(2000, 1, 1, tzinfo=UTC)},
     ],
 )
@@ -1618,7 +1758,8 @@ def test_task3_schema_rejects_noncanonical_populated_partial_run_atomically(
                 WHERE namespace.nspname=%s
                   AND procedure.proname IN (
                       'wolfy_python_json_string', 'wolfy_daily_run_identity',
-                      'wolfy_is_canonical_ledger_text'
+                      'wolfy_is_canonical_ledger_text',
+                      'wolfy_is_valid_derived_stage_metadata'
                   )
                 """,
                 (schema_name,),
@@ -1746,6 +1887,34 @@ def test_task3_schema_migrates_populated_partial_schema_twice_without_data_loss(
             ):
                 with pytest.raises(Exception), conn.transaction():
                     conn.execute(statement, (run_id,))
+        finally:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema_name)
+                )
+            )
+
+
+def test_task3_schema_preserves_valid_populated_derived_metadata():
+    import psycopg
+    from psycopg import sql
+
+    metadata = {
+        "features": _stored_derived_payload(universe_snapshot_id="legacy-universe")
+    }
+    with psycopg.connect(resolve_test_dsn(), autocommit=True) as conn:
+        schema_name = f"task3_valid_derived_{uuid.uuid4().hex}"
+        try:
+            run_id = _create_partial_task3_schema(
+                conn,
+                schema_name,
+                run_overrides={"derived_stage_metadata": metadata},
+            )
+            conn.execute(_task3_schema_sql())
+            assert conn.execute(
+                "SELECT derived_stage_metadata FROM daily_evaluation_runs WHERE id=%s",
+                (run_id,),
+            ).fetchone() == (metadata,)
         finally:
             conn.execute(
                 sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(

@@ -1090,6 +1090,105 @@ AS $$
     )
 $$;
 
+-- Validate every populated derived stage independently of run lifecycle status.
+-- Empty metadata is valid until stages are recorded; every present top-level key
+-- must name one of the immutable required stages and carry the exact Python
+-- DerivedStageMetadata persistence shape.
+CREATE OR REPLACE FUNCTION wolfy_is_valid_derived_stage_metadata(
+    metadata JSONB,
+    required_stage_names TEXT[],
+    target_session DATE,
+    parent_universe_snapshot_id TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+DECLARE
+    stage_name TEXT;
+    stage_data JSONB;
+    computed_at TIMESTAMPTZ;
+    available_at TIMESTAMPTZ;
+    source_total INTEGER;
+    source_distinct INTEGER;
+    source_bad INTEGER;
+BEGIN
+    IF jsonb_typeof(metadata) IS DISTINCT FROM 'object'
+       OR cardinality(required_stage_names) = 0
+       OR EXISTS (
+           SELECT 1 FROM unnest(required_stage_names) AS required_stage(value)
+           WHERE required_stage.value IS NULL
+              OR NOT wolfy_is_canonical_ledger_text(required_stage.value)
+       )
+       OR required_stage_names IS DISTINCT FROM (
+           SELECT array_agg(required_stage.value ORDER BY required_stage.value)
+           FROM unnest(required_stage_names) AS required_stage(value)
+       )
+       OR cardinality(required_stage_names) <> (
+           SELECT count(DISTINCT required_stage.value)
+           FROM unnest(required_stage_names) AS required_stage(value)
+       )
+    THEN
+        RETURN FALSE;
+    END IF;
+
+    FOR stage_name, stage_data IN SELECT key, value FROM jsonb_each(metadata) LOOP
+        IF NOT wolfy_is_canonical_ledger_text(stage_name)
+           OR NOT stage_name = ANY(required_stage_names)
+           OR jsonb_typeof(stage_data) IS DISTINCT FROM 'object'
+           OR (SELECT count(*) FROM jsonb_object_keys(stage_data)) <> 8
+           OR NOT stage_data ?& ARRAY[
+               'input_session', 'computed_at', 'available_at',
+               'transformation_version', 'source_run_ids', 'input_hash',
+               'universe_snapshot_id', 'provenance'
+           ]
+           OR jsonb_typeof(stage_data->'input_session') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(stage_data->'computed_at') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(stage_data->'available_at') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(stage_data->'transformation_version') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(stage_data->'source_run_ids') IS DISTINCT FROM 'array'
+           OR jsonb_typeof(stage_data->'input_hash') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(stage_data->'universe_snapshot_id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(stage_data->'provenance') IS DISTINCT FROM 'object'
+           OR stage_data->>'input_session' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+           OR (stage_data->>'input_session')::DATE IS DISTINCT FROM target_session
+           OR stage_data->>'computed_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+]00:00)$'
+           OR stage_data->>'available_at' !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+]00:00)$'
+           OR NOT wolfy_is_canonical_ledger_text(stage_data->>'transformation_version')
+           OR jsonb_array_length(stage_data->'source_run_ids') = 0
+           OR stage_data->>'input_hash' !~ '^[0-9a-f]{64}$'
+           OR NOT wolfy_is_canonical_ledger_text(stage_data->>'universe_snapshot_id')
+           OR stage_data->>'universe_snapshot_id' IS DISTINCT FROM parent_universe_snapshot_id
+        THEN
+            RETURN FALSE;
+        END IF;
+
+        computed_at := (stage_data->>'computed_at')::TIMESTAMPTZ;
+        available_at := (stage_data->>'available_at')::TIMESTAMPTZ;
+        IF available_at < computed_at THEN
+            RETURN FALSE;
+        END IF;
+
+        SELECT count(*), count(DISTINCT source_id), count(*) FILTER (
+            WHERE jsonb_typeof(source_value) IS DISTINCT FROM 'string'
+               OR NOT wolfy_is_canonical_ledger_text(source_id)
+        )
+        INTO source_total, source_distinct, source_bad
+        FROM (
+            SELECT source_value, source_value #>> '{}' AS source_id
+            FROM jsonb_array_elements(stage_data->'source_run_ids') AS source_value
+        ) AS source_ids;
+        IF source_bad > 0 OR source_total <> source_distinct THEN
+            RETURN FALSE;
+        END IF;
+    END LOOP;
+    RETURN TRUE;
+EXCEPTION
+    WHEN invalid_datetime_format OR datetime_field_overflow THEN
+        RETURN FALSE;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS daily_evaluation_runs (
     id UUID PRIMARY KEY,
     run_identity TEXT NOT NULL UNIQUE,
@@ -1248,7 +1347,12 @@ BEGIN
            )
            OR (
                run.derived_stage_metadata IS NOT NULL
-               AND jsonb_typeof(run.derived_stage_metadata) IS DISTINCT FROM 'object'
+               AND NOT wolfy_is_valid_derived_stage_metadata(
+                   run.derived_stage_metadata,
+                   COALESCE(run.required_stage_names, ARRAY['features']::TEXT[]),
+                   run.target_session,
+                   run.universe_snapshot_id
+               )
            )
            OR (
                run.created_at IS NOT NULL AND run.updated_at IS NOT NULL
@@ -1444,7 +1548,12 @@ ALTER TABLE daily_evaluation_runs
     ),
     ADD CONSTRAINT daily_evaluation_runs_stage_metadata_check CHECK (
         cardinality(required_stage_names) > 0
-        AND jsonb_typeof(derived_stage_metadata) = 'object'
+        AND wolfy_is_valid_derived_stage_metadata(
+            derived_stage_metadata,
+            required_stage_names,
+            target_session,
+            universe_snapshot_id
+        )
     ),
     ADD CONSTRAINT daily_evaluation_runs_chronology_check CHECK (
         updated_at >= created_at
@@ -1771,7 +1880,12 @@ BEGIN
         ALTER TABLE daily_evaluation_runs
             ADD CONSTRAINT daily_evaluation_runs_stage_metadata_check CHECK (
                 cardinality(required_stage_names) > 0
-                AND jsonb_typeof(derived_stage_metadata) = 'object'
+                AND wolfy_is_valid_derived_stage_metadata(
+                    derived_stage_metadata,
+                    required_stage_names,
+                    target_session,
+                    universe_snapshot_id
+                )
             );
     END IF;
 END
@@ -1836,9 +1950,14 @@ BEGIN
            SELECT count(DISTINCT stage.value)
            FROM unnest(NEW.required_stage_names) AS stage(value)
        )
-       OR jsonb_typeof(NEW.derived_stage_metadata) IS DISTINCT FROM 'object'
+       OR NOT wolfy_is_valid_derived_stage_metadata(
+           NEW.derived_stage_metadata,
+           NEW.required_stage_names,
+           NEW.target_session,
+           NEW.universe_snapshot_id
+       )
     THEN
-        RAISE EXCEPTION 'noncanonical daily evaluation run stages or metadata';
+        RAISE EXCEPTION 'noncanonical daily evaluation run stages or derived stage metadata';
     END IF;
     IF TG_OP = 'UPDATE' AND NEW.status <> OLD.status THEN
         IF NOT (
