@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, cast
 
 
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
@@ -730,7 +730,13 @@ def _massive_paginated_results(path: str, params: dict[str, object], *, max_page
     return results
 
 
-def fetch_massive_corporate_actions(tickers: Sequence[str], *, since: date, until: date) -> dict[str, list[dict]]:
+def fetch_massive_corporate_actions(
+    tickers: Sequence[str],
+    *,
+    since: date,
+    until: date,
+    include_dividends: bool = True,
+) -> dict[str, list[dict]]:
     """Fetch recent corporate actions in bulk and map them to requested tickers."""
     wanted = {ticker.upper() for ticker in tickers}
     actions: dict[str, list[dict]] = {ticker: [] for ticker in wanted}
@@ -739,11 +745,13 @@ def fetch_massive_corporate_actions(tickers: Sequence[str], *, since: date, unti
         {"execution_date.gte": since.isoformat(), "execution_date.lte": until.isoformat(), "limit": 1000, "sort": "execution_date"},
         max_pages=5,
     )
-    dividends = _massive_paginated_results(
-        "/v3/reference/dividends",
-        {"ex_dividend_date.gte": since.isoformat(), "ex_dividend_date.lte": until.isoformat(), "limit": 1000, "sort": "ex_dividend_date"},
-        max_pages=5,
-    )
+    dividends = []
+    if include_dividends:
+        dividends = _massive_paginated_results(
+            "/v3/reference/dividends",
+            {"ex_dividend_date.gte": since.isoformat(), "ex_dividend_date.lte": until.isoformat(), "limit": 1000, "sort": "ex_dividend_date"},
+            max_pages=5,
+        )
     for row in splits:
         ticker = str(row.get("ticker") or "").upper()
         if ticker in wanted:
@@ -792,8 +800,18 @@ def validate_price_data_quality(
     if check_corporate_actions and ticker_list:
         since = as_of - timedelta(days=corporate_action_lookback_days)
         corporate_actions = fetch_massive_corporate_actions(ticker_list, since=since, until=as_of)
+        completed_splits = _completed_split_refetches(conn, ticker_list)
         for ticker, action_rows in corporate_actions.items():
-            splits = [row for row in action_rows if row.get("kind") == "split"]
+            splits = []
+            for row in action_rows:
+                if row.get("kind") != "split" or not row.get("execution_date"):
+                    continue
+                try:
+                    split_date_text = date.fromisoformat(str(row["execution_date"])[:10]).isoformat()
+                except ValueError:
+                    continue
+                if (ticker, split_date_text) not in completed_splits:
+                    splits.append(row)
             if splits:
                 events.append({"ticker": ticker, "severity": "review", "reason": "recent_split_requires_adjustment_audit", "detail": {"splits": splits[:5]}})
     for event in events:
@@ -818,14 +836,28 @@ def validate_price_data_quality(
 def _price_history_state(conn, tickers: Sequence[str]) -> dict[str, dict[str, object]]:
     rows = conn.execute(
         """
-        SELECT ticker, max(dt) AS latest_dt, count(*) AS bars
+        SELECT ticker, min(dt) AS earliest_dt, max(dt) AS latest_dt, count(*) AS bars
         FROM prices
         WHERE ticker = ANY(%s)
         GROUP BY ticker
         """,
         ([ticker.upper() for ticker in tickers],),
     ).fetchall()
-    return {row[0]: {"latest_dt": row[1], "bars": int(row[2])} for row in rows}
+    return {row[0]: {"earliest_dt": row[1], "latest_dt": row[2], "bars": int(row[3])} for row in rows}
+
+
+def _completed_split_refetches(conn, tickers: Sequence[str]) -> set[tuple[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT ticker, jsonb_array_elements_text(detail->'split_execution_dates')
+        FROM price_data_quality_events
+        WHERE ticker = ANY(%s)
+          AND reason = 'corporate_action_refetch_completed'
+          AND jsonb_typeof(detail->'split_execution_dates') = 'array'
+        """,
+        ([ticker.upper() for ticker in tickers],),
+    ).fetchall()
+    return {(row[0], row[1]) for row in rows}
 
 
 def _fetch_incremental_massive_bars(
@@ -841,11 +873,40 @@ def _fetch_incremental_massive_bars(
     end_dt = end_dt or _default_massive_eod_end_dt()
     full_start_dt = end_dt - timedelta(days=days)
     state = _price_history_state(conn, tickers)
+    stored_tickers = [ticker.upper() for ticker in tickers if state.get(ticker.upper(), {}).get("earliest_dt")]
+    split_refetches: set[str] = set()
+    split_execution_dates: dict[str, list[str]] = {}
+    if stored_tickers:
+        completed_splits = _completed_split_refetches(conn, stored_tickers)
+        earliest_stored_dt = min(cast(date, state[ticker]["earliest_dt"]) for ticker in stored_tickers)
+        actions = fetch_massive_corporate_actions(
+            stored_tickers,
+            since=earliest_stored_dt,
+            until=end_dt,
+            include_dividends=False,
+        )
+        for ticker in stored_tickers:
+            ticker_earliest_dt = cast(date, state[ticker]["earliest_dt"])
+            for action in actions.get(ticker, []):
+                execution_date = action.get("execution_date")
+                if action.get("kind") != "split" or not execution_date:
+                    continue
+                try:
+                    split_dt = date.fromisoformat(str(execution_date)[:10])
+                except ValueError:
+                    continue
+                split_date_text = split_dt.isoformat()
+                if ticker_earliest_dt <= split_dt <= end_dt and (ticker, split_date_text) not in completed_splits:
+                    split_refetches.add(ticker)
+                    split_execution_dates.setdefault(ticker, []).append(split_date_text)
     bars: list[PriceBar] = []
     fetch_plan: list[dict] = []
     for ticker in [ticker.upper() for ticker in tickers]:
         info = state.get(ticker)
-        if not info or int(info.get("bars") or 0) < min_history_bars:
+        if ticker in split_refetches:
+            start_dt = full_start_dt
+            reason = "corporate_action_refetch"
+        elif not info or cast(int, info.get("bars", 0)) < min_history_bars:
             start_dt = full_start_dt
             reason = "bootstrap_or_insufficient_history"
         else:
@@ -857,7 +918,10 @@ def _fetch_incremental_massive_bars(
             continue
         fetched = fetch_massive_eod_bars([ticker], start_dt=start_dt, end_dt=end_dt, adjusted=adjusted, pause_seconds=pause_seconds)
         bars.extend(fetched)
-        fetch_plan.append({"ticker": ticker, "skipped": False, "reason": reason, "start_dt": start_dt.isoformat(), "end_dt": end_dt.isoformat(), "bars_fetched": len(fetched)})
+        plan_item = {"ticker": ticker, "skipped": False, "reason": reason, "start_dt": start_dt.isoformat(), "end_dt": end_dt.isoformat(), "bars_fetched": len(fetched)}
+        if reason == "corporate_action_refetch":
+            plan_item["split_execution_dates"] = sorted(set(split_execution_dates[ticker]))
+        fetch_plan.append(plan_item)
     return bars, fetch_plan
 
 
@@ -902,6 +966,21 @@ def massive_ingest(
                 bars.extend(fallback_bars)
                 eodhs_fallback = {"requested_tickers": missing[:eodhs_fallback_max_tickers], "bars_fetched": len(fallback_bars), "max_tickers": eodhs_fallback_max_tickers}
         ingest_run = ingest_price_bars(conn, bars, source="massive-adjusted-eod" if adjusted else "massive-raw-eod") if bars else None
+        for item in fetch_plan:
+            if item.get("reason") != "corporate_action_refetch" or not item.get("bars_fetched"):
+                continue
+            conn.execute(
+                """
+                INSERT INTO price_data_quality_events(as_of, ticker, severity, source, reason, detail)
+                VALUES (%s, %s, 'info', %s, 'corporate_action_refetch_completed', %s::jsonb)
+                """,
+                (
+                    end_dt or _default_massive_eod_end_dt(),
+                    item["ticker"],
+                    "massive-adjusted-eod" if adjusted else "massive-raw-eod",
+                    json.dumps({"split_execution_dates": item["split_execution_dates"]}, sort_keys=True),
+                ),
+            )
         feature_run = compute_and_store_features(conn, tickers=tickers, min_dollar_vol=min_dollar_vol)
         validation = validate_price_data_quality(conn, tickers=tickers, source="massive-adjusted-eod", check_corporate_actions=bool(bars)) if validate else None
         latest = conn.execute(

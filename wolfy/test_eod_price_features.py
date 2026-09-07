@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -255,6 +256,7 @@ def test_incremental_massive_plan_skips_current_ticker_without_api_call(monkeypa
         raise AssertionError("Massive should not be called when stored data is already current")
 
     monkeypatch.setattr("eod_price_features.fetch_massive_eod_bars", fail_fetch)
+    monkeypatch.setattr("eod_price_features.fetch_massive_corporate_actions", lambda *args, **kwargs: {ticker: []})
 
     with psycopg.connect(dsn) as conn:
         ensure_eod_feature_schema(conn)
@@ -273,3 +275,148 @@ def test_incremental_massive_plan_skips_current_ticker_without_api_call(monkeypa
 
     assert fetched == []
     assert plan == [{"ticker": ticker, "skipped": True, "reason": "already_current", "latest_dt": str(latest_accessible_dt)}]
+
+
+def test_incremental_massive_plan_refetches_full_history_after_split(monkeypatch):
+    psycopg = pytest.importorskip("psycopg")
+    from eod_price_features import PriceBar, _fetch_incremental_massive_bars, ensure_eod_feature_schema, ingest_price_bars, validate_price_data_quality
+
+    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    ticker = "ZZSPLITAPI"
+    end_dt = date(2026, 7, 20)
+    days = 730
+    full_start_dt = end_dt - timedelta(days=days)
+    stored_dt = date(2025, 1, 2)
+    stored_bars = [
+        PriceBar(ticker, stored_dt, 100, 101, 99, 100, 1000),
+        PriceBar(ticker, end_dt, 104, 105, 103, 104, 1200),
+    ]
+    adjusted_bar = PriceBar(ticker, stored_dt, 25, 26, 24, 25, 4000)
+    fetch_calls = []
+
+    def fake_actions(tickers, *, since, until, **kwargs):
+        assert tickers == [ticker]
+        assert since in {stored_dt, end_dt - timedelta(days=45)}
+        assert until == end_dt
+        return {ticker: [{"kind": "split", "execution_date": "2026-07-15", "split_from": 1, "split_to": 4}]}
+
+    def fake_fetch(tickers, *, start_dt, end_dt, adjusted, pause_seconds):
+        fetch_calls.append((tickers, start_dt, end_dt, adjusted, pause_seconds))
+        return [adjusted_bar]
+
+    monkeypatch.setattr("eod_price_features.fetch_massive_corporate_actions", fake_actions)
+    monkeypatch.setattr("eod_price_features.fetch_massive_eod_bars", fake_fetch)
+
+    with psycopg.connect(dsn) as conn:
+        ensure_eod_feature_schema(conn)
+        run_id = ingest_price_bars(conn, stored_bars, source="unit-split-api")
+        fetched, plan = _fetch_incremental_massive_bars(
+            conn,
+            tickers=[ticker],
+            days=days,
+            adjusted=True,
+            pause_seconds=0,
+            min_history_bars=1,
+            end_dt=end_dt,
+        )
+        conn.execute("DELETE FROM prices WHERE ticker=%s", (ticker,))
+        conn.execute("DELETE FROM runs WHERE id=%s", (run_id,))
+
+    assert fetched == [adjusted_bar]
+    assert fetch_calls == [([ticker], full_start_dt, end_dt, True, 0)]
+    assert plan == [{
+        "ticker": ticker,
+        "skipped": False,
+        "reason": "corporate_action_refetch",
+        "start_dt": full_start_dt.isoformat(),
+        "end_dt": end_dt.isoformat(),
+        "bars_fetched": 1,
+        "split_execution_dates": ["2026-07-15"],
+    }]
+
+    with psycopg.connect(dsn) as conn:
+        ensure_eod_feature_schema(conn)
+        run_id = ingest_price_bars(conn, stored_bars, source="unit-split-api")
+        conn.execute(
+            """
+            INSERT INTO price_data_quality_events(as_of, ticker, severity, source, reason, detail)
+            VALUES (%s, %s, 'info', 'unit-split-api', 'corporate_action_refetch_completed', %s::jsonb)
+            """,
+            (end_dt, ticker, json.dumps({"split_execution_dates": ["2026-07-15"]})),
+        )
+        fetch_calls.clear()
+        second_fetched, second_plan = _fetch_incremental_massive_bars(
+            conn,
+            tickers=[ticker],
+            days=days,
+            adjusted=True,
+            pause_seconds=0,
+            min_history_bars=1,
+            end_dt=end_dt,
+        )
+        validation = validate_price_data_quality(
+            conn,
+            tickers=[ticker],
+            source="unit-split-api",
+            as_of=end_dt,
+        )
+        unresolved_split_audits = conn.execute(
+            """
+            SELECT count(*) FROM price_data_quality_events
+            WHERE ticker=%s AND reason='recent_split_requires_adjustment_audit'
+            """,
+            (ticker,),
+        ).fetchone()[0]
+        conn.execute("DELETE FROM price_data_quality_events WHERE ticker=%s AND source='unit-split-api'", (ticker,))
+        conn.execute("DELETE FROM prices WHERE ticker=%s", (ticker,))
+        conn.execute("DELETE FROM runs WHERE id=%s", (run_id,))
+
+    assert second_fetched == []
+    assert fetch_calls == []
+    assert second_plan == [{"ticker": ticker, "skipped": True, "reason": "already_current", "latest_dt": str(end_dt)}]
+    assert validation["events_recorded"] == 0
+    assert unresolved_split_audits == 0
+
+
+def test_massive_ingest_records_completed_split_refetch(monkeypatch):
+    psycopg = pytest.importorskip("psycopg")
+    from eod_price_features import PriceBar, ensure_eod_feature_schema, massive_ingest
+
+    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    ticker = "ZZSPLITMARKER"
+    end_dt = date(2026, 7, 20)
+    split_dt = "2026-07-15"
+    adjusted_bar = PriceBar(ticker, end_dt, 25, 26, 24, 25, 4000)
+
+    monkeypatch.setattr(
+        "eod_price_features._fetch_incremental_massive_bars",
+        lambda *args, **kwargs: ([adjusted_bar], [{
+            "ticker": ticker,
+            "skipped": False,
+            "reason": "corporate_action_refetch",
+            "start_dt": "2024-07-20",
+            "end_dt": end_dt.isoformat(),
+            "bars_fetched": 1,
+            "split_execution_dates": [split_dt],
+        }]),
+    )
+    monkeypatch.setattr("eod_price_features.compute_and_store_features", lambda *args, **kwargs: None)
+
+    result = massive_ingest(tickers=[ticker], dsn=dsn, validate=False, end_dt=end_dt)
+
+    with psycopg.connect(dsn) as conn:
+        ensure_eod_feature_schema(conn)
+        marker = conn.execute(
+            """
+            SELECT severity, detail->'split_execution_dates'
+            FROM price_data_quality_events
+            WHERE ticker=%s AND reason='corporate_action_refetch_completed'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (ticker,),
+        ).fetchone()
+        conn.execute("DELETE FROM price_data_quality_events WHERE ticker=%s", (ticker,))
+        conn.execute("DELETE FROM prices WHERE ticker=%s", (ticker,))
+        conn.execute("DELETE FROM runs WHERE id=%s", (result["ingest_run_id"],))
+
+    assert marker == ("info", [split_dt])
