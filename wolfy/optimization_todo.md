@@ -1,5 +1,16 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-09 daily optimizer plan-only run
+
+- Time: 2026-09-09 02:16 ET / 06:16 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=235502 cap=200000` (exit 1), so this run followed PLAN-ONLY: review/state/KPI updates only, with no code/config/cron/migration implementation.
+- Guardian/probation: no probation marker existed; the production-home guardian returned `GUARDIAN=ok`; config YAML and cron JSON parsed; `hermes cron list` and gateway status succeeded; optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remained healthy/enabled.
+- Review/state: prior task `3212` / DQ-1 split-safe ingest slice A and commit `ae2753b46f7043e512cbd05605a365afc5f29278` passed fresh review: targeted 11 tests and full Wolfy 191 tests passed, commit scope remained exactly two files, and `git show --check` passed. Created/claimed plan-only task `4083` and run `400853`.
+- KPI: exactly 25 required keys were stored against the linked run with measured/carried-forward provenance; final capture was 235520 completed tokens, 0% headroom, core freshness 34/34 at 2026-09-04, and depth readiness 1316/1358 at the 495-bar threshold.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: deterministic token-cap exhaustion remains an absolute implementation stop; retain the queued DQ-1B correctness slice without claiming it, preserve guardian/concurrency controls, and never retry the excluded OWS-5a change.
+- NEXT ACTION: after budget headroom recovers, execute task `4065` / DQ-1B to escalate unresolved split audits after one completed ingest cycle, with focused fixture, idempotency, full-suite, and no-live-execution verification; keep orchestration unchanged until the probation-anchor defect is safely resolved outside the optimizer.
+
 ## 2026-09-08 daily optimizer plan-only run
 
 - Time: 2026-09-08 02:16 ET / 06:16 UTC; outside all protected market/report windows.
