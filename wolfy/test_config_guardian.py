@@ -10,6 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 GUARDIAN = ROOT / "guardian" / "config_guardian.py"
+# Never let subprocess-based tests write guardian telemetry into the live DB.
+TEST_DSN = "dbname=wolfy_test_config_guardian_disabled user=root host=/var/run/postgresql"
 
 
 def write_min_home(home: Path) -> None:
@@ -40,7 +42,7 @@ def test_config_guardian_restores_known_good_on_broken_config_and_expired_probat
     write_min_home(home)
 
     first = subprocess.run(
-        [sys.executable, str(GUARDIAN), "--home", str(home), "--skip-cli", "--snapshot", "--dsn", "dbname=wolfy user=root host=/var/run/postgresql"],
+        [sys.executable, str(GUARDIAN), "--home", str(home), "--skip-cli", "--snapshot", "--dsn", TEST_DSN],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -57,7 +59,7 @@ def test_config_guardian_restores_known_good_on_broken_config_and_expired_probat
     probation.write_text(json.dumps({"change": "test-broken-config", "expires_at": expired}) + "\n")
 
     second = subprocess.run(
-        [sys.executable, str(GUARDIAN), "--home", str(home), "--skip-cli", "--dsn", "dbname=wolfy user=root host=/var/run/postgresql"],
+        [sys.executable, str(GUARDIAN), "--home", str(home), "--skip-cli", "--dsn", TEST_DSN],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
