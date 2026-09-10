@@ -46,6 +46,43 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def declarative_jobs_hash(path: Path) -> str:
+    """Hash cron intent while ignoring scheduler-owned runtime churn."""
+    data = json.loads(path.read_text())
+    if isinstance(data, dict):
+        data.pop("updated_at", None)
+        jobs = data.get("jobs", [])
+    else:
+        jobs = data
+    runtime_keys = {
+        "next_run_at",
+        "last_run_at",
+        "last_status",
+        "last_error",
+        "last_delivery_error",
+        "fire_claim",
+        "running_at",
+        "started_at",
+    }
+    for job in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job, dict):
+            continue
+        for key in runtime_keys:
+            job.pop(key, None)
+        # scheduled/running is ticker state; paused remains declarative intent.
+        if job.get("state") != "paused":
+            job["state"] = "active"
+        repeat = job.get("repeat")
+        if isinstance(repeat, dict):
+            repeat.pop("completed", None)
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+    return sha256_bytes(canonical)
+
+
 def guardian_dir(home: Path) -> Path:
     return home / "wolfy" / "guardian"
 
@@ -100,7 +137,7 @@ def current_hashes(home: Path) -> dict[str, str]:
     hashes = {}
     for rel, path in protected_paths(home).items():
         if path.exists():
-            hashes[rel] = sha256_file(path)
+            hashes[rel] = declarative_jobs_hash(path) if rel == "cron/jobs.json" else sha256_file(path)
         else:
             hashes[rel] = "MISSING"
     return hashes
@@ -317,7 +354,14 @@ def run(home: Path, dsn: str, skip_cli: bool = False, force_snapshot: bool = Fal
         return 1
 
     if changed:
-        snapshot(home, reason="healthy_change")
+        if "probation_active" in checks:
+            # Preserve the explicit pre-change rollback anchor throughout
+            # probation while tracking the current probationary live state.
+            manifest["hashes"] = hashes
+            save_manifest(home, manifest)
+            log(home, f"PROBATION_HASH_REFRESH anchor={manifest.get('latest_snapshot')}")
+        else:
+            snapshot(home, reason="healthy_change")
     print("GUARDIAN=ok checks=" + ";".join(checks))
     record_metrics(dsn, 1, rollbacks, ";".join(checks))
     return 0
