@@ -99,3 +99,59 @@ def test_selector_rejects_future_or_old_quote_timestamps():
     reasons = {reason for row in result["rejected_contracts"] for reason in row["reasons"]}
     assert "stale_quote" in reasons
     assert "quote_after_decision_time" in reasons
+
+
+def test_aggressive_policy_selects_economically_positive_modest_otm_long_call():
+    from options_structure_selector import aggressive_options_v2_policy
+
+    policy = aggressive_options_v2_policy()
+    chain = [
+        _c("AGG260821C00103000", "2026-08-21", "103", "0.65", "0.85", oi=10, volume=0),
+    ]
+    result = select_bullish_option_structure(
+        ticker="AGG", underlying_price=Decimal("100"), technical_target=Decimal("108"),
+        as_of=date(2026, 8, 12), contracts=chain, policy=policy,
+    )
+
+    assert result["selected"]["structure"] == "long_call"
+    assert result["selected"]["long_leg"]["strike"] == "103"
+    assert result["selected"]["target_profit"] > 0
+    assert result["selected"]["conservative_debit"] == Decimal("0.8100")
+    assert result["policy"]["policy_version"] == "aggressive_options_v2"
+    assert result["policy"]["min_long_moneyness"] == "0.90"
+    assert result["policy"]["max_long_moneyness"] == "1.05"
+    assert result["policy"]["fill_spread_fraction"] == "0.80"
+
+
+def test_aggressive_policy_rejects_long_leg_over_five_percent_otm_with_audit_reason():
+    from options_structure_selector import aggressive_options_v2_policy
+
+    result = select_bullish_option_structure(
+        ticker="LOTTO", underlying_price=Decimal("100"), technical_target=Decimal("112"),
+        as_of=date(2026, 8, 12),
+        contracts=[_c("LOTTO260821C00105010", "2026-08-21", "105.01", "0.20", "0.25", oi=100, volume=1)],
+        policy=aggressive_options_v2_policy(),
+    )
+
+    assert result["selected"] is None
+    assert result["status"] == "no_tradable_option_structure"
+    assert result["rejected_long_legs"] == [
+        {"symbol": "LOTTO260821C00105010", "reasons": ["long_moneyness_above_1.05"]}
+    ]
+
+
+def test_aggressive_policy_accepts_thirty_five_percent_relative_spread_boundary():
+    from options_structure_selector import aggressive_options_v2_policy
+
+    bid = Decimal("0.65")
+    ask = bid * (Decimal("2") + Decimal("0.35")) / (Decimal("2") - Decimal("0.35"))
+    result = select_bullish_option_structure(
+        ticker="BOUND", underlying_price=Decimal("100"), technical_target=Decimal("108"),
+        as_of=date(2026, 8, 12),
+        contracts=[_c("BOUND260821C00103000", "2026-08-21", "103", str(bid), str(ask), oi=0, volume=1)],
+        policy=aggressive_options_v2_policy(),
+    )
+
+    assert result["selected"] is not None
+    assert result["policy"]["max_relative_spread"] == "0.35"
+    assert result["evaluated_candidates"][0]["target_profit"] > 0

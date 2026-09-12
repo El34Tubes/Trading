@@ -23,7 +23,26 @@ class SelectorPolicy:
     max_relative_spread: Decimal = D("0.25")
     max_quote_age_minutes: int = 30
     fill_spread_fraction: Decimal = D("0.75")
+    min_long_moneyness: Decimal = D("0.90")
+    max_long_moneyness: Decimal = D("1.00")
+    policy_version: str = "strict_options_v1"
     decision_time: datetime | None = None
+
+
+def aggressive_options_v2_policy(*, decision_time: datetime | None = None) -> SelectorPolicy:
+    """Return the separate, looser policy authorized only for aggressive v2 paper research."""
+    return SelectorPolicy(
+        min_dte=7,
+        max_dte=28,
+        min_open_interest=10,
+        min_volume=1,
+        max_relative_spread=D("0.35"),
+        fill_spread_fraction=D("0.80"),
+        min_long_moneyness=D("0.90"),
+        max_long_moneyness=D("1.05"),
+        policy_version="aggressive_options_v2",
+        decision_time=decision_time,
+    )
 
 
 def _d(value: Any) -> Decimal:
@@ -138,15 +157,24 @@ def select_bullish_option_structure(
             eligible.append(normalized)
 
     candidates: list[dict[str, Any]] = []
+    rejected_long_legs: list[dict[str, Any]] = []
     for long in eligible:
-        # Without a trustworthy delta, keep the long leg ATM or modestly ITM;
-        # do not let target-state leverage choose an OTM lottery-ticket long.
-        if long["strike"] > underlying_price or long["strike"] < underlying_price * D("0.90"):
+        moneyness = long["strike"] / underlying_price
+        long_reasons: list[str] = []
+        if moneyness < policy.min_long_moneyness:
+            long_reasons.append(f"long_moneyness_below_{policy.min_long_moneyness}")
+        if moneyness > policy.max_long_moneyness:
+            long_reasons.append(f"long_moneyness_above_{policy.max_long_moneyness}")
+        if long_reasons:
+            rejected_long_legs.append({
+                "symbol": str(long["raw"].get("symbol") or "unknown"),
+                "reasons": long_reasons,
+            })
             continue
         debit = long["buy_fill"]
         target_value = max(technical_target - long["strike"], D("0"))
         target_profit = target_value - debit
-        if target_profit > 0 and long["strike"] <= underlying_price:
+        if target_profit > 0:
             score = (target_profit / debit) - long["relative_spread"] * D("0.5")
             candidates.append({
                 "structure": "long_call", "defined_risk": True, "dte": long["dte"],
@@ -185,10 +213,15 @@ def select_bullish_option_structure(
         "status": "selected" if selected else "no_tradable_option_structure",
         "selected": selected, "evaluated_candidates": candidates,
         "rejected_contracts": rejected,
+        "rejected_long_legs": rejected_long_legs,
         "policy": {
+            "policy_version": policy.policy_version,
             "min_dte": policy.min_dte, "max_dte": policy.max_dte,
             "max_relative_spread": str(policy.max_relative_spread),
             "min_open_interest": policy.min_open_interest, "min_volume": policy.min_volume,
+            "min_long_moneyness": str(policy.min_long_moneyness),
+            "max_long_moneyness": str(policy.max_long_moneyness),
+            "fill_spread_fraction": str(policy.fill_spread_fraction),
             "fill_model": f"buy_at_{policy.fill_spread_fraction}_through_spread_sell_at_{D('1') - policy.fill_spread_fraction}",
             "structures": ["long_call", "call_debit_spread"],
         },
