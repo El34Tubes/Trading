@@ -1,5 +1,16 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-12 daily optimizer plan-only run
+
+- Time: 2026-09-12 02:16 ET / 06:16 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block low_headroom_pct=13.86 threshold=15.00` (exit 1), so this run followed PLAN-ONLY: review/state/KPI updates only, with no code/config/cron/migration implementation.
+- Guardian/probation: no probation marker existed; the production-home guardian returned `GUARDIAN=ok`; config YAML and cron JSON parsed; `hermes cron list` and gateway status succeeded; optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remained healthy/enabled.
+- Review/state: prior optimizer task `4091` and ledger-only commit `da7d2ba3ce4ebed786180497b8af13c1a279a89b` passed scope/check/committed-artifact review; five focused guardian tests passed. Created/claimed plan-only task `4095` and run `402012`.
+- KPI: exactly 25 required keys were stored against the linked run with measured/carried-forward provenance; capture was 172279 completed tokens, limiting provider headroom 13.86%, core freshness 34/34 at the common complete date 2026-09-10, and depth readiness 1316/1358 at the 495-bar threshold.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: provider headroom below the deterministic 15% threshold remains an absolute implementation stop; preserve queued DQ-1B task `4065` without claiming it, and never retry the excluded OWS-5a change.
+- NEXT ACTION: after budget headroom recovers, execute task `4065` / DQ-1B to escalate unresolved split audits after one completed ingest cycle, with focused fixture, idempotency, full-suite, and no-live-execution verification.
+
 ## 2026-09-11 daily optimizer plan-only run
 
 - Time: 2026-09-11 02:16 ET / 06:16 UTC; outside all protected market/report windows.
