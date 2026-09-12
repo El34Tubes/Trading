@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -276,6 +276,23 @@ def ensure_signal_schema(conn) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_status_ticker ON positions(status, ticker)")
+    duplicate = conn.execute(
+        """SELECT ticker,notes->>'signal_dt',notes->>'strategy_name',count(*)
+           FROM recommendations
+           WHERE recommendation_type='experimental_defined_risk_option'
+             AND status IN ('paper_candidate','paper_logged')
+             AND notes->>'signal_dt' IS NOT NULL AND notes->>'strategy_name' IS NOT NULL
+           GROUP BY ticker,notes->>'signal_dt',notes->>'strategy_name'
+           HAVING count(*) > 1 LIMIT 1"""
+    ).fetchone()
+    if duplicate:
+        raise RuntimeError(f"duplicate experimental paper recommendations block unique-index migration: {duplicate!r}")
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_experimental_paper_recommendation_signal
+           ON recommendations (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
+           WHERE recommendation_type='experimental_defined_risk_option'
+             AND status IN ('paper_candidate','paper_logged')"""
+    )
 
 
 def seed_default_strategies(conn) -> dict:
@@ -1154,14 +1171,15 @@ def _broker_notes_for_ticker(
     return normalized, warnings, equity_fallback
 
 
-def _exact_aggressive_v2_option_selection(
-    evaluation: Mapping[str, Any], selected: Mapping[str, Any]
-) -> bool:
+def _recomputed_aggressive_v2_option_selection(
+    evaluation: Mapping[str, Any], selected: Mapping[str, Any], *, ticker: str,
+    underlying_price: Decimal, technical_target: Decimal, signal_dt: date,
+) -> dict[str, Any] | None:
+    """Fail closed unless canonical v2 recomputation exactly matches the submission."""
+    from options_structure_selector import aggressive_options_v2_policy, select_bullish_option_structure
+
     policy = evaluation.get("policy")
-    structure = selected.get("structure")
-    long_leg = selected.get("long_leg")
-    short_leg = selected.get("short_leg")
-    required_leg_fields = {"symbol", "expiration", "strike", "bid", "ask", "quote_at", "multiplier"}
+    contracts = evaluation.get("input_contracts")
     if (
         evaluation.get("status") != "selected"
         or evaluation.get("paper_only") is not True
@@ -1169,22 +1187,29 @@ def _exact_aggressive_v2_option_selection(
         or evaluation.get("broker_order_submitted") is not False
         or not isinstance(policy, Mapping)
         or policy.get("policy_version") != "aggressive_options_v2"
-        or structure not in {"long_call", "call_debit_spread"}
-        or not isinstance(long_leg, Mapping)
-        or not required_leg_fields.issubset(long_leg)
-        or int(long_leg.get("multiplier") or 0) != 100
-        or not 7 <= int(selected.get("dte") or 0) <= 28
-        or _as_decimal(selected.get("target_profit"), Decimal("0")) <= 0
+        or not isinstance(contracts, list)
+        or not contracts
+        or not all(isinstance(contract, Mapping) for contract in contracts)
     ):
-        return False
-    if structure == "long_call":
-        return short_leg is None
-    return bool(
-        isinstance(short_leg, Mapping)
-        and required_leg_fields.issubset(short_leg)
-        and int(short_leg.get("multiplier") or 0) == 100
-        and short_leg.get("expiration") == long_leg.get("expiration") == selected.get("expiration")
-    )
+        return None
+    try:
+        decision_time = datetime.fromisoformat(str(policy.get("decision_time")).replace("Z", "+00:00"))
+        recomputed = select_bullish_option_structure(
+            ticker=ticker,
+            underlying_price=underlying_price,
+            technical_target=technical_target,
+            as_of=signal_dt,
+            contracts=contracts,
+            policy=aggressive_options_v2_policy(decision_time=decision_time),
+        )
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    canonical = recomputed.get("selected")
+    if not isinstance(canonical, Mapping):
+        return None
+    submitted_json = json.dumps(dict(selected), sort_keys=True, default=str, separators=(",", ":"))
+    canonical_json = json.dumps(dict(canonical), sort_keys=True, default=str, separators=(",", ":"))
+    return dict(canonical) if submitted_json == canonical_json else None
 
 
 def _authorized_aggressive_v2_signal(raw: Mapping[str, Any], params: Mapping[str, Any]) -> bool:
@@ -1223,6 +1248,20 @@ def write_experimental_options_recommendations(
     ensure_signal_schema(conn)
     aggressive_v2 = strategy_name == "liquid_rs_breakout_aggressive_options_v2"
     effective_max_recommendations = min(max_recommendations, 3) if aggressive_v2 else max_recommendations
+    if aggressive_v2:
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"wolfy:global-paper-recommendations:{signal_dt.isoformat()}",),
+        )
+        existing_global = int(conn.execute(
+            """SELECT count(*) FROM recommendations
+               WHERE notes->>'signal_dt'=%s
+                 AND status IN ('paper_candidate','paper_logged')""",
+            (signal_dt.isoformat(),),
+        ).fetchone()[0])
+        effective_max_recommendations = min(
+            max(0, effective_max_recommendations), max(0, 3 - existing_global)
+        )
     effective_risk_fraction = min(risk_fraction, Decimal("0.05")) if aggressive_v2 else risk_fraction
     risk_budget = account_equity_usd * effective_risk_fraction
     rows = conn.execute("""
@@ -1239,6 +1278,10 @@ def write_experimental_options_recommendations(
         selected = evaluation.get("selected") if isinstance(evaluation, Mapping) else None
         raw_dict = raw if isinstance(raw, Mapping) else json.loads(raw or "{}")
         params_dict = strategy_params if isinstance(strategy_params, Mapping) else {}
+        entry = _as_decimal(_raw_value(raw_dict, "close"), Decimal("0"))
+        stop = _as_decimal(_raw_value(raw_dict, "invalidation"), Decimal("0"))
+        target_r = _as_decimal(_raw_value(raw_dict, "target_r"), Decimal("1"))
+        target = entry + max(entry - stop, Decimal("0")) * target_r
         max_hold_days = params_dict.get("max_hold_days", 10)
         if type(max_hold_days) is not int or not 1 <= max_hold_days <= 60:
             blocked += 1
@@ -1246,14 +1289,23 @@ def write_experimental_options_recommendations(
         if not isinstance(selected, Mapping) or selected.get("defined_risk") is not True:
             blocked += 1
             continue
-        if aggressive_v2 and (
-            strategy_status != "research_only"
-            or not _authorized_aggressive_v2_signal(raw_dict, params_dict)
-            or not isinstance(evaluation, Mapping)
-            or not _exact_aggressive_v2_option_selection(evaluation, selected)
-        ):
-            blocked += 1
-            continue
+        if aggressive_v2:
+            canonical_selected = (
+                _recomputed_aggressive_v2_option_selection(
+                    evaluation, selected, ticker=str(ticker), underlying_price=entry,
+                    technical_target=target, signal_dt=signal_dt,
+                )
+                if isinstance(evaluation, Mapping)
+                else None
+            )
+            if (
+                strategy_status != "research_only"
+                or not _authorized_aggressive_v2_signal(raw_dict, params_dict)
+                or canonical_selected is None
+            ):
+                blocked += 1
+                continue
+            selected = canonical_selected
         debit = _as_decimal(selected.get("max_loss_per_contract"), Decimal("0"))
         if debit <= 0 or (aggressive_v2 and debit > risk_budget):
             blocked += 1
@@ -1290,6 +1342,8 @@ def write_experimental_options_recommendations(
             "source_signal": raw, "option_structure": selected,
             "paper_account_usd": str(account_equity_usd), "risk_fraction": str(effective_risk_fraction),
             "paper_risk_budget_usd": str(risk_budget), "paper_contracts": contracts,
+            "max_loss_per_contract_usd": str(item["max_loss"]),
+            "total_max_loss_usd": str(item["max_loss"] * contracts),
             "position_sizing_basis": "maximum_defined_option_loss",
         }
         if aggressive_v2:
@@ -1316,7 +1370,9 @@ def write_experimental_options_recommendations(
     return {
         "signal_dt": signal_dt.isoformat(), "dry_run": dry_run,
         "recommendations_created": 0 if dry_run else created,
-        "recommendations_ranked": min(len(eligible), max(0, max_recommendations)),
+        "recommendations_ranked": min(
+            len(eligible), max(0, effective_max_recommendations)
+        ),
         "skipped_existing": skipped, "blocked_by_option_quality": blocked,
         "broker_orders_created": 0, "recommendations": serializable,
     }

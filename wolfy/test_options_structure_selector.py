@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from options_structure_selector import SelectorPolicy, select_bullish_option_structure
 
 
@@ -104,7 +106,7 @@ def test_selector_rejects_future_or_old_quote_timestamps():
 def test_aggressive_policy_selects_economically_positive_modest_otm_long_call():
     from options_structure_selector import aggressive_options_v2_policy
 
-    policy = aggressive_options_v2_policy()
+    policy = aggressive_options_v2_policy(decision_time=datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
     chain = [
         _c("AGG260821C00103000", "2026-08-21", "103", "0.65", "0.85", oi=10, volume=0),
     ]
@@ -130,7 +132,7 @@ def test_aggressive_policy_rejects_long_leg_over_five_percent_otm_with_audit_rea
         ticker="LOTTO", underlying_price=Decimal("100"), technical_target=Decimal("112"),
         as_of=date(2026, 8, 12),
         contracts=[_c("LOTTO260821C00105010", "2026-08-21", "105.01", "0.20", "0.25", oi=100, volume=1)],
-        policy=aggressive_options_v2_policy(),
+        policy=aggressive_options_v2_policy(decision_time=datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)),
     )
 
     assert result["selected"] is None
@@ -149,9 +151,57 @@ def test_aggressive_policy_accepts_thirty_five_percent_relative_spread_boundary(
         ticker="BOUND", underlying_price=Decimal("100"), technical_target=Decimal("108"),
         as_of=date(2026, 8, 12),
         contracts=[_c("BOUND260821C00103000", "2026-08-21", "103", str(bid), str(ask), oi=0, volume=1)],
-        policy=aggressive_options_v2_policy(),
+        policy=aggressive_options_v2_policy(decision_time=datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)),
     )
 
     assert result["selected"] is not None
     assert result["policy"]["max_relative_spread"] == "0.35"
     assert result["evaluated_candidates"][0]["target_profit"] > 0
+
+
+def test_aggressive_policy_requires_timezone_aware_decision_time():
+    from options_structure_selector import aggressive_options_v2_policy
+
+    with pytest.raises(ValueError, match="timezone-aware decision_time"):
+        aggressive_options_v2_policy()
+    with pytest.raises(ValueError, match="timezone-aware decision_time"):
+        aggressive_options_v2_policy(decision_time=datetime(2026, 8, 12, 20, 5))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("bid", "NaN", "invalid_contract_fields"),
+        ("ask", "Infinity", "invalid_contract_fields"),
+        ("strike", True, "invalid_contract_fields"),
+        ("open_interest", True, "invalid_contract_fields"),
+        ("volume", "1.5", "invalid_contract_fields"),
+        ("multiplier", "100.0", "invalid_contract_fields"),
+    ],
+)
+def test_aggressive_selector_rejects_malformed_contract_without_raising(field, value, reason):
+    from options_structure_selector import aggressive_options_v2_policy
+
+    contract = _c("BADTYPE", "2026-08-21", "100", "2", "2.1", oi=10, volume=1)
+    contract[field] = value
+    result = select_bullish_option_structure(
+        ticker="BAD", underlying_price=Decimal("100"), technical_target=Decimal("108"),
+        as_of=date(2026, 8, 12), contracts=[contract],
+        policy=aggressive_options_v2_policy(decision_time=datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)),
+    )
+    assert result["selected"] is None
+    assert result["rejected_contracts"][0]["reasons"] == [reason]
+
+
+def test_aggressive_selector_derives_new_york_market_date_and_rejects_spoof():
+    from options_structure_selector import aggressive_options_v2_policy
+
+    contract = _c("SPOOF", "2026-08-21", "100", "2", "2.1", oi=10, volume=1)
+    contract.update({"quote_at": "2026-08-13T00:10:00Z", "market_date": "2026-08-13"})
+    result = select_bullish_option_structure(
+        ticker="SPOOF", underlying_price=Decimal("100"), technical_target=Decimal("108"),
+        as_of=date(2026, 8, 12), contracts=[contract],
+        policy=aggressive_options_v2_policy(decision_time=datetime(2026, 8, 13, 0, 15, tzinfo=timezone.utc)),
+    )
+    assert result["selected"] is None
+    assert result["rejected_contracts"][0]["reasons"] == ["market_date_mismatch"]

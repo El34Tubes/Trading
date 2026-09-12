@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import re
 from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 
 D = Decimal
@@ -31,6 +33,8 @@ class SelectorPolicy:
 
 def aggressive_options_v2_policy(*, decision_time: datetime | None = None) -> SelectorPolicy:
     """Return the separate, looser policy authorized only for aggressive v2 paper research."""
+    if decision_time is None or decision_time.tzinfo is None or decision_time.utcoffset() is None:
+        raise ValueError("aggressive options v2 requires a timezone-aware decision_time")
     return SelectorPolicy(
         min_dte=7,
         max_dte=28,
@@ -47,6 +51,28 @@ def aggressive_options_v2_policy(*, decision_time: datetime | None = None) -> Se
 
 def _d(value: Any) -> Decimal:
     return D(str(value))
+
+
+def _strict_decimal(value: Any) -> Decimal:
+    if isinstance(value, bool) or value is None:
+        raise ValueError("not a decimal")
+    try:
+        parsed = D(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError("not a decimal") from exc
+    if not parsed.is_finite():
+        raise ValueError("decimal must be finite")
+    return parsed
+
+
+def _strict_integer(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError("not an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"0|[1-9][0-9]*", value):
+        return int(value)
+    raise ValueError("not a canonical integer")
 
 
 def _q(value: Decimal) -> Decimal:
@@ -83,17 +109,27 @@ def _leg(contract: Mapping[str, Any]) -> dict[str, Any]:
 
 def _screen_contract(contract: Mapping[str, Any], *, as_of: date, policy: SelectorPolicy) -> tuple[list[str], dict[str, Any] | None]:
     reasons: list[str] = []
+    aggressive_v2 = policy.policy_version == "aggressive_options_v2"
     try:
         expiration = date.fromisoformat(str(contract["expiration"]))
-        strike, bid, ask = (_d(contract[key]) for key in ("strike", "bid", "ask"))
-    except (KeyError, ValueError, TypeError):
+        decimal_parser = _strict_decimal if aggressive_v2 else _d
+        strike, bid, ask = (decimal_parser(contract[key]) for key in ("strike", "bid", "ask"))
+        if aggressive_v2:
+            open_interest = _strict_integer(contract.get("open_interest", 0))
+            volume = _strict_integer(contract.get("volume", 0))
+            multiplier = _strict_integer(contract.get("multiplier", 0))
+        else:
+            open_interest = int(contract.get("open_interest") or 0)
+            volume = int(contract.get("volume") or 0)
+            multiplier = int(contract.get("multiplier") or 0)
+    except (KeyError, InvalidOperation, ValueError, TypeError):
         return ["invalid_contract_fields"], None
     dte = (expiration - as_of).days
     if not policy.min_dte <= dte <= policy.max_dte:
         reasons.append(f"dte_outside_{policy.min_dte}_{policy.max_dte}")
     if str(contract.get("option_type", "")).lower() != "call":
         reasons.append("not_call")
-    if contract.get("standard_contract") is not True or int(contract.get("multiplier") or 0) != 100:
+    if contract.get("standard_contract") is not True or multiplier != 100:
         reasons.append("nonstandard_contract")
     if strike <= 0 or bid <= 0 or ask <= 0 or ask < bid:
         reasons.append("invalid_or_crossed_quote")
@@ -101,16 +137,23 @@ def _screen_contract(contract: Mapping[str, Any], *, as_of: date, policy: Select
     relative_spread = (ask - bid) / midpoint if midpoint > 0 else D("999")
     if relative_spread > policy.max_relative_spread:
         reasons.append("wide_bid_ask_spread")
-    if int(contract.get("open_interest") or 0) < policy.min_open_interest and int(contract.get("volume") or 0) < policy.min_volume:
+    if open_interest < policy.min_open_interest and volume < policy.min_volume:
         reasons.append("insufficient_open_interest_and_volume")
     quote_at = _iso_dt(contract.get("quote_at"))
     if quote_at is None:
         reasons.append("missing_quote_timestamp")
     else:
         market_date_value = contract.get("market_date")
-        quote_market_date = str(market_date_value) if market_date_value else quote_at.date().isoformat()
-        if quote_market_date != as_of.isoformat():
-            reasons.append("stale_quote")
+        if aggressive_v2:
+            derived_market_date = quote_at.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+            if market_date_value is not None and str(market_date_value) != derived_market_date:
+                reasons.append("market_date_mismatch")
+            elif derived_market_date != as_of.isoformat():
+                reasons.append("stale_quote")
+        else:
+            quote_market_date = str(market_date_value) if market_date_value else quote_at.date().isoformat()
+            if quote_market_date != as_of.isoformat():
+                reasons.append("stale_quote")
         if policy.decision_time is not None:
             decision = policy.decision_time.astimezone(timezone.utc)
             if quote_at > decision:
@@ -224,6 +267,8 @@ def select_bullish_option_structure(
             "fill_spread_fraction": str(policy.fill_spread_fraction),
             "fill_model": f"buy_at_{policy.fill_spread_fraction}_through_spread_sell_at_{D('1') - policy.fill_spread_fraction}",
             "structures": ["long_call", "call_debit_spread"],
+            "decision_time": policy.decision_time.isoformat() if policy.decision_time is not None else None,
         },
+        "input_contracts": [dict(contract) for contract in contracts] if policy.policy_version == "aggressive_options_v2" else None,
         "paper_only": True, "no_live_execution": True, "broker_order_submitted": False,
     }

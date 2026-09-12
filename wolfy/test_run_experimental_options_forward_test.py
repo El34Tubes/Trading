@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import date
 from pathlib import Path
+
+import pytest
 
 
 def test_cli_normalizes_chain_payload_shape(tmp_path: Path):
@@ -25,3 +26,14 @@ def test_fetch_cboe_snapshots_is_bounded_to_qualifying_tickers(monkeypatch):
     assert called == ["ABC", "XYZ"]
     assert result["source"] == "cboe_public_delayed_options"
     assert sorted(result["chains"]) == ["ABC", "XYZ"]
+
+
+def test_cli_profile_choice_is_explicit_and_defaults_to_v1():
+    from run_experimental_options_forward_test import build_parser
+
+    parser = build_parser()
+    common = ["--signal-dt", "2026-08-12", "--chain-json", "snapshot.json"]
+    assert parser.parse_args(common).profile == "v1"
+    assert parser.parse_args([*common, "--profile", "aggressive-v2"]).profile == "aggressive-v2"
+    with pytest.raises(SystemExit):
+        parser.parse_args([*common, "--profile", "unknown"])
