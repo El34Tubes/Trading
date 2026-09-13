@@ -420,3 +420,67 @@ def test_massive_ingest_records_completed_split_refetch(monkeypatch):
         conn.execute("DELETE FROM runs WHERE id=%s", (result["ingest_run_id"],))
 
     assert marker == ("info", [split_dt])
+
+
+def test_split_audit_escalates_after_one_completed_ingest_cycle_idempotently(monkeypatch):
+    psycopg = pytest.importorskip("psycopg")
+    from eod_price_features import PriceBar, ensure_eod_feature_schema, ingest_price_bars, validate_price_data_quality
+
+    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    ticker = "ZZSPLITESCALATE"
+    split_dt = "2098-07-15"
+    as_of = date(2098, 7, 20)
+    bars = [PriceBar(ticker, as_of, 25, 26, 24, 25, 4000)]
+    action = {"kind": "split", "execution_date": split_dt, "split_from": 1, "split_to": 4}
+    monkeypatch.setattr(
+        "eod_price_features.fetch_massive_corporate_actions",
+        lambda *args, **kwargs: {ticker: [action]},
+    )
+
+    with psycopg.connect(dsn) as conn:
+        ensure_eod_feature_schema(conn)
+        first_ingest = ingest_price_bars(conn, bars, source="unit-split-escalation")
+        first = validate_price_data_quality(conn, tickers=[ticker], source="unit-split-escalation", as_of=as_of)
+        same_cycle = validate_price_data_quality(conn, tickers=[ticker], source="unit-split-escalation", as_of=as_of)
+        second_ingest = ingest_price_bars(conn, bars, source="unit-split-escalation")
+        escalated = validate_price_data_quality(conn, tickers=[ticker], source="unit-split-escalation", as_of=as_of)
+        repeated = validate_price_data_quality(conn, tickers=[ticker], source="unit-split-escalation", as_of=as_of)
+        rows_before_marker = conn.execute(
+            """
+            SELECT severity, detail->>'first_seen_ingest_run_id', detail->>'observed_ingest_run_id'
+            FROM price_data_quality_events
+            WHERE ticker=%s AND reason='recent_split_requires_adjustment_audit'
+            ORDER BY id
+            """,
+            (ticker,),
+        ).fetchall()
+        conn.execute(
+            """
+            INSERT INTO price_data_quality_events(as_of, ticker, severity, source, reason, detail)
+            VALUES (%s, %s, 'info', 'unit-split-escalation', 'corporate_action_refetch_completed', %s::jsonb)
+            """,
+            (as_of, ticker, json.dumps({"split_execution_dates": [split_dt]})),
+        )
+        third_ingest = ingest_price_bars(conn, bars, source="unit-split-escalation")
+        after_marker = validate_price_data_quality(conn, tickers=[ticker], source="unit-split-escalation", as_of=as_of)
+        rows_after_marker = conn.execute(
+            """
+            SELECT count(*) FROM price_data_quality_events
+            WHERE ticker=%s AND reason='recent_split_requires_adjustment_audit'
+            """,
+            (ticker,),
+        ).fetchone()[0]
+        conn.execute("DELETE FROM price_data_quality_events WHERE ticker=%s", (ticker,))
+        conn.execute("DELETE FROM prices WHERE ticker=%s", (ticker,))
+        conn.execute("DELETE FROM runs WHERE id = ANY(%s)", ([first_ingest, second_ingest, third_ingest],))
+
+    assert first["reviews"] == 1
+    assert same_cycle["events_recorded"] == 0
+    assert escalated["blockers"] == 1
+    assert repeated["events_recorded"] == 0
+    assert rows_before_marker == [
+        ("review", str(first_ingest), str(first_ingest)),
+        ("blocker", str(first_ingest), str(second_ingest)),
+    ]
+    assert after_marker["events_recorded"] == 0
+    assert rows_after_marker == 2
