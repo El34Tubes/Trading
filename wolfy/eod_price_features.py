@@ -763,87 +763,6 @@ def fetch_massive_corporate_actions(
     return actions
 
 
-def _latest_completed_ingest_run_id(conn, source: str) -> int | None:
-    row = conn.execute(
-        """
-        SELECT max(id)
-        FROM runs
-        WHERE job = 'eod_price_ingest'
-          AND status = 'ok'
-          AND detail->>'source' = %s
-        """,
-        (source,),
-    ).fetchone()
-    return int(row[0]) if row and row[0] is not None else None
-
-
-def _split_execution_dates(splits: Sequence[dict]) -> list[str]:
-    dates: set[str] = set()
-    for split in splits:
-        try:
-            dates.add(date.fromisoformat(str(split.get("execution_date") or "")[:10]).isoformat())
-        except ValueError:
-            continue
-    return sorted(dates)
-
-
-def _split_audit_event(conn, *, ticker: str, source: str, splits: Sequence[dict], ingest_run_id: int | None) -> dict | None:
-    split_dates = _split_execution_dates(splits)
-    prior_rows = conn.execute(
-        """
-        SELECT severity, detail
-        FROM price_data_quality_events
-        WHERE ticker = %s
-          AND source = %s
-          AND reason = 'recent_split_requires_adjustment_audit'
-        ORDER BY id DESC
-        """,
-        (ticker, source),
-    ).fetchall()
-    prior = None
-    wanted = set(split_dates)
-    for severity, detail in prior_rows:
-        detail = detail if isinstance(detail, dict) else {}
-        prior_dates = set(detail.get("split_execution_dates") or _split_execution_dates(detail.get("splits") or []))
-        if wanted & prior_dates:
-            prior = (severity, detail)
-            break
-
-    first_seen_run_id = ingest_run_id
-    if prior:
-        prior_first = prior[1].get("first_seen_ingest_run_id")
-        prior_observed = prior[1].get("observed_ingest_run_id")
-        try:
-            first_seen_run_id = int(prior_first if prior_first is not None else prior_observed)
-        except (TypeError, ValueError):
-            first_seen_run_id = ingest_run_id
-
-    severity = "review"
-    if prior and prior[0] == "blocker":
-        return None
-    if ingest_run_id is not None and first_seen_run_id is not None and ingest_run_id > first_seen_run_id:
-        severity = "blocker"
-    if prior:
-        try:
-            prior_observed_run_id = int(prior[1].get("observed_ingest_run_id"))
-        except (TypeError, ValueError):
-            prior_observed_run_id = None
-        if prior[0] == severity and prior_observed_run_id == ingest_run_id:
-            return None
-
-    return {
-        "ticker": ticker,
-        "severity": severity,
-        "reason": "recent_split_requires_adjustment_audit",
-        "detail": {
-            "splits": list(splits)[:5],
-            "split_execution_dates": split_dates,
-            "first_seen_ingest_run_id": first_seen_run_id,
-            "observed_ingest_run_id": ingest_run_id,
-        },
-    }
-
-
 def validate_price_data_quality(
     conn,
     *,
@@ -882,7 +801,6 @@ def validate_price_data_quality(
         since = as_of - timedelta(days=corporate_action_lookback_days)
         corporate_actions = fetch_massive_corporate_actions(ticker_list, since=since, until=as_of)
         completed_splits = _completed_split_refetches(conn, ticker_list)
-        ingest_run_id = _latest_completed_ingest_run_id(conn, source)
         for ticker, action_rows in corporate_actions.items():
             splits = []
             for row in action_rows:
@@ -895,15 +813,7 @@ def validate_price_data_quality(
                 if (ticker, split_date_text) not in completed_splits:
                     splits.append(row)
             if splits:
-                split_event = _split_audit_event(
-                    conn,
-                    ticker=ticker,
-                    source=source,
-                    splits=splits,
-                    ingest_run_id=ingest_run_id,
-                )
-                if split_event:
-                    events.append(split_event)
+                events.append({"ticker": ticker, "severity": "review", "reason": "recent_split_requires_adjustment_audit", "detail": {"splits": splits[:5]}})
     for event in events:
         conn.execute(
             """
