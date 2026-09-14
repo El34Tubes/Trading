@@ -1,5 +1,27 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-14 daily optimizer plan-only run
+
+- Time: 2026-09-14 02:15 ET / 06:15 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block low_headroom_pct=9.26 threshold=15.00` (exit 1), so this run followed PLAN-ONLY: review/state/KPI updates only, with no code/config/cron/migration/strategy/trading implementation.
+- Guardian/probation: no probation marker existed; the production-home guardian returned `GUARDIAN=ok`; config YAML and cron JSON parsed; `hermes cron list`, gateway status, Postgres requirements, and visible-progress ledger checks passed; optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remained enabled.
+- Review/state: prior DQ-1B task `4065` remains blocked after verified recovery; commits `0137a54` and `e713abc` net to no DQ-1B code change, live strategy statuses are restored to one approved/one candidate, and corrective task `4114` remains queued/unclaimed. Created/claimed plan-only task `4115` and run `402613`.
+- KPI: exactly 25 required keys were stored against the linked run with measured/carried-forward provenance; final capture was 278398 completed tokens, limiting provider headroom 9.26%, core freshness 34/34 at the common complete date 2026-09-11, and depth readiness 1316/1358 at the 495-bar threshold.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: low provider headroom is a hard implementation stop even though the daily Postgres token sum also rose above cap while this run was accounting; preserve the decision-time gate output separately from the final token snapshot and leave DQ-TEST-1 unclaimed.
+- NEXT ACTION: after budget headroom recovers, execute queued task `4114` first—enforce a disposable/rollback-only Postgres harness for every strategy-mutating test and prove production strategy snapshots unchanged across focused and repeated full suites. Only then retry DQ-1B.
+
+## 2026-09-13 daily optimizer DQ-1B blocked run
+
+- Time: 2026-09-13 02:15 ET / 06:15 UTC; outside all protected market/report windows.
+- Budget/guardian: `budget_gate.py --no-record` returned `BUDGET=ok tokens_today=0 cap=200000 headroom_pct=100.00`; production-home guardian, gateway, Postgres requirements, cron list/status, and no-probation checks passed.
+- Attempt: claimed task `4065` / run `402347`; DQ-1B was implemented in two files with a RED fixture, targeted 12 tests, and full 193-test suite all exiting 0. Temporary implementation commit `0137a54` was made.
+- Safety regression: the full suite changed live `trend_volume_vol_regime` from `candidate` to `approved` through the pre-existing strategy-mutating `test_eod_signals.py` path while its restore helper is a no-op. This violates the production-test isolation contract and the user-only strategy-approval invariant even though pytest exited 0.
+- Recovery: backed up `strategies` to `wolfy/backups/20260913T062414Z-strategies-before-unauthorized-test-status-restore.sql`, restored only strategy id 2 to the observed baseline `candidate`, verified live counts returned to one approved/one candidate, and reverted DQ-1B in `e713abc`. Commits `0137a54` + `e713abc` net to no code change; neither was pushed.
+- State/KPI: task `4065` blocked and run `402347` failed; 25 KPI rows recorded, including `regressions_introduced=1`, `gateway_healthy=1`, `usage_headroom_pct=100`, and restored `strat_approved=1` / `strat_candidate=1`.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated.
+- NEXT ACTION: execute queued task `4114` first—move all strategy-mutating tests to a disposable/rollback-only Postgres harness and prove production strategy snapshots unchanged before/after focused and repeated full suites. Only then retry DQ-1B from commit `0137a54`.
+
 ## 2026-09-12 daily optimizer plan-only run
 
 - Time: 2026-09-12 02:16 ET / 06:16 UTC; outside all protected market/report windows.
