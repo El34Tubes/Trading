@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
 from eod_price_features import PriceBar, compute_and_store_features, ingest_price_bars
+
+
+@contextmanager
+def _rollback_connection(psycopg, dsn: str):
+    """Run a live-schema integration test without committing production state."""
+    conn = psycopg.connect(dsn)
+    try:
+        yield conn
+    finally:
+        conn.rollback()
+        conn.close()
 
 
 def _bars(ticker: str, *, start: date = date(2099, 1, 1), n: int = 35, volume: int = 2_000_000) -> list[PriceBar]:
@@ -70,7 +82,7 @@ def test_recommendation_universe_uses_broad_current_universe_with_data_gates():
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZBLUE", "ZZSMALL", "ZZNONE", "ZZINACT", "ZZSTALE", "ZZTHIN"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
@@ -116,7 +128,7 @@ def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZAUTO", "SPY"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -145,7 +157,7 @@ def test_seed_default_strategies_includes_rs_breakout_as_research_only():
     from eod_signals import seed_default_strategies
 
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         seed_default_strategies(conn)
         _restore_default_strategy_statuses(conn)
         rows = conn.execute(
@@ -176,7 +188,7 @@ def test_generate_liquid_rs_breakout_continuation_signal():
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZRSBO", "SPY"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -222,7 +234,7 @@ def test_generate_eod_signals_seeds_research_only_strategies_and_writes_determin
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZSIG", "ZZMOM"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -262,7 +274,7 @@ def test_write_approved_paper_recommendations_only_uses_approved_signals_and_cap
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     signal_dt = date(2099, 2, 4)
     tickers = ["ZZREC1", "ZZREC2", "ZZREC3", "ZZREC4", "ZZBLOCK"]
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
@@ -318,7 +330,7 @@ def test_log_approved_paper_recommendation_trades_creates_open_paper_rows_idempo
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     signal_dt = date(2099, 2, 4)
     tickers = ["ZZPLOG1", "ZZPLOG2", "ZZPLOG3", "ZZPLOG4"]
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
@@ -383,7 +395,7 @@ def test_approved_strategy_gate_creates_setups_only_for_approved_signals():
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZGATE"
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -421,7 +433,7 @@ def test_nightly_screening_dry_run_ranks_setups_without_writing_rows():
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZDRY"
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -461,7 +473,7 @@ def test_nightly_screening_blocks_liquidity_events_options_and_portfolio_breaker
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZILLQ", "ZZEVNT", "ZZOPT", "ZZHEAT"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -517,7 +529,7 @@ def test_nightly_screening_applies_cumulative_heat_and_position_slots():
     dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZSLOT1", "ZZSLOT2", "ZZSLOT3", "ZZSLOT4"]
     signal_dt = date(2099, 2, 4)
-    with psycopg.connect(dsn) as conn:
+    with _rollback_connection(psycopg, dsn) as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
