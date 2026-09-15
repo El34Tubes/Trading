@@ -1,5 +1,17 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-15 daily optimizer plan-only review-recovery run
+
+- Time: 2026-09-15 02:15 ET / 06:15 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=216891 cap=200000` (exit 1), so this run remained PLAN-ONLY: review, recovery, task/run/KPI state, and this ledger note only; no code/config/cron/migration/strategy-approval/trading implementation.
+- Guardian/probation: no probation marker existed; production-home guardian returned `GUARDIAN=ok`; YAML/cron parsing, `hermes cron list`, gateway status, Postgres requirements, and visible-progress ledger checks passed; optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remain enabled.
+- Review regression: fresh focused tests passed 11/11 without strategy mutation, but two repeated full Wolfy suites passed 196/196 while each leaked one approved-strategy revalidation row into both `backtests` and `research_log` and advanced `strategies.metadata.latest_setup_outcome_backtest_id` (537→548→559). This disproved task `4114`'s byte-equivalent DoD; task `4114` is now blocked and corrective task `4133` is queued.
+- Recovery: before deletion, backed up affected tables to `wolfy/backups/20260915T061833Z-optimizer-review-test-backtests.sql` and `wolfy/backups/20260915T061851Z-optimizer-review-test-research-log.sql`; removed only review-created rows `(backtests 548/559, research_log 908/923)`, restored metadata pointer 537, and verified the complete strategy-table hash returned exactly to pre-review `145b334e57f870c3a258c7d054fa880d`, with one approved and one candidate strategy.
+- State/KPI: plan-only task `4134` / run `402834`; exactly 25 KPI keys recorded with measured/carried-forward provenance. Final capture: 216927 completed tokens, 0% daily-cap headroom, 6 completed tokenized runs today, core freshness 34/34 at common date 2026-09-11, and depth readiness 1316/1358 at 495 bars.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: rollback-only isolation limited to `test_eod_signals.py` is insufficient; full-suite governance snapshots must include `strategies`, `backtests`, and `research_log`, and review tests must be backed up before execution until all mutating tests use disposable/rollback-only Postgres.
+- NEXT ACTION: after budget headroom recovers, execute queued task `4133` first—identify and isolate the remaining approved-strategy revalidation writer, then prove two repeated full suites leave all governance tables byte-equivalent. Only after that retry DQ-1B task `4065`.
+
 ## 2026-09-14 daily optimizer plan-only run
 
 - Time: 2026-09-14 02:15 ET / 06:15 UTC; outside all protected market/report windows.
