@@ -1,5 +1,16 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-16 daily optimizer plan-only run
+
+- Time: 2026-09-16 02:15 ET / 06:15 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=237113 cap=200000` (exit 1), so this run remained PLAN-ONLY: deterministic review plus task/run/KPI/ledger state only; no code/config/cron/migration/strategy-approval/trading implementation.
+- Guardian/probation: no probation marker exists; production-home guardian returned `GUARDIAN=ok`; YAML/cron parsing, `hermes cron list`, gateway status, Postgres requirements, and visible-progress ledger checks passed. Optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remain enabled.
+- Prior review: HEAD `e99d94d394804dbc027ae561d414e428639d45ef` matches completed task `4134` / run `402834`, has ledger-only scope, and passes `git show --check`. Corrective task `4133` remains queued; mutating full-suite tests were not rerun under the budget stop.
+- State/KPI: plan-only task `4137` / run `403119`; exactly 25 KPI keys recorded with measured/carried-forward provenance. Capture: 237113 completed tokens, 0% daily-cap headroom, 3 completed tokenized runs today, core freshness 34/34 at common date 2026-09-14, and depth readiness 1316/1358 at 495 bars.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: use parameterized psycopg for task DoD and KPI provenance checks; `psql -v` interpolation in `-c` and literal `%` characters in psycopg query strings are brittle. The failed attempts committed no partial metrics, and the recovered transaction verified 25/25 rows.
+- NEXT ACTION: after budget headroom recovers, execute queued task `4133` first—identify and isolate the remaining approved-strategy revalidation writer, then prove two repeated full suites leave `strategies`, `backtests`, `research_log`, and related governance state byte-equivalent.
+
 ## 2026-09-15 daily optimizer plan-only review-recovery run
 
 - Time: 2026-09-15 02:15 ET / 06:15 UTC; outside all protected market/report windows.
