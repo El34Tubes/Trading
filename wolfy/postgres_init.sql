@@ -2113,4 +2113,58 @@ CREATE INDEX IF NOT EXISTS idx_option_structure_evaluations_snapshot
 CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_ticker_available
     ON option_chain_snapshots(ticker, available_at DESC);
 
+-- Canonical active recommendation identity. Populated upgrades use the matching
+-- 20260917_recommendation_uniqueness.sql migration, which reports duplicate
+-- keys and never rewrites or deletes legacy rows.
+LOCK TABLE recommendations IN SHARE ROW EXCLUSIVE MODE;
+DO $$
+DECLARE
+    duplicate_keys JSONB;
+BEGIN
+    SELECT jsonb_agg(
+               jsonb_build_object(
+                   'ticker', ticker,
+                   'signal_dt', signal_dt,
+                   'strategy_name', strategy_name,
+                   'row_count', row_count,
+                   'recommendation_ids', recommendation_ids
+               ) ORDER BY ticker, signal_dt, strategy_name
+           )
+      INTO duplicate_keys
+      FROM (
+          SELECT ticker,
+                 notes->>'signal_dt' AS signal_dt,
+                 notes->>'strategy_name' AS strategy_name,
+                 count(*) AS row_count,
+                 jsonb_agg(id ORDER BY id) AS recommendation_ids
+            FROM recommendations
+           WHERE status IN ('paper_candidate', 'paper_logged')
+             AND notes->>'signal_dt' IS NOT NULL
+             AND notes->>'strategy_name' IS NOT NULL
+           GROUP BY ticker, notes->>'signal_dt', notes->>'strategy_name'
+          HAVING count(*) > 1
+      ) duplicates;
+    IF duplicate_keys IS NOT NULL THEN
+        RAISE EXCEPTION
+            'duplicate active recommendation identities block schema bootstrap: %',
+            duplicate_keys;
+    END IF;
+END
+$$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_experimental_paper_recommendation_signal
+    ON recommendations (
+        ticker, (notes->>'signal_dt'), (notes->>'strategy_name')
+    )
+    WHERE recommendation_type = 'experimental_defined_risk_option'
+      AND status IN ('paper_candidate', 'paper_logged')
+      AND notes->>'signal_dt' IS NOT NULL
+      AND notes->>'strategy_name' IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_paper_recommendation_signal
+    ON recommendations (
+        ticker, (notes->>'signal_dt'), (notes->>'strategy_name')
+    )
+    WHERE status IN ('paper_candidate', 'paper_logged')
+      AND notes->>'signal_dt' IS NOT NULL
+      AND notes->>'strategy_name' IS NOT NULL;
+
 COMMIT;

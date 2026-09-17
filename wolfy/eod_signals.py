@@ -277,23 +277,6 @@ def ensure_signal_schema(conn) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_status_ticker ON positions(status, ticker)")
-    duplicate = conn.execute(
-        """SELECT ticker,notes->>'signal_dt',notes->>'strategy_name',count(*)
-           FROM recommendations
-           WHERE recommendation_type='experimental_defined_risk_option'
-             AND status IN ('paper_candidate','paper_logged')
-             AND notes->>'signal_dt' IS NOT NULL AND notes->>'strategy_name' IS NOT NULL
-           GROUP BY ticker,notes->>'signal_dt',notes->>'strategy_name'
-           HAVING count(*) > 1 LIMIT 1"""
-    ).fetchone()
-    if duplicate:
-        raise RuntimeError(f"duplicate experimental paper recommendations block unique-index migration: {duplicate!r}")
-    conn.execute(
-        """CREATE UNIQUE INDEX IF NOT EXISTS uq_experimental_paper_recommendation_signal
-           ON recommendations (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
-           WHERE recommendation_type='experimental_defined_risk_option'
-             AND status IN ('paper_candidate','paper_logged')"""
-    )
 
 
 def seed_default_strategies(conn) -> dict:
@@ -1454,16 +1437,26 @@ def write_experimental_options_recommendations(
                 }
             )
         if not dry_run:
-            conn.execute("""
+            inserted = conn.execute("""
                 INSERT INTO recommendations(ticker,action,recommendation_type,thesis,setup_type,entry_zone,entry_trigger,stop,target,risk_reward,confidence,position_size_suggestion,holding_period,status,notes)
                 VALUES (%s,'buy','experimental_defined_risk_option',%s,%s,%s,%s,%s,%s,%s,'experimental',%s,%s,'paper_candidate',%s::jsonb)
+                ON CONFLICT (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
+                  WHERE status IN ('paper_candidate','paper_logged')
+                    AND notes->>'signal_dt' IS NOT NULL
+                    AND notes->>'strategy_name' IS NOT NULL
+                DO NOTHING
+                RETURNING id
             """, (
                 ticker, f"Experimental forward test of deterministic {item['strategy_name']}; not historically validated and no live execution.",
                 item["strategy_name"], f"Underlying EOD baseline {_money(entry)}",
                 f"Paper option expression using exact selected contracts; underlying baseline {_money(entry)}.",
                 f"Underlying close below {_money(stop)} invalidates thesis.", f"Underlying technical target {_money(target)}.", f"{target_r}R underlying thesis",
                 f"{contracts} paper contract(s), sized from ${item['max_loss']} maximum loss each.", f"Up to {item['max_hold_days']} trading days", _json(notes),
-            ))
+            )).fetchone()
+            if inserted is None:
+                skipped += 1
+                serializable.append({"ticker": ticker, "status": "existing"})
+                continue
         created += 1
         serializable.append({"ticker": ticker, "status": "paper_candidate", "structure": selected.get("structure"), "contracts": contracts})
     return {
@@ -1590,10 +1583,16 @@ def write_approved_paper_recommendations(
             serializable.append({**payload, "status": "existing", "broker_enriched": broker_notes is not None})
             continue
         if not dry_run:
-            conn.execute(
+            inserted = conn.execute(
                 """
                 INSERT INTO recommendations(ticker, action, recommendation_type, thesis, setup_type, entry_zone, entry_trigger, stop, target, risk_reward, confidence, position_size_suggestion, holding_period, status, notes)
                 VALUES (%s,'buy','equity_plus_option_spread_when_data_exists',%s,%s,%s,%s,%s,%s,%s,'medium-high',%s,%s,'paper_candidate',%s::jsonb)
+                ON CONFLICT (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
+                  WHERE status IN ('paper_candidate','paper_logged')
+                    AND notes->>'signal_dt' IS NOT NULL
+                    AND notes->>'strategy_name' IS NOT NULL
+                DO NOTHING
+                RETURNING id
                 """,
                 (
                     ticker,
@@ -1608,7 +1607,17 @@ def write_approved_paper_recommendations(
                     "Up to 10 trading days",
                     _json(notes),
                 ),
-            )
+            ).fetchone()
+            if inserted is None:
+                skipped_existing += 1
+                serializable.append(
+                    {
+                        **payload,
+                        "status": "existing",
+                        "broker_enriched": broker_notes is not None,
+                    }
+                )
+                continue
         created += 1
         serializable.append({**payload, "status": "paper_candidate", "broker_enriched": broker_notes is not None})
     return {

@@ -164,6 +164,7 @@ def _apply_schema(dsn: str) -> None:
                 "20260812_free_market_structure_volatility.sql",
                 "20260812_option_structure_evaluations.sql",
                 "20260917_option_snapshot_provenance.sql",
+                "20260917_recommendation_uniqueness.sql",
             ):
                 conn.execute((base / "migrations" / migration).read_text())
         finally:

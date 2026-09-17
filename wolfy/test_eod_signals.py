@@ -315,6 +315,29 @@ def test_write_approved_paper_recommendations_only_uses_approved_signals_and_cap
     assert rows[0][7]["review_gate_required"] is False
 
 
+def test_runtime_schema_helper_does_not_create_recommendation_unique_indexes():
+    from eod_signals import ensure_signal_schema
+
+    class RecordingConnection:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement, params=None):
+            del params
+            self.statements.append(str(statement))
+            return self
+
+        def fetchone(self):
+            return None
+
+    conn = RecordingConnection()
+    ensure_signal_schema(conn)
+    runtime_sql = "\n".join(conn.statements).lower()
+    assert "uq_experimental_paper_recommendation_signal" not in runtime_sql
+    assert "uq_paper_recommendation_signal" not in runtime_sql
+    assert "duplicate experimental paper recommendations" not in runtime_sql
+
+
 def test_log_approved_paper_recommendation_trades_creates_open_paper_rows_idempotently():
     pytest.importorskip("psycopg")
     from eod_signals import log_approved_paper_recommendation_trades, seed_default_strategies, write_approved_paper_recommendations
