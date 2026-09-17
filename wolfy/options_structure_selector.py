@@ -226,6 +226,7 @@ def _screen_contract(contract: Mapping[str, Any], *, as_of: date, policy: Select
 def select_bullish_option_structure(
     *, ticker: str, underlying_price: Decimal, technical_target: Decimal,
     as_of: date, contracts: Sequence[Mapping[str, Any]], policy: SelectorPolicy | None = None,
+    max_loss_budget: Decimal | None = None,
 ) -> dict[str, Any]:
     """Compare long calls and same-expiration call debit spreads.
 
@@ -236,6 +237,11 @@ def select_bullish_option_structure(
     if policy.decision_time is not None:
         strict_aware_datetime(policy.decision_time, field="decision_time")
     strict_mapping_sequence(contracts, field="contracts")
+    budget = None
+    if max_loss_budget is not None:
+        budget = strict_finite_decimal(max_loss_budget, field="max_loss_budget")
+        if budget <= 0:
+            raise ValueError("max_loss_budget must be positive")
     if underlying_price <= 0 or technical_target <= underlying_price:
         raise ValueError("bullish target must be above a positive underlying price")
     eligible: list[dict[str, Any]] = []
@@ -298,11 +304,22 @@ def select_bullish_option_structure(
                 "selection_facts": ["positive_conservative_profit_at_technical_target", "same_expiration_defined_risk", "short_strike_target_alignment"],
             })
     candidates.sort(key=lambda row: (-row["score"], row["max_loss_per_contract"], row["dte"], row["structure"], row["long_leg"]["symbol"], (row["short_leg"] or {}).get("symbol", "")))
-    selected = candidates[0] if candidates else None
+    unaffordable_candidates = (
+        [row for row in candidates if row["max_loss_per_contract"] > budget]
+        if budget is not None
+        else []
+    )
+    affordable_candidates = (
+        [row for row in candidates if row["max_loss_per_contract"] <= budget]
+        if budget is not None
+        else candidates
+    )
+    selected = affordable_candidates[0] if affordable_candidates else None
     return {
         "ticker": ticker.upper(), "as_of": as_of.isoformat(),
         "status": "selected" if selected else "no_tradable_option_structure",
         "selected": selected, "evaluated_candidates": candidates,
+        "unaffordable_candidates": unaffordable_candidates,
         "rejected_contracts": rejected,
         "rejected_long_legs": rejected_long_legs,
         "policy": {

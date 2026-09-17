@@ -57,6 +57,40 @@ def test_selector_can_choose_long_call_when_upside_is_not_capped_by_target():
     assert result["selected"]["long_leg"]["strike"] == "100"
 
 
+def test_selector_skips_higher_ranked_structure_above_exact_loss_budget():
+    chain = [
+        _c("BUD260828C00090000", "2026-08-28", "90", "5.90", "6.00"),
+        _c("BUD260904C00100000", "2026-09-04", "100", "3.90", "4.00"),
+    ]
+
+    result = select_bullish_option_structure(
+        ticker="BUD",
+        underlying_price=Decimal("100"),
+        technical_target=Decimal("115"),
+        as_of=date(2026, 8, 12),
+        contracts=chain,
+        max_loss_budget=Decimal("500"),
+    )
+
+    assert result["evaluated_candidates"][0]["long_leg"]["strike"] == "90"
+    assert result["unaffordable_candidates"][0]["long_leg"]["strike"] == "90"
+    assert result["selected"]["long_leg"]["strike"] == "100"
+    assert result["selected"]["max_loss_per_contract"] <= Decimal("500")
+
+
+@pytest.mark.parametrize("budget", [Decimal("0"), Decimal("NaN"), True])
+def test_selector_rejects_invalid_max_loss_budget(budget):
+    with pytest.raises(ValueError, match="max_loss_budget"):
+        select_bullish_option_structure(
+            ticker="BUD",
+            underlying_price=Decimal("100"),
+            technical_target=Decimal("115"),
+            as_of=date(2026, 8, 12),
+            contracts=[_c("BUD260828C00100000", "2026-08-28", "100", "3.9", "4")],
+            max_loss_budget=budget,
+        )
+
+
 def test_selector_rejects_stale_wide_or_illiquid_contracts_instead_of_forcing_trade():
     chain = [
         _c("BAD260821C00100000", "2026-08-21", "100", "1.00", "3.00", oi=2, volume=0),
