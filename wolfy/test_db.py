@@ -166,6 +166,7 @@ def _apply_schema(dsn: str) -> None:
                 "20260917_option_snapshot_provenance.sql",
                 "20260917_recommendation_uniqueness.sql",
                 "20260917_security_master.sql",
+                "20260917_recommendation_universe.sql",
             ):
                 conn.execute((base / "migrations" / migration).read_text())
         finally:

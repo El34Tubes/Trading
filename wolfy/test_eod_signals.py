@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from eod_price_features import PriceBar, compute_and_store_features, ingest_price_bars
+from recommendation_universe import (
+    AdjustedDailyBarObservation,
+    MarketCapObservation,
+    UniverseSecurityEvidence,
+    build_universe_snapshot,
+    persist_universe_snapshot,
+)
+from security_master import SecurityEligibilityDecision
 from test_db import test_connection
 
 
@@ -64,49 +72,90 @@ def _restore_default_strategy_statuses(conn) -> None:
     return None
 
 
-def test_recommendation_universe_uses_broad_current_universe_with_data_gates():
+def _persist_eligible_snapshot(conn, *, ticker: str, signal_dt: date, price_bars: list[PriceBar]) -> None:
+    decision_at = datetime.combine(signal_dt, datetime.max.time(), tzinfo=timezone.utc)
+    identity = SecurityEligibilityDecision(
+        ticker=ticker,
+        decision_at=decision_at,
+        eligible=True,
+        reason_codes=("eligible_us_common_stock",),
+        identity_observation_ids=(f"identity:{ticker}",),
+        risk_observation_ids=(),
+        denylist_observation_ids=(),
+    )
+    observed_bars = tuple(
+        AdjustedDailyBarObservation(
+            observation_id=f"bar:{ticker}:{bar.dt}",
+            ticker=ticker,
+            session=bar.dt,
+            close=Decimal(bar.close),
+            volume=bar.volume,
+            provider="unit-test",
+            source_url="https://example.test/adjusted-bars",
+            available_at=decision_at - timedelta(minutes=1),
+            adjusted=True,
+        )
+        for bar in price_bars
+    )
+    item = UniverseSecurityEvidence(
+        ticker=ticker,
+        sector="Industrials",
+        identity_decision=identity,
+        market_cap_observations=(
+            MarketCapObservation(
+                observation_id=f"cap:{ticker}",
+                ticker=ticker,
+                market_cap=Decimal("1000000000"),
+                provider="unit-test",
+                source_url="https://example.test/market-cap",
+                effective_at=decision_at - timedelta(hours=2),
+                available_at=decision_at - timedelta(hours=1),
+            ),
+        ),
+        bars=observed_bars,
+    )
+    persist_universe_snapshot(
+        conn,
+        build_universe_snapshot(
+            signal_dt=signal_dt,
+            decision_at=decision_at,
+            evidence=(item,),
+        ),
+    )
+
+
+def test_recommendation_universe_requires_immutable_policy_snapshot():
     pytest.importorskip("psycopg")
     from eod_signals import recommendation_universe_tickers, seed_default_strategies
 
-    tickers = ["ZZBLUE", "ZZSMALL", "ZZNONE", "ZZINACT", "ZZSTALE", "ZZTHIN"]
+    tickers = ["ZZBLUE", "ZZUNSNAP"]
     signal_dt = date(2099, 2, 4)
     with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
-            rows = [
-                ("ZZBLUE", "blue_chip", True),
-                ("ZZSMALL", "small_cap", True),
-                ("ZZNONE", None, True),
-                ("ZZINACT", "large_cap", False),
-                ("ZZSTALE", "mid_cap", True),
-                ("ZZTHIN", "small_cap", True),
-            ]
-            for symbol, tier, active in rows:
+            for symbol in tickers:
                 conn.execute(
                     """
                     INSERT INTO universe_symbols(symbol, name, source, active, wolfy_tier, backfill_enabled)
-                    VALUES (%s, %s, 'unit-test', %s, %s, true)
+                    VALUES (%s, %s, 'unit-test', true, 'small_cap', true)
                     """,
-                    (symbol, symbol, active, tier),
+                    (symbol, symbol),
                 )
-            for ticker in ["ZZBLUE", "ZZSMALL", "ZZNONE", "ZZINACT", "ZZSTALE"]:
-                ingest_price_bars(conn, _breakout_bars(ticker), source="unit-broad-universe")
-                compute_and_store_features(conn, tickers=[ticker], sma_fast_window=5, sma_slow_window=20, volume_window=5, atr_window=5, min_dollar_vol=Decimal("1000"))
-            ingest_price_bars(conn, _breakout_bars("ZZTHIN", n=8), source="unit-broad-universe")
-            compute_and_store_features(conn, tickers=["ZZTHIN"], sma_fast_window=3, sma_slow_window=5, volume_window=3, atr_window=3, min_dollar_vol=Decimal("1000"))
-            conn.execute("DELETE FROM features WHERE ticker='ZZSTALE' AND dt=%s", (signal_dt,))
-
+                ticker_bars = _breakout_bars(symbol)
+                ingest_price_bars(conn, ticker_bars, source="unit-snapshot-universe")
+                compute_and_store_features(conn, tickers=[symbol], sma_fast_window=5, sma_slow_window=20, volume_window=5, atr_window=5, min_dollar_vol=Decimal("1000"))
+            _persist_eligible_snapshot(
+                conn,
+                ticker="ZZBLUE",
+                signal_dt=signal_dt,
+                price_bars=_breakout_bars("ZZBLUE"),
+            )
             result = recommendation_universe_tickers(conn, signal_dt=signal_dt, min_history_bars=20)
         finally:
             _cleanup(conn, tickers)
 
-    assert "ZZBLUE" in result
-    assert "ZZSMALL" in result
-    assert "ZZNONE" in result
-    assert "ZZINACT" not in result
-    assert "ZZSTALE" not in result
-    assert "ZZTHIN" not in result
+    assert result == ["ZZBLUE"]
 
 
 def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers_omitted():
@@ -125,16 +174,23 @@ def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers
                     "INSERT INTO universe_symbols(symbol, name, source, active, wolfy_tier, backfill_enabled) VALUES (%s, %s, 'unit-test', true, 'small_cap', true) ON CONFLICT (symbol) DO UPDATE SET active=true",
                     (symbol, symbol),
                 )
-            ingest_price_bars(conn, _breakout_bars("ZZAUTO", daily_step=Decimal("0.70"), breakout_lift=Decimal("2.50")), source="unit-auto-universe")
+            auto_bars = _breakout_bars("ZZAUTO", daily_step=Decimal("0.70"), breakout_lift=Decimal("2.50"))
+            ingest_price_bars(conn, auto_bars, source="unit-auto-universe")
             ingest_price_bars(conn, _breakout_bars("SPY", daily_step=Decimal("0.05"), breakout_lift=Decimal("0.00")), source="unit-auto-universe")
             compute_and_store_features(conn, tickers=tickers, sma_fast_window=5, sma_slow_window=20, volume_window=5, atr_window=5, min_dollar_vol=Decimal("1000"))
+            _persist_eligible_snapshot(
+                conn,
+                ticker="ZZAUTO",
+                signal_dt=signal_dt,
+                price_bars=auto_bars,
+            )
 
             result = generate_eod_signals(conn, tickers=None, signal_dt=signal_dt, momentum_lookback_days=20, momentum_top_n=1)
         finally:
             _cleanup(conn, tickers)
             _restore_default_strategy_statuses(conn)
 
-    assert result["universe_source"] == "broad_current_with_data_gates"
+    assert result["universe_source"] == "immutable_mid_small_snapshot"
     assert "ZZAUTO" in result["tickers_considered"]
     assert result["signals_by_strategy"]["liquid_rs_breakout_continuation"] >= 1
 

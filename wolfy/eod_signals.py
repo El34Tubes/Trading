@@ -304,37 +304,48 @@ def _strategy_ids(conn) -> dict[str, tuple[int, str]]:
     return {str(name): (int(strategy_id), str(status)) for strategy_id, name, status in rows}
 
 
-def recommendation_universe_tickers(conn, *, signal_dt: date, min_history_bars: int = 20) -> list[str]:
-    """Return broad/current recommendation tickers with deterministic data-readiness gates.
+def recommendation_universe_tickers(
+    conn,
+    *,
+    signal_dt: date,
+    min_history_bars: int = 20,
+    explicit_tickers: Sequence[str] | None = None,
+) -> list[str]:
+    """Return members of the latest immutable pivot-policy snapshot.
 
-    This intentionally does not restrict by Wolfy tier. The user's first
-    recommendation engine may consider the whole active universe, but a ticker
-    must have current price/features rows and enough stored bars for the
-    strategy window before it can enter signal generation.
+    ``min_history_bars`` remains in the compatibility signature, but the
+    snapshot builder always enforces the canonical exact 20-session policy.
+    Explicit replay tickers are accepted only when every ticker is a member of
+    that same snapshot.
     """
-    ensure_signal_schema(conn)
+    del min_history_bars
+    from orchestration_config import MID_SMALL_PIVOT_POLICY
+
     rows = conn.execute(
         """
-        SELECT u.symbol
-        FROM universe u
-        JOIN prices p ON p.ticker=u.symbol AND p.dt=%s
-        JOIN features f ON f.ticker=u.symbol AND f.dt=%s
-        JOIN LATERAL (
-          SELECT count(*) AS bar_count
-          FROM prices ph
-          WHERE ph.ticker=u.symbol AND ph.dt <= %s
-        ) hist ON true
-        WHERE coalesce(u.active, true)=true
-          AND coalesce(u.enabled, true)=true
-          AND hist.bar_count >= %s
-          AND p.close IS NOT NULL
-          AND f.atr IS NOT NULL
-          AND f.vol_ratio IS NOT NULL
-        ORDER BY u.symbol
+        SELECT m.ticker
+        FROM recommendation_universe_snapshots s
+        JOIN recommendation_universe_members m ON m.snapshot_id=s.snapshot_id
+        WHERE s.snapshot_id = (
+          SELECT snapshot_id
+          FROM recommendation_universe_snapshots
+          WHERE signal_dt=%s AND policy_version=%s
+          ORDER BY decision_at DESC, source_fingerprint DESC
+          LIMIT 1
+        )
+          AND m.included
+        ORDER BY m.ticker
         """,
-        (signal_dt, signal_dt, signal_dt, min_history_bars),
+        (signal_dt, MID_SMALL_PIVOT_POLICY.version),
     ).fetchall()
-    return [str(row[0]).upper() for row in rows]
+    included = [str(row[0]).upper() for row in rows]
+    if explicit_tickers is None:
+        return included
+    requested = sorted({str(ticker).strip().upper() for ticker in explicit_tickers if str(ticker).strip()})
+    rejected = sorted(set(requested) - set(included))
+    if rejected:
+        raise ValueError(f"explicit ticker replay failed universe policy: {','.join(rejected)}")
+    return requested
 
 
 def _upsert_signal(conn, *, ticker: str, signal_dt: date, strategy_id: int, direction: str, raw: dict) -> None:
@@ -714,7 +725,7 @@ def generate_eod_signals(
     universe_source = "explicit_tickers"
     if tickers is None:
         tickers = recommendation_universe_tickers(conn, signal_dt=signal_dt)
-        universe_source = "broad_current_with_data_gates"
+        universe_source = "immutable_mid_small_snapshot"
     if not tickers:
         raise ValueError("tickers are required")
     seed_default_strategies(conn)
