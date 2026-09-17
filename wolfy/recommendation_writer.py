@@ -8,11 +8,14 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import json
 from typing import Callable, Mapping, Sequence
 import uuid
+
+from instrument_decision import InstrumentDecision
+from portfolio_allocator import AllocationDecision
 
 GLOBAL_RECOMMENDATION_LOCK_KEY = "wolfy:global-paper-recommendations:v1"
 MAXIMUM_POSITIONS = 20
@@ -97,6 +100,133 @@ class UnderlyingFallback:
         object.__setattr__(self, "entry", entry)
         object.__setattr__(self, "stop", stop)
         object.__setattr__(self, "target", target)
+
+
+@dataclass(frozen=True)
+class PivotInstrumentRecommendation:
+    """One selected allocation bound to exactly one paper instrument decision."""
+
+    run_id: uuid.UUID
+    allocation: AllocationDecision
+    instrument: InstrumentDecision
+    option_evaluation_id: int | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, uuid.UUID):
+            raise ValueError("run_id must be a UUID")
+        if not isinstance(self.allocation, AllocationDecision):
+            raise ValueError("allocation must be an AllocationDecision")
+        if not self.allocation.selected or self.allocation.reason != "selected":
+            raise ValueError("allocation must be selected")
+        if self.allocation.risk_fraction != RISK_FRACTION_PER_POSITION:
+            raise ValueError("allocation risk_fraction must equal 0.05")
+        if not isinstance(self.instrument, InstrumentDecision):
+            raise ValueError("instrument must be an InstrumentDecision")
+        candidate = self.allocation.candidate
+        decision = self.instrument
+        if decision.candidate_id != candidate.candidate_id or decision.ticker != candidate.ticker:
+            raise ValueError("instrument decision must bind to the allocated candidate")
+        if (
+            not isinstance(decision.decision_at, datetime)
+            or decision.decision_at.tzinfo is None
+            or decision.decision_at.utcoffset() is None
+        ):
+            raise ValueError("instrument decision_at must be timezone-aware")
+        if (
+            decision.paper_only is not True
+            or decision.no_live_execution is not True
+            or decision.broker_order_submitted is not False
+        ):
+            raise ValueError("instrument decision must be paper-only with no broker order")
+        max_loss = _finite_positive_decimal(decision.max_loss, "max_loss")
+        risk_budget = _finite_positive_decimal(decision.risk_budget, "risk_budget")
+        if max_loss > risk_budget:
+            raise ValueError("max_loss cannot exceed risk_budget")
+        if decision.expression == "underlying_stock_fallback":
+            if self.option_evaluation_id is not None:
+                raise ValueError("stock fallback cannot bind an option_evaluation_id")
+            if (
+                decision.option_contracts != 0
+                or decision.long_leg is not None
+                or decision.short_leg is not None
+                or decision.underlying_quantity is None
+                or not decision.fallback_reasons
+            ):
+                raise ValueError("stock fallback decision is malformed")
+            _finite_positive_decimal(decision.underlying_quantity, "underlying_quantity")
+        elif decision.expression in ("long_call", "call_debit_spread"):
+            if type(self.option_evaluation_id) is not int or self.option_evaluation_id <= 0:
+                raise ValueError("option_evaluation_id is required for an option expression")
+            if (
+                type(decision.option_contracts) is not int
+                or decision.option_contracts <= 0
+                or not isinstance(decision.long_leg, Mapping)
+                or not decision.long_leg
+                or decision.underlying_quantity is not None
+                or decision.fallback_reasons
+                or not decision.chain_snapshot_id
+            ):
+                raise ValueError("option instrument decision is malformed")
+            if decision.expression == "long_call" and decision.short_leg is not None:
+                raise ValueError("long_call cannot have a short leg")
+            if decision.expression == "call_debit_spread" and (
+                not isinstance(decision.short_leg, Mapping) or not decision.short_leg
+            ):
+                raise ValueError("call_debit_spread requires an exact short leg")
+            _canonical_json_value(decision.long_leg, "long_leg")
+            if decision.short_leg is not None:
+                _canonical_json_value(decision.short_leg, "short_leg")
+        else:
+            raise ValueError("unsupported instrument expression")
+
+
+@dataclass(frozen=True)
+class PivotRecommendationWriteResult:
+    selected: tuple[RecommendationCandidate, ...]
+    inserted: int
+    paper_trades_inserted: int
+    blocked: tuple[tuple[str, str], ...]
+    existing_positions: int
+    existing_risk: Decimal
+    dry_run: bool
+    broker_orders_created: int = 0
+
+
+def _finite_positive_decimal(value: object, field: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite positive decimal")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite positive decimal") from exc
+    if not result.is_finite() or result <= 0:
+        raise ValueError(f"{field} must be a finite positive decimal")
+    return result
+
+
+def _canonical_json_value(value: object, field: str) -> object:
+    """Validate JSON containers and convert only finite Decimals to strings."""
+    if value is None or isinstance(value, (str, int)) or type(value) is bool:
+        return value
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError(f"{field} contains a nonfinite decimal")
+        return str(value)
+    if isinstance(value, float):
+        converted = Decimal(str(value))
+        if not converted.is_finite():
+            raise ValueError(f"{field} contains a nonfinite number")
+        return value
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or key != key.strip():
+                raise ValueError(f"{field} contains a noncanonical key")
+            result[key] = _canonical_json_value(item, field)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_canonical_json_value(item, field) for item in value]
+    raise ValueError(f"{field} contains a non-JSON value")
 
 
 def _safe_existing_risk(notes: Mapping[str, object]) -> Decimal:
@@ -297,4 +427,248 @@ def write_underlying_fallback_recommendations(
         insert_candidate=insert_candidate,
         max_to_write=MAXIMUM_POSITIONS,
         dry_run=dry_run,
+    )
+
+
+def _validate_pivot_database_bindings(
+    conn,
+    *,
+    item: PivotInstrumentRecommendation,
+    signal_dt: date,
+) -> None:
+    candidate = item.allocation.candidate
+    decision = item.instrument
+    strategy = conn.execute(
+        "SELECT status,metadata FROM strategies WHERE name=%s",
+        (candidate.strategy_id,),
+    ).fetchone()
+    metadata = strategy[1] if strategy and isinstance(strategy[1], Mapping) else {}
+    if (
+        not strategy
+        or strategy[0] != "approved"
+        or metadata.get("approval_scope") != "paper_only_no_live_execution"
+        or metadata.get("paper_recommendation_approval") is not True
+    ):
+        raise ValueError("strategy lacks explicit paper-only approval metadata")
+    if decision.expression == "underlying_stock_fallback":
+        return
+    row = conn.execute(
+        """SELECT e.ticker,e.signal_dt,e.strategy_name,e.snapshot_id,e.decision_at,
+                  e.selected_structure,s.ticker,e.evaluation
+             FROM option_structure_evaluations e
+             JOIN option_chain_snapshots s ON s.snapshot_id=e.snapshot_id
+            WHERE e.id=%s""",
+        (item.option_evaluation_id,),
+    ).fetchone()
+    expected = (
+        candidate.ticker,
+        signal_dt,
+        candidate.strategy_id,
+        decision.chain_snapshot_id,
+        decision.expression,
+        candidate.ticker,
+    )
+    if row is None or (row[0], row[1], row[2], row[3], row[5], row[6]) != expected:
+        raise ValueError("option evaluation is not bound to candidate/strategy/snapshot")
+    if (
+        not isinstance(row[4], datetime)
+        or row[4].tzinfo is None
+        or row[4].utcoffset() is None
+        or row[4].astimezone(timezone.utc) != decision.decision_at.astimezone(timezone.utc)
+    ):
+        raise ValueError("option evaluation decision_at mismatch")
+    evaluation = row[7] if isinstance(row[7], Mapping) else {}
+    selected = evaluation.get("selected")
+    if not isinstance(selected, Mapping):
+        raise ValueError("option evaluation has no exact selected structure")
+    if (
+        selected.get("structure") != decision.expression
+        or selected.get("long_leg") != _canonical_json_value(decision.long_leg, "long_leg")
+        or selected.get("short_leg") != _canonical_json_value(decision.short_leg, "short_leg")
+    ):
+        raise ValueError("option decision legs do not match bound evaluation")
+
+
+def write_pivot_instrument_recommendations(
+    conn,
+    *,
+    recommendations: Sequence[PivotInstrumentRecommendation],
+    signal_dt: date,
+    dry_run: bool,
+) -> PivotRecommendationWriteResult:
+    """Persist selected exact instruments and their paper ledger rows atomically.
+
+    The shared writer remains authoritative for concurrent portfolio capacity.
+    This path has no broker integration and is write-enabled only in ``wolfy_test``
+    until the reviewed release/canary gate explicitly changes that boundary.
+    """
+    if type(signal_dt) is not date:
+        raise ValueError("signal_dt must be a date")
+    if isinstance(recommendations, (str, bytes)) or not isinstance(recommendations, Sequence):
+        raise ValueError("recommendations must be a sequence")
+    if any(not isinstance(item, PivotInstrumentRecommendation) for item in recommendations):
+        raise ValueError("recommendations must contain PivotInstrumentRecommendation values")
+    identities = [
+        (item.allocation.candidate.ticker, item.allocation.candidate.strategy_id)
+        for item in recommendations
+    ]
+    if len(set(identities)) != len(identities):
+        raise ValueError("recommendations contain duplicate ticker/strategy identities")
+    if not dry_run:
+        database = conn.execute("SELECT current_database()").fetchone()[0]
+        if database != "wolfy_test":
+            raise RuntimeError("pivot recommendation publication is disabled outside wolfy_test")
+    for item in recommendations:
+        _validate_pivot_database_bindings(conn, item=item, signal_dt=signal_dt)
+
+    items_by_identity = {
+        (item.allocation.candidate.ticker, item.allocation.candidate.strategy_id): item
+        for item in recommendations
+    }
+    paper_trades_inserted = 0
+
+    def insert_candidate(candidate: RecommendationCandidate) -> bool:
+        nonlocal paper_trades_inserted
+        item = items_by_identity[(candidate.ticker, candidate.strategy_name)]
+        allocation = item.allocation
+        source = allocation.candidate
+        decision = item.instrument
+        long_leg = _canonical_json_value(decision.long_leg, "long_leg")
+        short_leg = _canonical_json_value(decision.short_leg, "short_leg")
+        notes = {
+            "paper_only": True,
+            "no_live_execution": True,
+            "broker_order_submitted": False,
+            "signal_dt": signal_dt.isoformat(),
+            "decision_at": decision.decision_at.isoformat(),
+            "run_id": str(item.run_id),
+            "candidate_id": str(source.candidate_id),
+            "universe_snapshot_id": str(source.universe_snapshot_id),
+            "strategy_name": source.strategy_id,
+            "strategy_version": source.strategy_version,
+            "sector": source.sector,
+            "allocation": {
+                "global_rank": allocation.global_rank,
+                "sector_rank": allocation.sector_rank,
+                "normalized_score": str(allocation.normalized_score),
+                "risk_fraction": str(allocation.risk_fraction),
+            },
+            "risk_fraction": str(allocation.risk_fraction),
+            "risk_budget": str(decision.risk_budget),
+            "max_loss": str(decision.max_loss),
+            "instrument_expression": decision.expression,
+            "selector_version": decision.selector_version,
+            "option_evaluation_id": item.option_evaluation_id,
+            "option_chain_snapshot_id": decision.chain_snapshot_id,
+            "option_contracts": decision.option_contracts,
+            "underlying_quantity": (
+                str(decision.underlying_quantity)
+                if decision.underlying_quantity is not None
+                else None
+            ),
+            "long_leg": long_leg,
+            "short_leg": short_leg,
+            "fallback_reasons": list(decision.fallback_reasons),
+            "source_signal": {
+                "close": str(source.entry),
+                "invalidation": str(source.stop),
+                "target": str(source.target),
+            },
+        }
+        inserted = conn.execute(
+            """INSERT INTO recommendations(
+                   ticker,action,recommendation_type,thesis,setup_type,
+                   entry_zone,entry_trigger,stop,target,risk_reward,confidence,
+                   position_size_suggestion,holding_period,status,notes)
+               VALUES (%s,'buy',%s,%s,%s,%s,%s,%s,%s,%s,'paper',%s,
+                       'Up to 10 trading days','paper_candidate',%s::jsonb)
+               ON CONFLICT (ticker,(notes->>'signal_dt'),(notes->>'strategy_name'))
+                 WHERE status IN ('paper_candidate','paper_logged')
+                   AND notes->>'signal_dt' IS NOT NULL
+                   AND notes->>'strategy_name' IS NOT NULL
+               DO NOTHING RETURNING id""",
+            (
+                source.ticker,
+                decision.expression,
+                f"Paper-only {source.strategy_id} via {decision.expression}; no live execution.",
+                source.strategy_id,
+                str(source.entry),
+                f"Paper entry at {source.entry}",
+                f"Stop at {source.stop}",
+                f"Target at {source.target}",
+                str((source.target - source.entry) / (source.entry - source.stop)),
+                f"Defined paper risk no greater than {decision.risk_budget}.",
+                json.dumps(notes, sort_keys=True),
+            ),
+        ).fetchone()
+        if inserted is None:
+            return False
+        recommendation_id = inserted[0]
+        if decision.expression == "underlying_stock_fallback":
+            entry_price = source.entry
+            quantity = decision.underlying_quantity
+        else:
+            entry_price = decision.max_loss / Decimal(decision.option_contracts * 100)
+            quantity = Decimal(decision.option_contracts)
+        trade_notes = {
+            "paper_only": True,
+            "no_live_execution": True,
+            "broker_order_submitted": False,
+            "source_recommendation_id": str(recommendation_id),
+            "candidate_id": str(source.candidate_id),
+            "run_id": str(item.run_id),
+            "strategy_name": source.strategy_id,
+            "instrument_expression": decision.expression,
+            "max_loss": str(decision.max_loss),
+            "risk_budget": str(decision.risk_budget),
+            "option_evaluation_id": item.option_evaluation_id,
+            "option_chain_snapshot_id": decision.chain_snapshot_id,
+            "long_leg": long_leg,
+            "short_leg": short_leg,
+            "fallback_reasons": list(decision.fallback_reasons),
+        }
+        conn.execute(
+            """INSERT INTO paper_trades(
+                   recommendation_id,ticker,entry_date,entry_price,quantity,
+                   instrument,stop_price,target_price,status,data_source,notes)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'open',
+                       'mid_small_pivot_exact_instrument',%s::jsonb)""",
+            (
+                str(recommendation_id), source.ticker, signal_dt, entry_price,
+                quantity, decision.expression, source.stop, source.target,
+                json.dumps(trade_notes, sort_keys=True),
+            ),
+        )
+        conn.execute(
+            "UPDATE recommendations SET status='paper_logged' WHERE id=%s",
+            (recommendation_id,),
+        )
+        paper_trades_inserted += 1
+        return True
+
+    ranked = [
+        RecommendationCandidate(
+            ticker=item.allocation.candidate.ticker,
+            strategy_name=item.allocation.candidate.strategy_id,
+            signal_dt=signal_dt,
+            sector=item.allocation.candidate.sector,
+            risk_fraction=item.allocation.risk_fraction,
+        )
+        for item in recommendations
+    ]
+    base = write_ranked_recommendations(
+        conn,
+        candidates=ranked,
+        insert_candidate=insert_candidate,
+        max_to_write=MAXIMUM_POSITIONS,
+        dry_run=dry_run,
+    )
+    return PivotRecommendationWriteResult(
+        selected=base.selected,
+        inserted=base.inserted,
+        paper_trades_inserted=paper_trades_inserted,
+        blocked=base.blocked,
+        existing_positions=base.existing_positions,
+        existing_risk=base.existing_risk,
+        dry_run=base.dry_run,
     )

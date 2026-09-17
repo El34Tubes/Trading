@@ -1540,6 +1540,37 @@ def write_experimental_options_recommendations(
     }
 
 
+def write_pivot_paper_recommendations(
+    conn,
+    *,
+    recommendations: Sequence[Any],
+    signal_dt: date,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Write globally allocated exact instruments to the paper ledger only."""
+    from recommendation_writer import write_pivot_instrument_recommendations
+
+    result = write_pivot_instrument_recommendations(
+        conn,
+        recommendations=recommendations,
+        signal_dt=signal_dt,
+        dry_run=dry_run,
+    )
+    return {
+        "signal_dt": signal_dt.isoformat(),
+        "dry_run": dry_run,
+        "recommendations_created": result.inserted,
+        "paper_trades_created": result.paper_trades_inserted,
+        "recommendations_ranked": len(result.selected),
+        "writer_blocked": [
+            {"ticker": ticker, "reason": reason} for ticker, reason in result.blocked
+        ],
+        "paper_only": True,
+        "no_live_execution": True,
+        "broker_orders_created": result.broker_orders_created,
+    }
+
+
 def write_approved_paper_recommendations(
     conn,
     *,

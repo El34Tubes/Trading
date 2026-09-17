@@ -274,6 +274,27 @@ def run_mid_small_underlying_shadow(
     )
 
 
+def run_mid_small_instrument_publication(
+    conn,
+    *,
+    recommendations: Sequence[object],
+    signal_dt: dt.date,
+    dry_run: bool = True,
+) -> dict:
+    """Route prevalidated pivot instrument decisions to the paper-only writer."""
+    from eod_signals import write_pivot_paper_recommendations
+
+    result = write_pivot_paper_recommendations(
+        conn,
+        recommendations=recommendations,
+        signal_dt=signal_dt,
+        dry_run=dry_run,
+    )
+    result["broker_orders_created"] = 0
+    result["no_live_execution"] = True
+    return result
+
+
 def run_paper_recommendation_lifecycle(
     conn,
     *,
