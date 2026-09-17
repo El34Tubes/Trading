@@ -154,15 +154,24 @@ def latest_price_date(conn, tickers: list[str]) -> dt.date:
     return row[0]
 
 
-def evaluate_current_eod_readiness(conn, *, tickers: Sequence[str]):
-    """Evaluate the free-provider gate against the session due right now."""
+def evaluate_current_eod_readiness(
+    conn,
+    *,
+    tickers: Sequence[str],
+    decision_at: dt.datetime | None = None,
+):
+    """Gate the current run on its exact point-in-time pivot snapshot."""
     from eod_readiness import NY, SourceMode, evaluate_eod_readiness
 
+    del tickers  # Snapshot membership is authoritative; CLI symbols cannot widen it.
+    gate_time = decision_at or dt.datetime.now(NY)
     return evaluate_eod_readiness(
         conn,
-        as_of=dt.datetime.now(NY),
-        universe=tickers,
+        as_of=gate_time,
+        universe=(),
         source_mode=SourceMode.FREE_T_PLUS_1,
+        decision_at=gate_time,
+        require_universe_snapshot=True,
     )
 
 
@@ -171,17 +180,22 @@ def evaluate_replay_eod_readiness(
     *,
     tickers: Sequence[str],
     signal_dt: dt.date,
+    decision_at: dt.datetime | None = None,
 ):
-    """Evaluate a replay's exact date without verifying today's provider state."""
+    """Gate a replay on an immutable snapshot for the exact historical date."""
     from eod_readiness import NY, SourceMode, evaluate_eod_readiness
 
+    del tickers  # Replay symbols cannot substitute for historical snapshot evidence.
+    gate_time = decision_at or dt.datetime.now(NY)
     return evaluate_eod_readiness(
         conn,
-        as_of=dt.datetime.now(NY),
-        universe=tickers,
+        as_of=gate_time,
+        universe=(),
         source_mode=SourceMode.FREE_T_PLUS_1,
         provider_availability_verified=False,
         expected_session=signal_dt,
+        decision_at=gate_time,
+        require_universe_snapshot=True,
     )
 
 
@@ -199,6 +213,14 @@ def eod_readiness_payload(readiness) -> dict:
         "missing_symbols": list(readiness.missing_symbols),
         "source_mode": readiness.source_mode.value,
         "publishable": readiness.publishable,
+        "universe_snapshot_id": readiness.universe_snapshot_id,
+        "universe_policy_version": readiness.universe_policy_version,
+        "universe_source_fingerprint": readiness.universe_source_fingerprint,
+        "benchmark_coverage_numerator": readiness.benchmark_coverage_numerator,
+        "benchmark_coverage_denominator": readiness.benchmark_coverage_denominator,
+        "member_coverage_numerator": readiness.member_coverage_numerator,
+        "member_coverage_denominator": readiness.member_coverage_denominator,
+        "incomplete_reasons": list(readiness.incomplete_reasons),
     }
 
 

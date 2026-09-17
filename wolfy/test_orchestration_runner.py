@@ -1,9 +1,48 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 from test_db import test_connection
+
+
+def _publishable_readiness(signal_dt: date):
+    from eod_readiness import EODReadiness, SourceMode
+
+    return EODReadiness(
+        expected_session=signal_dt,
+        latest_complete_session=signal_dt,
+        coverage_numerator=3,
+        coverage_denominator=3,
+        missing_symbols=(),
+        source_mode=SourceMode.FREE_T_PLUS_1,
+        publishable=True,
+    )
+
+
+def test_replay_readiness_requires_historical_pivot_snapshot(monkeypatch):
+    import orchestration_runner
+
+    captured = {}
+
+    def fake_evaluate(conn, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("eod_readiness.evaluate_eod_readiness", fake_evaluate)
+    decision_at = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+    result = orchestration_runner.evaluate_replay_eod_readiness(
+        object(),
+        tickers=("SHOULD_NOT_DEFINE_SNAPSHOT_MEMBERS",),
+        signal_dt=date(2026, 8, 18),
+        decision_at=decision_at,
+    )
+
+    assert result is not None
+    assert captured["expected_session"] == date(2026, 8, 18)
+    assert captured["decision_at"] == decision_at
+    assert captured["require_universe_snapshot"] is True
+    assert captured["universe"] == ()
 
 
 def test_paper_recommendation_lifecycle_writes_and_logs_approved_signal_without_broker_action():
@@ -100,6 +139,11 @@ def test_eod_signal_runner_invokes_paper_lifecycle_after_success(monkeypatch):
 
     monkeypatch.setattr(orchestration_runner.subprocess, "call", fake_signal_call)
     monkeypatch.setattr(orchestration_runner, "run_paper_recommendation_lifecycle", fake_lifecycle)
+    monkeypatch.setattr(
+        orchestration_runner,
+        "evaluate_replay_eod_readiness",
+        lambda conn, *, tickers, signal_dt: _publishable_readiness(signal_dt),
+    )
 
     rc = orchestration_runner.run_eod_features_signals(
         tickers_csv_value="SPY",
@@ -127,6 +171,11 @@ def test_eod_signal_runner_stops_before_paper_lifecycle_on_signal_failure(monkey
 
     monkeypatch.setattr(orchestration_runner.subprocess, "call", lambda cmd: 7)
     monkeypatch.setattr(orchestration_runner, "run_paper_recommendation_lifecycle", fake_lifecycle)
+    monkeypatch.setattr(
+        orchestration_runner,
+        "evaluate_replay_eod_readiness",
+        lambda conn, *, tickers, signal_dt: _publishable_readiness(signal_dt),
+    )
 
     rc = orchestration_runner.run_eod_features_signals(
         tickers_csv_value="SPY",

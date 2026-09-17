@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+import json
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -62,6 +64,311 @@ def _store_complete(conn, session: date, symbols: tuple[str, ...]) -> None:
             """,
             (symbol, session),
         )
+
+
+def _persist_pivot_snapshot(
+    conn,
+    *,
+    session: date,
+    decision_at: datetime,
+    symbols: tuple[str, ...],
+):
+    from recommendation_universe import (
+        AdjustedDailyBarObservation,
+        MarketCapObservation,
+        UniverseSecurityEvidence,
+        build_universe_snapshot,
+        persist_universe_snapshot,
+    )
+    from security_master import SecurityEligibilityDecision
+
+    evidence = []
+    for symbol in symbols:
+        identity = SecurityEligibilityDecision(
+            ticker=symbol,
+            decision_at=decision_at,
+            eligible=True,
+            reason_codes=("eligible_us_common_stock",),
+            identity_observation_ids=(f"identity:{symbol}",),
+            risk_observation_ids=(),
+            denylist_observation_ids=(),
+        )
+        price_bars = tuple(
+            AdjustedDailyBarObservation(
+                observation_id=f"bar:{symbol}:{index}",
+                ticker=symbol,
+                session=session - timedelta(days=19 - index),
+                close=Decimal("10"),
+                volume=500_000,
+                provider="test",
+                source_url="https://example.test/bars",
+                available_at=decision_at - timedelta(minutes=5),
+                adjusted=True,
+            )
+            for index in range(20)
+        )
+        evidence.append(
+            UniverseSecurityEvidence(
+                ticker=symbol,
+                sector="Industrials",
+                identity_decision=identity,
+                market_cap_observations=(
+                    MarketCapObservation(
+                        observation_id=f"cap:{symbol}",
+                        ticker=symbol,
+                        market_cap=Decimal("1000000000"),
+                        provider="test",
+                        source_url="https://example.test/cap",
+                        effective_at=decision_at - timedelta(hours=2),
+                        available_at=decision_at - timedelta(hours=1),
+                    ),
+                ),
+                bars=price_bars,
+            )
+        )
+    snapshot = build_universe_snapshot(
+        signal_dt=session,
+        decision_at=decision_at,
+        evidence=tuple(evidence),
+    )
+    persist_universe_snapshot(conn, snapshot)
+    return snapshot
+
+
+def test_pivot_readiness_requires_exact_snapshot_members_and_all_benchmarks():
+    from eod_readiness import SourceMode, evaluate_eod_readiness
+
+    session = date(2098, 6, 30)
+    decision_at = datetime(2098, 6, 30, 22, 0, tzinfo=timezone.utc)
+    with test_connection() as conn:
+        snapshot = _persist_pivot_snapshot(
+            conn,
+            session=session,
+            decision_at=decision_at,
+            symbols=("ZZPIVOTA", "ZZPIVOTB"),
+        )
+        _store_complete(conn, session, ("SPY", "IWM", "MDY", "ZZPIVOTA", "ZZPIVOTB"))
+        result = evaluate_eod_readiness(
+            conn,
+            as_of=decision_at + timedelta(hours=1),
+            universe=(),
+            source_mode=SourceMode.PAID_CURRENT_DAY,
+            provider_availability_verified=True,
+            expected_session=session,
+            decision_at=decision_at + timedelta(hours=1),
+            universe_snapshot_id=snapshot.snapshot_id,
+            require_universe_snapshot=True,
+        )
+
+    assert result.publishable is True
+    assert result.universe_snapshot_id == snapshot.snapshot_id
+    assert result.universe_policy_version == snapshot.policy_version
+    assert result.universe_source_fingerprint == snapshot.source_fingerprint
+    assert (result.member_coverage_numerator, result.member_coverage_denominator) == (2, 2)
+    assert (result.benchmark_coverage_numerator, result.benchmark_coverage_denominator) == (3, 3)
+    assert result.missing_symbols == ()
+    assert result.incomplete_reasons == ()
+
+
+def test_pivot_readiness_reports_partial_member_and_benchmark_coverage():
+    from eod_readiness import SourceMode, evaluate_eod_readiness
+
+    session = date(2098, 7, 1)
+    decision_at = datetime(2098, 7, 1, 22, 0, tzinfo=timezone.utc)
+    with test_connection() as conn:
+        snapshot = _persist_pivot_snapshot(
+            conn,
+            session=session,
+            decision_at=decision_at,
+            symbols=("ZZPARTIALA", "ZZPARTIALB"),
+        )
+        _store_complete(conn, session, ("SPY", "IWM", "ZZPARTIALA"))
+        result = evaluate_eod_readiness(
+            conn,
+            as_of=decision_at + timedelta(hours=1),
+            universe=(),
+            source_mode=SourceMode.PAID_CURRENT_DAY,
+            provider_availability_verified=True,
+            expected_session=session,
+            decision_at=decision_at + timedelta(hours=1),
+            universe_snapshot_id=snapshot.snapshot_id,
+            require_universe_snapshot=True,
+        )
+
+    assert result.publishable is False
+    assert result.missing_symbols == ("MDY", "ZZPARTIALB")
+    assert result.incomplete_reasons == (
+        "incomplete_benchmark_coverage",
+        "incomplete_member_coverage",
+    )
+
+
+def test_empty_but_valid_pivot_universe_requires_only_benchmark_context():
+    from eod_readiness import SourceMode, evaluate_eod_readiness
+
+    session = date(2098, 7, 2)
+    decision_at = datetime(2098, 7, 2, 22, 0, tzinfo=timezone.utc)
+    with test_connection() as conn:
+        snapshot = _persist_pivot_snapshot(
+            conn, session=session, decision_at=decision_at, symbols=()
+        )
+        _store_complete(conn, session, ("SPY", "IWM", "MDY"))
+        result = evaluate_eod_readiness(
+            conn,
+            as_of=decision_at + timedelta(hours=1),
+            universe=(),
+            source_mode=SourceMode.PAID_CURRENT_DAY,
+            provider_availability_verified=True,
+            expected_session=session,
+            decision_at=decision_at + timedelta(hours=1),
+            universe_snapshot_id=snapshot.snapshot_id,
+            require_universe_snapshot=True,
+        )
+
+    assert result.publishable is True
+    assert result.member_coverage_denominator == 0
+    assert result.benchmark_coverage_numerator == 3
+
+
+def test_pivot_readiness_fails_closed_for_missing_stale_or_future_snapshot():
+    from eod_readiness import SourceMode, evaluate_eod_readiness
+
+    session = date(2098, 7, 3)
+    decision_at = datetime(2098, 7, 3, 22, 0, tzinfo=timezone.utc)
+    with test_connection() as conn:
+        stale = _persist_pivot_snapshot(
+            conn,
+            session=date(2098, 7, 2),
+            decision_at=decision_at - timedelta(days=1),
+            symbols=("ZZSTALESNAP",),
+        )
+        future = _persist_pivot_snapshot(
+            conn,
+            session=session,
+            decision_at=decision_at + timedelta(hours=2),
+            symbols=("ZZFUTURESNAP",),
+        )
+        missing = evaluate_eod_readiness(
+            conn,
+            as_of=decision_at,
+            universe=(),
+            source_mode=SourceMode.FREE_T_PLUS_1,
+            provider_availability_verified=True,
+            expected_session=session,
+            decision_at=decision_at,
+            require_universe_snapshot=True,
+        )
+        stale_result = evaluate_eod_readiness(
+            conn,
+            as_of=decision_at,
+            universe=(),
+            source_mode=SourceMode.FREE_T_PLUS_1,
+            provider_availability_verified=True,
+            expected_session=session,
+            decision_at=decision_at,
+            universe_snapshot_id=stale.snapshot_id,
+            require_universe_snapshot=True,
+        )
+        future_result = evaluate_eod_readiness(
+            conn,
+            as_of=decision_at,
+            universe=(),
+            source_mode=SourceMode.FREE_T_PLUS_1,
+            provider_availability_verified=True,
+            expected_session=session,
+            decision_at=decision_at,
+            universe_snapshot_id=future.snapshot_id,
+            require_universe_snapshot=True,
+        )
+
+    assert missing.incomplete_reasons == ("missing_universe_snapshot",)
+    assert stale_result.incomplete_reasons == ("universe_snapshot_signal_date_mismatch",)
+    assert future_result.incomplete_reasons == ("universe_snapshot_after_decision",)
+    assert not missing.publishable and not stale_result.publishable and not future_result.publishable
+
+
+def test_pivot_readiness_rejects_included_evidence_available_after_snapshot_decision():
+    from eod_readiness import SourceMode, evaluate_eod_readiness
+    from orchestration_config import MID_SMALL_PIVOT_POLICY
+
+    session = date(2098, 7, 7)
+    decision_at = datetime(2098, 7, 7, 22, 0, tzinfo=timezone.utc)
+    snapshot_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    bar_ids = [f"late-bar:{index}" for index in range(20)]
+    source_evidence = {
+        "identity_observation_ids": ["identity:ZZLATEEVIDENCE"],
+        "risk_observation_ids": [],
+        "denylist_observation_ids": [],
+        "market_cap": {
+            "observation_id": "late-cap",
+            "market_cap": "1000000000",
+            "provider": "test",
+            "source_url": "https://example.test/cap",
+            "effective_at": (decision_at - timedelta(hours=1)).isoformat(),
+            "available_at": (decision_at + timedelta(hours=2)).isoformat(),
+        },
+        "bars": [
+            {
+                "observation_id": bar_ids[index],
+                "session": (session - timedelta(days=19 - index)).isoformat(),
+                "close": "10",
+                "volume": 500_000,
+                "provider": "test",
+                "source_url": "https://example.test/bars",
+                "available_at": (decision_at - timedelta(minutes=5)).isoformat(),
+                "adjusted": True,
+            }
+            for index in range(20)
+        ],
+    }
+    with test_connection() as conn:
+        conn.execute(
+            """INSERT INTO recommendation_universe_snapshots(
+                   snapshot_id,signal_dt,decision_at,policy_version,source_fingerprint,
+                   included_count,excluded_count)
+                 VALUES (%s,%s,%s,%s,%s,1,0)""",
+            (
+                snapshot_id,
+                session,
+                decision_at,
+                MID_SMALL_PIVOT_POLICY.version,
+                "a" * 64,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO recommendation_universe_members(
+                   snapshot_id,ticker,sector,included,reason_codes,identity_observation_ids,
+                   risk_observation_ids,denylist_observation_ids,market_cap_observation_id,
+                   market_cap,bar_observation_ids,close,average_dollar_volume,
+                   source_evidence,facts_hash)
+                 VALUES (%s,'ZZLATEEVIDENCE','Industrials',true,%s,%s,%s,%s,%s,
+                         1000000000,%s,10,5000000,%s::jsonb,%s)""",
+            (
+                snapshot_id,
+                ["eligible_mid_small_us_common_stock"],
+                ["identity:ZZLATEEVIDENCE"],
+                [],
+                [],
+                "late-cap",
+                bar_ids,
+                json.dumps(source_evidence),
+                "b" * 64,
+            ),
+        )
+        result = evaluate_eod_readiness(
+            conn,
+            as_of=decision_at + timedelta(hours=1),
+            universe=(),
+            source_mode=SourceMode.PAID_CURRENT_DAY,
+            provider_availability_verified=True,
+            expected_session=session,
+            decision_at=decision_at + timedelta(hours=1),
+            universe_snapshot_id=snapshot_id,
+            require_universe_snapshot=True,
+        )
+
+    assert result.publishable is False
+    assert result.incomplete_reasons == ("invalid_universe_snapshot",)
 
 
 def test_complete_paid_current_session_returns_typed_publishable_readiness():
