@@ -2450,4 +2450,51 @@ CREATE TRIGGER trg_setup_candidates_immutable
     BEFORE UPDATE OR DELETE ON setup_candidates
     FOR EACH ROW EXECUTE FUNCTION wolfy_reject_setup_candidate_mutation();
 
+-- Separate setup/underlying outcomes from exact-option expression outcomes.
+ALTER TABLE recommendation_outcomes
+    ADD COLUMN IF NOT EXISTS outcome_type TEXT NOT NULL DEFAULT 'underlying_setup';
+DO $$
+DECLARE duplicate_row RECORD;
+BEGIN
+    SELECT paper_trade_id, count(*) AS row_count INTO duplicate_row
+      FROM recommendation_outcomes
+     WHERE paper_trade_id IS NOT NULL
+     GROUP BY paper_trade_id HAVING count(*) > 1
+     ORDER BY paper_trade_id LIMIT 1;
+    IF FOUND THEN
+        RAISE EXCEPTION 'instrument outcomes bootstrap aborted: paper trade % has % underlying outcomes',
+            duplicate_row.paper_trade_id, duplicate_row.row_count;
+    END IF;
+END
+$$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_underlying_outcome_paper_trade
+    ON recommendation_outcomes(paper_trade_id) WHERE paper_trade_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS option_outcomes (
+    id BIGSERIAL PRIMARY KEY,
+    recommendation_id TEXT NOT NULL,
+    paper_trade_id TEXT NOT NULL UNIQUE,
+    option_evaluation_id BIGINT NOT NULL REFERENCES option_structure_evaluations(id),
+    entry_snapshot_id TEXT NOT NULL REFERENCES option_chain_snapshots(snapshot_id),
+    exit_snapshot_id TEXT REFERENCES option_chain_snapshots(snapshot_id),
+    expression TEXT NOT NULL CHECK (expression IN ('long_call', 'call_debit_spread')),
+    status TEXT NOT NULL CHECK (status = 'closed'),
+    exit_reason TEXT NOT NULL CHECK (btrim(exit_reason) <> ''),
+    expiration DATE NOT NULL,
+    entry_value NUMERIC NOT NULL CHECK (entry_value >= 0 AND entry_value NOT IN ('NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC)),
+    exit_value NUMERIC NOT NULL CHECK (exit_value >= 0 AND exit_value NOT IN ('NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC)),
+    max_loss NUMERIC NOT NULL CHECK (max_loss > 0 AND max_loss NOT IN ('NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC)),
+    pnl NUMERIC NOT NULL CHECK (pnl >= -max_loss AND pnl NOT IN ('NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC)),
+    return_on_risk NUMERIC NOT NULL CHECK (return_on_risk NOT IN ('NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC)),
+    quote_at TIMESTAMPTZ,
+    notes JSONB NOT NULL CHECK (jsonb_typeof(notes) = 'object'),
+    paper_only BOOLEAN NOT NULL DEFAULT TRUE CHECK (paper_only),
+    no_live_execution BOOLEAN NOT NULL DEFAULT TRUE CHECK (no_live_execution),
+    broker_order_submitted BOOLEAN NOT NULL DEFAULT FALSE CHECK (NOT broker_order_submitted),
+    graded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_option_outcomes_recommendation
+    ON option_outcomes(recommendation_id, graded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_option_outcomes_evaluation
+    ON option_outcomes(option_evaluation_id);
+
 COMMIT;

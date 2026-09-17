@@ -168,6 +168,7 @@ def _apply_schema(dsn: str) -> None:
                 "20260917_security_master.sql",
                 "20260917_recommendation_universe.sql",
                 "20260917_setup_candidates.sql",
+                "20260917_instrument_outcomes.sql",
             ):
                 conn.execute((base / "migrations" / migration).read_text())
         finally:

@@ -95,3 +95,95 @@ def test_review_open_paper_trade_setups_is_idempotent():
     assert second["outcomes_created"] == 0
     assert second["skipped_existing"] == 1
     assert outcome_count == 1
+
+
+def test_underlying_outcome_uses_source_signal_handles_gap_and_keeps_option_pnl_separate():
+    pytest.importorskip("psycopg")
+    from recommendation_outcome_review import review_open_paper_trade_setups
+
+    ticker = "ZZREV3"
+    entry_dt = date(2099, 3, 10)
+    next_dt = entry_dt + timedelta(days=1)
+    with test_connection() as conn:
+        try:
+            _cleanup(conn, [ticker])
+            rec_id = conn.execute(
+                """INSERT INTO recommendations(ticker,action,recommendation_type,status,notes)
+                   VALUES (%s,'buy','long_call','paper_logged',%s::jsonb) RETURNING id""",
+                (ticker, '{"instrument_expression":"long_call","source_signal":{"close":"100","invalidation":"95","target":"105"}}'),
+            ).fetchone()[0]
+            trade_id = conn.execute(
+                """INSERT INTO paper_trades(
+                       recommendation_id,ticker,entry_date,entry_price,quantity,instrument,
+                       stop_price,target_price,status,notes)
+                   VALUES (%s,%s,%s,2,1,'long_call',95,105,'open','{}'::jsonb)
+                   RETURNING id""",
+                (str(rec_id), ticker, entry_dt),
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO prices(ticker,dt,open,high,low,close,volume)
+                   VALUES (%s,%s,94,96,93,95,1000000)""",
+                (ticker, next_dt),
+            )
+
+            result = review_open_paper_trade_setups(
+                conn, as_of=next_dt, tickers=[ticker]
+            )
+            trade = conn.execute(
+                "SELECT status,pnl,exit_reason FROM paper_trades WHERE id=%s", (trade_id,)
+            ).fetchone()
+            outcome = conn.execute(
+                "SELECT entry_triggered,exit_reason,notes FROM recommendation_outcomes WHERE paper_trade_id=%s",
+                (str(trade_id),),
+            ).fetchone()
+        finally:
+            _cleanup(conn, [ticker])
+
+    assert result["outcomes_created"] == 1
+    assert trade == ("open", None, None)
+    assert outcome[0] is False
+    assert outcome[1] == "gap_below_stop_no_entry"
+    assert outcome[2]["outcome_type"] == "underlying_setup"
+    assert outcome[2]["instrument_expression"] == "long_call"
+    assert outcome[2]["option_outcome_applicability"] == "required_separate_review"
+
+
+def test_stock_fallback_underlying_outcome_marks_option_not_applicable():
+    pytest.importorskip("psycopg")
+    from recommendation_outcome_review import review_open_paper_trade_setups
+
+    ticker = "ZZREV4"
+    entry_dt = date(2099, 3, 20)
+    with test_connection() as conn:
+        try:
+            _cleanup(conn, [ticker])
+            rec_id = conn.execute(
+                """INSERT INTO recommendations(ticker,action,recommendation_type,status,notes)
+                   VALUES (%s,'buy','underlying_stock_fallback','paper_logged',%s::jsonb)
+                   RETURNING id""",
+                (ticker, '{"instrument_expression":"underlying_stock_fallback","source_signal":{"close":"50","invalidation":"48","target":"52"}}'),
+            ).fetchone()[0]
+            trade_id = conn.execute(
+                """INSERT INTO paper_trades(
+                       recommendation_id,ticker,entry_date,entry_price,quantity,instrument,
+                       stop_price,target_price,status,notes)
+                   VALUES (%s,%s,%s,50,5,'underlying_stock_fallback',48,52,'open','{}'::jsonb)
+                   RETURNING id""",
+                (str(rec_id), ticker, entry_dt),
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO prices(ticker,dt,open,high,low,close,volume)
+                   VALUES (%s,%s,50,53,49,52,1000000)""",
+                (ticker, entry_dt + timedelta(days=1)),
+            )
+            review_open_paper_trade_setups(
+                conn, as_of=entry_dt + timedelta(days=2), tickers=[ticker]
+            )
+            notes = conn.execute(
+                "SELECT notes FROM recommendation_outcomes WHERE paper_trade_id=%s",
+                (str(trade_id),),
+            ).fetchone()[0]
+        finally:
+            _cleanup(conn, [ticker])
+
+    assert notes["option_outcome_applicability"] == "option_outcome_not_applicable"
