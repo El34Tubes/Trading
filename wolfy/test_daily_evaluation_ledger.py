@@ -399,7 +399,7 @@ def test_gate_evaluation_is_one_row_per_run_ticker_strategy_with_upsert():
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"reason_code_version": 2},
+        {"reason_code_version": 3},
         {"reason_codes": ("unknown_reason",)},
         {"reason_codes": ("volume_failed", "breakout_not_confirmed")},
         {"reason_codes": ("breakout_not_confirmed", "breakout_not_confirmed")},
@@ -453,7 +453,18 @@ CANONICAL_REASON_CODES = (
 def test_python_reason_taxonomy_matches_the_exact_plan_contract():
     from daily_evaluation_ledger import CANONICAL_REASON_CODES as actual
 
-    assert actual == {1: frozenset(CANONICAL_REASON_CODES)}
+    extension = frozenset(
+        {
+            "feature_stale",
+            "range_expansion_failed",
+            "reclaim_not_confirmed",
+            "volatility_contraction_failed",
+        }
+    )
+    assert actual == {
+        1: frozenset(CANONICAL_REASON_CODES),
+        2: frozenset(CANONICAL_REASON_CODES) | extension,
+    }
 
 
 @pytest.mark.parametrize(
@@ -465,7 +476,7 @@ def test_python_reason_taxonomy_matches_the_exact_plan_contract():
         (False, 1, ["passed"], {}, {}),
         (True, 1, ["trend_failed"], {}, {}),
         (True, 1, ["passed", "trend_failed"], {}, {}),
-        (False, 2, ["trend_failed"], {}, {}),
+        (False, 3, ["trend_failed"], {}, {}),
         (False, 1, ["trend_failed"], [], {}),
         (False, 1, ["trend_failed"], {}, []),
     ],
@@ -2019,7 +2030,7 @@ def test_task3_upgraded_partial_manifest_rejects_future_direct_sql_bypasses(muta
 @pytest.mark.parametrize(
     "gate_overrides",
     [
-        {"reason_code_version": 2},
+        {"reason_code_version": 3},
         {"reason_codes": ["volume_failed", "trend_failed"]},
         {"reason_codes": ["trend_failed", "trend_failed"]},
         {"reason_codes": ["invented_reason"]},

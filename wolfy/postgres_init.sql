@@ -1277,7 +1277,7 @@ CREATE TABLE IF NOT EXISTS setup_gate_evaluations (
     ),
     strategy TEXT NOT NULL CHECK (wolfy_is_canonical_ledger_text(strategy)),
     passed BOOLEAN NOT NULL,
-    reason_code_version INTEGER NOT NULL CHECK (reason_code_version = 1),
+    reason_code_version INTEGER NOT NULL CHECK (reason_code_version IN (1, 2)),
     reason_codes TEXT[] NOT NULL,
     terminal_reason TEXT NOT NULL,
     failed_gates JSONB NOT NULL,
@@ -1455,13 +1455,19 @@ DECLARE
         'stop_risk_too_wide', 'overextended', 'breadth_unavailable',
         'breadth_failed', 'sector_confirmation_failed', 'event_landmine',
         'option_chain_missing', 'option_liquidity_failed',
-        'portfolio_correlation_block', 'daily_limit_block'
+        'portfolio_correlation_block', 'daily_limit_block',
+        'feature_stale', 'range_expansion_failed', 'reclaim_not_confirmed',
+        'volatility_contraction_failed'
     ]::TEXT[];
 BEGIN
     IF EXISTS (
         SELECT 1
         FROM setup_gate_evaluations AS gate
-        WHERE gate.reason_code_version <> 1
+        WHERE gate.reason_code_version NOT IN (1, 2)
+           OR (gate.reason_code_version = 1 AND gate.reason_codes && ARRAY[
+               'feature_stale', 'range_expansion_failed', 'reclaim_not_confirmed',
+               'volatility_contraction_failed'
+           ]::TEXT[])
            OR cardinality(gate.reason_codes) = 0
            OR NOT gate.reason_codes <@ canonical_reasons
            OR gate.reason_codes IS DISTINCT FROM (
@@ -1699,12 +1705,18 @@ DECLARE
         'stop_risk_too_wide', 'overextended', 'breadth_unavailable',
         'breadth_failed', 'sector_confirmation_failed', 'event_landmine',
         'option_chain_missing', 'option_liquidity_failed',
-        'portfolio_correlation_block', 'daily_limit_block'
+        'portfolio_correlation_block', 'daily_limit_block',
+        'feature_stale', 'range_expansion_failed', 'reclaim_not_confirmed',
+        'volatility_contraction_failed'
     ]::TEXT[];
 BEGIN
     IF EXISTS (
         SELECT 1 FROM setup_gate_evaluations AS gate
-        WHERE gate.reason_code_version <> 1
+        WHERE gate.reason_code_version NOT IN (1, 2)
+           OR (gate.reason_code_version = 1 AND gate.reason_codes && ARRAY[
+               'feature_stale', 'range_expansion_failed', 'reclaim_not_confirmed',
+               'volatility_contraction_failed'
+           ]::TEXT[])
            OR cardinality(gate.reason_codes) = 0
            OR NOT gate.reason_codes <@ canonical_reasons
            OR gate.reason_codes IS DISTINCT FROM (
@@ -1834,7 +1846,9 @@ DECLARE
         'stop_risk_too_wide', 'overextended', 'breadth_unavailable',
         'breadth_failed', 'sector_confirmation_failed', 'event_landmine',
         'option_chain_missing', 'option_liquidity_failed',
-        'portfolio_correlation_block', 'daily_limit_block'
+        'portfolio_correlation_block', 'daily_limit_block',
+        'feature_stale', 'range_expansion_failed', 'reclaim_not_confirmed',
+        'volatility_contraction_failed'
     ]::TEXT[];
     sorted_reasons TEXT[];
 BEGIN
@@ -1842,7 +1856,11 @@ BEGIN
     INTO sorted_reasons
     FROM unnest(NEW.reason_codes) AS reason;
 
-    IF NEW.reason_code_version <> 1
+    IF NEW.reason_code_version NOT IN (1, 2)
+       OR (NEW.reason_code_version = 1 AND NEW.reason_codes && ARRAY[
+           'feature_stale', 'range_expansion_failed', 'reclaim_not_confirmed',
+           'volatility_contraction_failed'
+       ]::TEXT[])
        OR cardinality(NEW.reason_codes) = 0
        OR NOT NEW.reason_codes <@ canonical_reasons
        OR NEW.reason_codes <> sorted_reasons
@@ -2341,5 +2359,95 @@ DROP TRIGGER IF EXISTS trg_recommendation_universe_members_immutable
 CREATE TRIGGER trg_recommendation_universe_members_immutable
     BEFORE UPDATE OR DELETE ON recommendation_universe_members
     FOR EACH ROW EXECUTE FUNCTION wolfy_reject_universe_observation_mutation();
+
+CREATE TABLE IF NOT EXISTS setup_candidates (
+    candidate_id UUID PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES daily_evaluation_runs(id),
+    universe_snapshot_id UUID NOT NULL REFERENCES recommendation_universe_snapshots(snapshot_id),
+    gate_evaluation_id BIGINT NOT NULL UNIQUE REFERENCES setup_gate_evaluations(id),
+    ticker TEXT NOT NULL CHECK (wolfy_is_canonical_ledger_text(ticker) AND ticker = upper(ticker)),
+    strategy_id TEXT NOT NULL CHECK (wolfy_is_canonical_ledger_text(strategy_id)),
+    strategy_version TEXT NOT NULL CHECK (wolfy_is_canonical_ledger_text(strategy_version)),
+    sector TEXT NOT NULL CHECK (wolfy_is_canonical_ledger_text(sector)),
+    score NUMERIC NOT NULL CHECK (
+        score NOT IN ('NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC)
+    ),
+    score_components JSONB NOT NULL CHECK (
+        jsonb_typeof(score_components) = 'object' AND score_components <> '{}'::jsonb
+    ),
+    entry NUMERIC NOT NULL CHECK (
+        entry NOT IN ('NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC)
+        AND entry > 0
+    ),
+    stop NUMERIC NOT NULL CHECK (
+        stop NOT IN ('NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC)
+        AND stop > 0 AND stop < entry
+    ),
+    target NUMERIC NOT NULL CHECK (
+        target NOT IN ('NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC)
+        AND target > entry
+    ),
+    facts_hash TEXT NOT NULL CHECK (facts_hash ~ '^[0-9a-f]{64}$'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (run_id, ticker, strategy_id, strategy_version),
+    FOREIGN KEY (universe_snapshot_id, ticker)
+        REFERENCES recommendation_universe_members(snapshot_id, ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_setup_candidates_run_score
+    ON setup_candidates(run_id, score DESC, ticker, strategy_id);
+
+CREATE OR REPLACE FUNCTION wolfy_validate_setup_candidate_binding()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    run_snapshot TEXT;
+    gate_row setup_gate_evaluations%ROWTYPE;
+    member_row recommendation_universe_members%ROWTYPE;
+    component_sum NUMERIC;
+BEGIN
+    SELECT universe_snapshot_id INTO run_snapshot
+      FROM daily_evaluation_runs WHERE id = NEW.run_id;
+    SELECT * INTO gate_row FROM setup_gate_evaluations WHERE id = NEW.gate_evaluation_id;
+    SELECT * INTO member_row FROM recommendation_universe_members
+     WHERE snapshot_id = NEW.universe_snapshot_id AND ticker = NEW.ticker;
+    SELECT sum((value #>> '{}')::NUMERIC) INTO component_sum
+      FROM jsonb_each(NEW.score_components);
+    IF run_snapshot IS DISTINCT FROM NEW.universe_snapshot_id::TEXT
+       OR gate_row.id IS NULL OR gate_row.run_id <> NEW.run_id
+       OR gate_row.ticker <> NEW.ticker OR gate_row.strategy <> NEW.strategy_id
+       OR NOT gate_row.passed
+       OR member_row.ticker IS NULL OR NOT member_row.included
+       OR member_row.sector <> NEW.sector
+       OR component_sum IS DISTINCT FROM NEW.score
+       OR EXISTS (
+           SELECT 1 FROM jsonb_each(NEW.score_components) AS component
+            WHERE jsonb_typeof(component.value) <> 'string'
+               OR component.value #>> '{}' !~ '^-?(0|[1-9][0-9]*)([.][0-9]+)?$'
+               OR (component.value #>> '{}')::NUMERIC IN (
+                   'NaN'::NUMERIC, 'Infinity'::NUMERIC, '-Infinity'::NUMERIC
+               )
+       )
+    THEN
+        RAISE EXCEPTION 'setup candidate binding is noncanonical';
+    END IF;
+    RETURN NEW;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RAISE EXCEPTION 'setup candidate score components are nonnumeric or nonfinite';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_validate_setup_candidate_binding ON setup_candidates;
+CREATE TRIGGER trg_validate_setup_candidate_binding
+    BEFORE INSERT OR UPDATE ON setup_candidates
+    FOR EACH ROW EXECUTE FUNCTION wolfy_validate_setup_candidate_binding();
+
+CREATE OR REPLACE FUNCTION wolfy_reject_setup_candidate_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'setup candidates are immutable';
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_setup_candidates_immutable ON setup_candidates;
+CREATE TRIGGER trg_setup_candidates_immutable
+    BEFORE UPDATE OR DELETE ON setup_candidates
+    FOR EACH ROW EXECUTE FUNCTION wolfy_reject_setup_candidate_mutation();
 
 COMMIT;

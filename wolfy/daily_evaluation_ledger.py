@@ -77,33 +77,46 @@ class IngestionManifest:
     provenance: Mapping[str, Any]
 
 
+_REASON_CODES_V1 = frozenset(
+    {
+        "passed",
+        "missing_current_price",
+        "missing_current_features",
+        "insufficient_history",
+        "security_ineligible",
+        "liquidity_failed",
+        "market_regime_failed",
+        "trend_failed",
+        "breakout_not_confirmed",
+        "pullback_shape_failed",
+        "relative_strength_failed",
+        "volume_failed",
+        "stop_risk_too_wide",
+        "overextended",
+        "breadth_unavailable",
+        "breadth_failed",
+        "sector_confirmation_failed",
+        "event_landmine",
+        "option_chain_missing",
+        "option_liquidity_failed",
+        "portfolio_correlation_block",
+        "daily_limit_block",
+    }
+)
+
+# Version 1 remains immutable. Version 2 extends the taxonomy for the pivot's
+# setup-native evaluators without changing the meaning of any legacy row.
 CANONICAL_REASON_CODES: Mapping[int, frozenset[str]] = {
-    1: frozenset(
+    1: _REASON_CODES_V1,
+    2: _REASON_CODES_V1
+    | frozenset(
         {
-            "passed",
-            "missing_current_price",
-            "missing_current_features",
-            "insufficient_history",
-            "security_ineligible",
-            "liquidity_failed",
-            "market_regime_failed",
-            "trend_failed",
-            "breakout_not_confirmed",
-            "pullback_shape_failed",
-            "relative_strength_failed",
-            "volume_failed",
-            "stop_risk_too_wide",
-            "overextended",
-            "breadth_unavailable",
-            "breadth_failed",
-            "sector_confirmation_failed",
-            "event_landmine",
-            "option_chain_missing",
-            "option_liquidity_failed",
-            "portfolio_correlation_block",
-            "daily_limit_block",
+            "feature_stale",
+            "range_expansion_failed",
+            "reclaim_not_confirmed",
+            "volatility_contraction_failed",
         }
-    )
+    ),
 }
 
 
