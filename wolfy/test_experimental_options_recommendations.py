@@ -312,7 +312,7 @@ def test_experimental_recommendation_schema_has_canonical_partial_unique_index()
     assert "notes ->> 'strategy_name'" in indexdef[0]
 
 
-def test_aggressive_v2_global_daily_cap_applies_across_disjoint_calls():
+def test_aggressive_v2_disjoint_calls_share_pivot_global_capacity():
     pytest.importorskip("psycopg")
     from eod_signals import seed_default_strategies, write_experimental_options_recommendations
 
@@ -351,8 +351,8 @@ def test_aggressive_v2_global_daily_cap_applies_across_disjoint_calls():
             conn.execute("DELETE FROM signals WHERE ticker=ANY(%s)", (tickers,))
     assert first["recommendations_created"] == 3
     assert first["recommendations_ranked"] == 3
-    assert second["recommendations_created"] == 0
-    assert second["recommendations_ranked"] == 0
+    assert second["recommendations_created"] == 1
+    assert second["recommendations_ranked"] == 1
 
 
 def test_writer_rejects_missing_or_mismatched_durable_provenance():

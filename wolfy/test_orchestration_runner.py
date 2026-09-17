@@ -88,7 +88,7 @@ def test_eod_signal_runner_invokes_paper_lifecycle_after_success(monkeypatch):
         captured["cmd"] = cmd
         return 0
 
-    def fake_lifecycle(conn, *, signal_dt, tickers, as_of=None, max_recommendations=3, dry_run=False):
+    def fake_lifecycle(conn, *, signal_dt, tickers, as_of=None, max_recommendations=20, dry_run=False):
         captured["lifecycle"] = {
             "signal_dt": signal_dt,
             "tickers": tickers,
@@ -111,7 +111,7 @@ def test_eod_signal_runner_invokes_paper_lifecycle_after_success(monkeypatch):
     assert captured["lifecycle"]["signal_dt"] == date(2026, 8, 18)
     assert captured["lifecycle"]["tickers"] == ["SPY"]
     assert captured["lifecycle"]["as_of"] == date(2026, 8, 18)
-    assert captured["lifecycle"]["max_recommendations"] == 3
+    assert captured["lifecycle"]["max_recommendations"] == 20
     assert captured["lifecycle"]["dry_run"] is False
 
 

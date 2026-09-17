@@ -208,7 +208,7 @@ def run_paper_recommendation_lifecycle(
     signal_dt: dt.date,
     tickers: Sequence[str],
     as_of: dt.date | None = None,
-    max_recommendations: int = 3,
+    max_recommendations: int = 20,
     dry_run: bool = False,
 ) -> dict:
     """Run the Postgres paper recommendation lifecycle without broker actions."""
@@ -358,7 +358,7 @@ def run_eod_features_signals(
             signal_dt=signal_dt,
             tickers=tickers,
             as_of=signal_dt,
-            max_recommendations=3,
+            max_recommendations=20,
             dry_run=False,
         )
     print(json.dumps({"paper_recommendation_lifecycle": lifecycle}, sort_keys=True, default=str))

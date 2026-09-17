@@ -1316,23 +1316,11 @@ def write_experimental_options_recommendations(
     strategy. A selected, defined-risk, exact option structure remains mandatory.
     """
     ensure_signal_schema(conn)
+    from recommendation_writer import RecommendationCandidate, write_ranked_recommendations
+
     aggressive_v2 = strategy_name == "liquid_rs_breakout_aggressive_options_v2"
-    effective_max_recommendations = min(max_recommendations, 3) if aggressive_v2 else max_recommendations
-    if aggressive_v2:
-        conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-            (f"wolfy:global-paper-recommendations:{signal_dt.isoformat()}",),
-        )
-        existing_global = int(conn.execute(
-            """SELECT count(*) FROM recommendations
-               WHERE notes->>'signal_dt'=%s
-                 AND status IN ('paper_candidate','paper_logged')""",
-            (signal_dt.isoformat(),),
-        ).fetchone()[0])
-        effective_max_recommendations = min(
-            max(0, effective_max_recommendations), max(0, 3 - existing_global)
-        )
-    effective_risk_fraction = min(risk_fraction, Decimal("0.05")) if aggressive_v2 else risk_fraction
+    effective_max_recommendations = max_recommendations
+    effective_risk_fraction = min(risk_fraction, Decimal("0.05"))
     risk_budget = account_equity_usd * effective_risk_fraction
     rows = conn.execute("""
         SELECT s.ticker,s.raw,st.id,st.name,st.status,st.params
@@ -1391,11 +1379,17 @@ def write_experimental_options_recommendations(
         if debit <= 0 or (aggressive_v2 and debit > risk_budget):
             blocked += 1
             continue
-        eligible.append({"ticker": str(ticker), "raw": raw_dict, "strategy_id": int(strategy_id), "strategy_name": str(row_strategy_name), "strategy_status": str(strategy_status), "selected": dict(selected), "provenance": provenance, "max_loss": debit, "max_hold_days": max_hold_days})
+        eligible.append({"ticker": str(ticker), "raw": raw_dict, "strategy_id": int(strategy_id), "strategy_name": str(row_strategy_name), "strategy_status": str(strategy_status), "selected": dict(selected), "provenance": provenance, "max_loss": debit, "max_hold_days": max_hold_days, "sector": str(_raw_value(raw_dict, "sector", "Unknown")) or "Unknown"})
     eligible.sort(key=lambda item: (-_recommendation_score(item["raw"]), item["ticker"]))
-    created = skipped = 0
+    skipped = 0
     serializable: list[dict[str, Any]] = []
-    for item in eligible[:max(0, effective_max_recommendations)]:
+    items_by_identity = {
+        (item["ticker"].upper(), item["strategy_name"]): item for item in eligible
+    }
+
+    def insert_candidate(candidate) -> bool:
+        nonlocal blocked, skipped
+        item = items_by_identity[(candidate.ticker, candidate.strategy_name)]
         ticker, raw, selected = item["ticker"], item["raw"], item["selected"]
         entry = _as_decimal(_raw_value(raw, "close"), Decimal("0"))
         stop = _as_decimal(_raw_value(raw, "invalidation"), Decimal("0"))
@@ -1404,22 +1398,14 @@ def write_experimental_options_recommendations(
         contracts = int(risk_budget // item["max_loss"])
         if contracts < 1:
             blocked += 1
-            continue
-        exists = conn.execute("""
-            SELECT id FROM recommendations WHERE ticker=%s AND notes->>'signal_dt'=%s
-              AND notes->>'strategy_name'=%s AND status IN ('paper_candidate','paper_logged') LIMIT 1
-        """, (ticker, signal_dt.isoformat(), item["strategy_name"])).fetchone()
-        if exists:
-            skipped += 1
-            serializable.append({"ticker": ticker, "status": "existing"})
-            continue
+            return False
         notes = {
             "experimental_forward_test": True, "strategy_validated": False,
             "historical_approval_gate_overridden_for_paper_research": True,
             "paper_only": True, "no_live_execution": True, "broker_order_submitted": False,
             "equity_fallback": False, "signal_dt": signal_dt.isoformat(),
             "strategy_id": item["strategy_id"], "strategy_name": item["strategy_name"],
-            "strategy_status_at_selection": item["strategy_status"],
+            "strategy_status_at_selection": item["strategy_status"], "sector": item["sector"],
             "source_signal": raw, "option_structure": selected,
             "paper_account_usd": str(account_equity_usd), "risk_fraction": str(effective_risk_fraction),
             "paper_risk_budget_usd": str(risk_budget), "paper_contracts": contracts,
@@ -1436,35 +1422,51 @@ def write_experimental_options_recommendations(
                     "instrument_policy": "defined_risk_options_only",
                 }
             )
-        if not dry_run:
-            inserted = conn.execute("""
-                INSERT INTO recommendations(ticker,action,recommendation_type,thesis,setup_type,entry_zone,entry_trigger,stop,target,risk_reward,confidence,position_size_suggestion,holding_period,status,notes)
-                VALUES (%s,'buy','experimental_defined_risk_option',%s,%s,%s,%s,%s,%s,%s,'experimental',%s,%s,'paper_candidate',%s::jsonb)
-                ON CONFLICT (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
-                  WHERE status IN ('paper_candidate','paper_logged')
-                    AND notes->>'signal_dt' IS NOT NULL
-                    AND notes->>'strategy_name' IS NOT NULL
-                DO NOTHING
-                RETURNING id
-            """, (
-                ticker, f"Experimental forward test of deterministic {item['strategy_name']}; not historically validated and no live execution.",
-                item["strategy_name"], f"Underlying EOD baseline {_money(entry)}",
-                f"Paper option expression using exact selected contracts; underlying baseline {_money(entry)}.",
-                f"Underlying close below {_money(stop)} invalidates thesis.", f"Underlying technical target {_money(target)}.", f"{target_r}R underlying thesis",
-                f"{contracts} paper contract(s), sized from ${item['max_loss']} maximum loss each.", f"Up to {item['max_hold_days']} trading days", _json(notes),
-            )).fetchone()
-            if inserted is None:
-                skipped += 1
-                serializable.append({"ticker": ticker, "status": "existing"})
-                continue
-        created += 1
+        inserted = conn.execute("""
+            INSERT INTO recommendations(ticker,action,recommendation_type,thesis,setup_type,entry_zone,entry_trigger,stop,target,risk_reward,confidence,position_size_suggestion,holding_period,status,notes)
+            VALUES (%s,'buy','experimental_defined_risk_option',%s,%s,%s,%s,%s,%s,%s,'experimental',%s,%s,'paper_candidate',%s::jsonb)
+            ON CONFLICT (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
+              WHERE status IN ('paper_candidate','paper_logged')
+                AND notes->>'signal_dt' IS NOT NULL
+                AND notes->>'strategy_name' IS NOT NULL
+            DO NOTHING
+            RETURNING id
+        """, (
+            ticker, f"Experimental forward test of deterministic {item['strategy_name']}; not historically validated and no live execution.",
+            item["strategy_name"], f"Underlying EOD baseline {_money(entry)}",
+            f"Paper option expression using exact selected contracts; underlying baseline {_money(entry)}.",
+            f"Underlying close below {_money(stop)} invalidates thesis.", f"Underlying technical target {_money(target)}.", f"{target_r}R underlying thesis",
+            f"{contracts} paper contract(s), sized from ${item['max_loss']} maximum loss each.", f"Up to {item['max_hold_days']} trading days", _json(notes),
+        )).fetchone()
+        if inserted is None:
+            skipped += 1
+            serializable.append({"ticker": ticker, "status": "existing"})
+            return False
         serializable.append({"ticker": ticker, "status": "paper_candidate", "structure": selected.get("structure"), "contracts": contracts})
+        return True
+
+    candidates = [
+        RecommendationCandidate(
+            ticker=item["ticker"], strategy_name=item["strategy_name"],
+            signal_dt=signal_dt, sector=item["sector"],
+            risk_fraction=effective_risk_fraction,
+        )
+        for item in eligible
+    ]
+    write_result = write_ranked_recommendations(
+        conn, candidates=candidates, insert_candidate=insert_candidate,
+        max_to_write=effective_max_recommendations, dry_run=dry_run,
+    )
+    skipped += sum(1 for _ticker, reason in write_result.blocked if reason in {"duplicate_ticker", "insert_conflict"})
+    blocked += sum(1 for _ticker, reason in write_result.blocked if reason not in {"duplicate_ticker", "insert_conflict"})
+    if dry_run:
+        for candidate in write_result.selected:
+            item = items_by_identity[(candidate.ticker, candidate.strategy_name)]
+            serializable.append({"ticker": candidate.ticker, "status": "paper_candidate", "structure": item["selected"].get("structure")})
     return {
         "signal_dt": signal_dt.isoformat(), "dry_run": dry_run,
-        "recommendations_created": 0 if dry_run else created,
-        "recommendations_ranked": min(
-            len(eligible), max(0, effective_max_recommendations)
-        ),
+        "recommendations_created": write_result.inserted,
+        "recommendations_ranked": len(write_result.selected),
         "skipped_existing": skipped, "blocked_by_option_quality": blocked,
         "broker_orders_created": 0, "recommendations": serializable,
     }
@@ -1487,6 +1489,9 @@ def write_approved_paper_recommendations(
     strategies with status='approved'.
     """
     ensure_signal_schema(conn)
+    from recommendation_writer import RecommendationCandidate, write_ranked_recommendations
+
+    effective_risk_fraction = min(Decimal(str(risk_fraction)), Decimal("0.05"))
     params: list[object] = [signal_dt]
     ticker_clause = ""
     if tickers is not None:
@@ -1519,14 +1524,19 @@ def write_approved_paper_recommendations(
                 "strategy_id": int(strategy_id),
                 "strategy_name": str(strategy_name),
                 "score": _recommendation_score(raw_dict),
+                "sector": str(_raw_value(raw_dict, "sector", "Unknown")) or "Unknown",
             }
         )
     approved.sort(key=lambda item: (-item["score"], item["ticker"]))
-    selected = approved[: max(0, max_recommendations)]
-    created = 0
     skipped_existing = 0
     serializable: list[dict[str, Any]] = []
-    for item in selected:
+    items_by_identity = {
+        (item["ticker"].upper(), item["strategy_name"]): item for item in approved
+    }
+
+    def insert_candidate(candidate) -> bool:
+        nonlocal skipped_existing
+        item = items_by_identity[(candidate.ticker, candidate.strategy_name)]
         raw = item["raw"]
         ticker = item["ticker"]
         entry = _as_decimal(_raw_value(raw, "close"), Decimal("0"))
@@ -1547,6 +1557,8 @@ def write_approved_paper_recommendations(
             "signal_dt": signal_dt.isoformat(),
             "strategy_id": item["strategy_id"],
             "strategy_name": item["strategy_name"],
+            "sector": item["sector"],
+            "risk_fraction": str(effective_risk_fraction),
             "source_signal": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in raw.items()},
             "option_spread": (broker_notes.get("option_spread") if broker_notes and broker_notes.get("option_spread_available") else {
                 "structure": _raw_value(raw, "preferred_instrument", "2-3wk slightly OTM call spread"),
@@ -1559,73 +1571,80 @@ def write_approved_paper_recommendations(
         }
         if broker_notes is not None:
             notes["broker_enrichment"] = broker_notes
-        exists = conn.execute(
-            """
-            SELECT id FROM recommendations
-            WHERE ticker=%s
-              AND notes->>'signal_dt'=%s
-              AND notes->>'strategy_name'=%s
-              AND status IN ('paper_candidate','paper_logged')
-            LIMIT 1
-            """,
-            (ticker, signal_dt.isoformat(), item["strategy_name"]),
-        ).fetchone()
         payload = {
             "ticker": ticker,
             "strategy_name": item["strategy_name"],
             "entry": _money(entry),
             "stop": _money(invalidation),
             "target": _money(target),
-            "risk_fraction": str(risk_fraction),
+            "risk_fraction": str(effective_risk_fraction),
         }
-        if exists:
+        inserted = conn.execute(
+            """
+            INSERT INTO recommendations(ticker, action, recommendation_type, thesis, setup_type, entry_zone, entry_trigger, stop, target, risk_reward, confidence, position_size_suggestion, holding_period, status, notes)
+            VALUES (%s,'buy','equity_plus_option_spread_when_data_exists',%s,%s,%s,%s,%s,%s,%s,'medium-high',%s,%s,'paper_candidate',%s::jsonb)
+            ON CONFLICT (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
+              WHERE status IN ('paper_candidate','paper_logged')
+                AND notes->>'signal_dt' IS NOT NULL
+                AND notes->>'strategy_name' IS NOT NULL
+            DO NOTHING
+            RETURNING id
+            """,
+            (
+                ticker,
+                f"{ticker} triggered approved deterministic {item['strategy_name']} paper setup; paper-only, no live execution.",
+                item["strategy_name"],
+                f"EOD close baseline near {_money(entry)}",
+                f"Use EOD close baseline {_money(entry)} from {signal_dt.isoformat()} for paper accounting.",
+                f"Close below breakout/invalidation level {_money(invalidation)}.",
+                f"Initial paper target near {_money(target)} ({target_r}R); max hold 10 trading days.",
+                f"{target_r}R",
+                f"Paper risk {effective_risk_fraction * Decimal('100'):.2f}% of account; globally capped paper portfolio.",
+                "Up to 10 trading days",
+                _json(notes),
+            ),
+        ).fetchone()
+        if inserted is None:
             skipped_existing += 1
             serializable.append({**payload, "status": "existing", "broker_enriched": broker_notes is not None})
-            continue
-        if not dry_run:
-            inserted = conn.execute(
-                """
-                INSERT INTO recommendations(ticker, action, recommendation_type, thesis, setup_type, entry_zone, entry_trigger, stop, target, risk_reward, confidence, position_size_suggestion, holding_period, status, notes)
-                VALUES (%s,'buy','equity_plus_option_spread_when_data_exists',%s,%s,%s,%s,%s,%s,%s,'medium-high',%s,%s,'paper_candidate',%s::jsonb)
-                ON CONFLICT (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
-                  WHERE status IN ('paper_candidate','paper_logged')
-                    AND notes->>'signal_dt' IS NOT NULL
-                    AND notes->>'strategy_name' IS NOT NULL
-                DO NOTHING
-                RETURNING id
-                """,
-                (
-                    ticker,
-                    f"{ticker} triggered approved deterministic {item['strategy_name']} paper setup; paper-only, no live execution.",
-                    item["strategy_name"],
-                    f"EOD close baseline near {_money(entry)}",
-                    f"Use EOD close baseline {_money(entry)} from {signal_dt.isoformat()} for paper accounting.",
-                    f"Close below breakout/invalidation level {_money(invalidation)}.",
-                    f"Initial paper target near {_money(target)} ({target_r}R); max hold 10 trading days.",
-                    f"{target_r}R",
-                    f"Paper risk {risk_fraction * Decimal('100'):.2f}% of account; no max-open cap for paper testing.",
-                    "Up to 10 trading days",
-                    _json(notes),
-                ),
-            ).fetchone()
-            if inserted is None:
-                skipped_existing += 1
-                serializable.append(
-                    {
-                        **payload,
-                        "status": "existing",
-                        "broker_enriched": broker_notes is not None,
-                    }
-                )
-                continue
-        created += 1
+            return False
         serializable.append({**payload, "status": "paper_candidate", "broker_enriched": broker_notes is not None})
+        return True
+
+    candidates = [
+        RecommendationCandidate(
+            ticker=item["ticker"], strategy_name=item["strategy_name"],
+            signal_dt=signal_dt, sector=item["sector"],
+            risk_fraction=effective_risk_fraction,
+        )
+        for item in approved
+    ]
+    write_result = write_ranked_recommendations(
+        conn, candidates=candidates, insert_candidate=insert_candidate,
+        max_to_write=max_recommendations, dry_run=dry_run,
+    )
+    skipped_existing += sum(1 for _ticker, reason in write_result.blocked if reason in {"duplicate_ticker", "insert_conflict"})
+    if dry_run:
+        for candidate in write_result.selected:
+            item = items_by_identity[(candidate.ticker, candidate.strategy_name)]
+            raw = item["raw"]
+            entry = _as_decimal(_raw_value(raw, "close"), Decimal("0"))
+            invalidation = _as_decimal(_raw_value(raw, "invalidation"), _as_decimal(_raw_value(raw, "prior_5d_high"), Decimal("0")))
+            target_r = _as_decimal(_raw_value(raw, "target_r"), Decimal("1.0"))
+            target = entry + max(entry - invalidation, Decimal("0.01")) * target_r
+            serializable.append({
+                "ticker": candidate.ticker, "strategy_name": candidate.strategy_name,
+                "entry": _money(entry), "stop": _money(invalidation), "target": _money(target),
+                "risk_fraction": str(effective_risk_fraction), "status": "paper_candidate",
+                "broker_enriched": False,
+            })
     return {
         "signal_dt": signal_dt.isoformat(),
         "dry_run": dry_run,
-        "recommendations_created": created if not dry_run else 0,
-        "recommendations_ranked": len(selected),
+        "recommendations_created": write_result.inserted,
+        "recommendations_ranked": len(write_result.selected),
         "skipped_existing": skipped_existing,
+        "blocked_by_global_cap": sum(1 for _ticker, reason in write_result.blocked if reason not in {"duplicate_ticker", "insert_conflict"}),
         "blocked_by_strategy_status": blocked_by_strategy_status,
         "paper_trades_created": 0,
         "broker_enriched": sum(1 for rec in serializable if rec.get("broker_enriched")),
