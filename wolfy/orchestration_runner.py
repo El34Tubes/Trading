@@ -224,6 +224,56 @@ def eod_readiness_payload(readiness) -> dict:
     }
 
 
+def run_mid_small_underlying_shadow(
+    conn,
+    *,
+    run_id,
+    signal_dt: dt.date,
+    readiness,
+    dry_run: bool = True,
+) -> dict:
+    """Load persisted setup candidates and run the bounded Task 11 slice."""
+    import uuid
+
+    from daily_multi_strategy import run_underlying_pivot_slice
+    from portfolio_allocator import PortfolioCandidate
+
+    try:
+        canonical_run_id = uuid.UUID(str(run_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("run_id must be a UUID") from exc
+    rows = conn.execute(
+        """SELECT candidate_id,universe_snapshot_id,ticker,strategy_id,
+                  strategy_version,sector,score,entry,stop,target
+             FROM setup_candidates
+            WHERE run_id=%s
+            ORDER BY score DESC,ticker,strategy_id""",
+        (canonical_run_id,),
+    ).fetchall()
+    candidates = [
+        PortfolioCandidate(
+            candidate_id=uuid.UUID(str(row[0])),
+            universe_snapshot_id=uuid.UUID(str(row[1])),
+            ticker=row[2],
+            strategy_id=row[3],
+            strategy_version=row[4],
+            sector=row[5],
+            score=row[6],
+            entry=row[7],
+            stop=row[8],
+            target=row[9],
+        )
+        for row in rows
+    ]
+    return run_underlying_pivot_slice(
+        conn,
+        signal_dt=signal_dt,
+        readiness=readiness,
+        candidates=candidates,
+        dry_run=dry_run,
+    )
+
+
 def run_paper_recommendation_lifecycle(
     conn,
     *,

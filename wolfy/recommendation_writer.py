@@ -10,7 +10,9 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
+import json
 from typing import Callable, Mapping, Sequence
+import uuid
 
 GLOBAL_RECOMMENDATION_LOCK_KEY = "wolfy:global-paper-recommendations:v1"
 MAXIMUM_POSITIONS = 20
@@ -55,6 +57,46 @@ class RecommendationWriteResult:
     existing_risk: Decimal
     dry_run: bool
     lock_key: str = GLOBAL_RECOMMENDATION_LOCK_KEY
+
+
+@dataclass(frozen=True)
+class UnderlyingFallback:
+    """Allocated setup terms for the temporary stock-only shadow slice."""
+
+    candidate_id: uuid.UUID
+    ticker: str
+    strategy_name: str
+    strategy_version: str
+    sector: str
+    global_rank: int
+    entry: Decimal
+    stop: Decimal
+    target: Decimal
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidate_id, uuid.UUID):
+            raise ValueError("candidate_id must be a UUID")
+        if type(self.global_rank) is not int or self.global_rank <= 0:
+            raise ValueError("global_rank must be a positive integer")
+        for field in ("ticker", "strategy_name", "strategy_version", "sector"):
+            value = getattr(self, field)
+            if not isinstance(value, str) or not value or value != value.strip():
+                raise ValueError(f"{field} must be canonical non-empty text")
+        if self.ticker != self.ticker.upper():
+            raise ValueError("ticker must be uppercase")
+        try:
+            entry = Decimal(self.entry)
+            stop = Decimal(self.stop)
+            target = Decimal(self.target)
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("fallback prices must be finite decimals") from exc
+        if not all(value.is_finite() for value in (entry, stop, target)):
+            raise ValueError("fallback prices must be finite")
+        if not 0 < stop < entry < target:
+            raise ValueError("fallback terms must satisfy 0 < stop < entry < target")
+        object.__setattr__(self, "entry", entry)
+        object.__setattr__(self, "stop", stop)
+        object.__setattr__(self, "target", target)
 
 
 def _safe_existing_risk(notes: Mapping[str, object]) -> Decimal:
@@ -166,5 +208,93 @@ def write_ranked_recommendations(
         blocked=tuple(blocked),
         existing_positions=existing_positions,
         existing_risk=aggregate_risk - sum((item.risk_fraction for item in selected), Decimal("0")),
+        dry_run=dry_run,
+    )
+
+
+def write_underlying_fallback_recommendations(
+    conn,
+    *,
+    fallbacks: Sequence[UnderlyingFallback],
+    signal_dt: date,
+    dry_run: bool,
+) -> RecommendationWriteResult:
+    """Persist temporary stock fallback rows only in ``wolfy_test``.
+
+    Task 11 intentionally has no option release surface. Rows are explicit stock
+    fallbacks, and the shared writer repeats capacity checks under its global lock.
+    """
+    if type(signal_dt) is not date:
+        raise ValueError("signal_dt must be a date")
+    if any(not isinstance(item, UnderlyingFallback) for item in fallbacks):
+        raise ValueError("fallbacks must contain UnderlyingFallback values")
+    if not dry_run:
+        database = conn.execute("SELECT current_database()").fetchone()[0]
+        if database != "wolfy_test":
+            raise RuntimeError("underlying pivot publication is disabled outside wolfy_test")
+
+    by_identity = {(item.ticker, item.strategy_name): item for item in fallbacks}
+
+    def insert_candidate(candidate: RecommendationCandidate) -> bool:
+        item = by_identity[(candidate.ticker, candidate.strategy_name)]
+        notes = {
+            "paper_only": True,
+            "no_live_execution": True,
+            "broker_order_submitted": False,
+            "signal_dt": signal_dt.isoformat(),
+            "candidate_id": str(item.candidate_id),
+            "strategy_name": item.strategy_name,
+            "strategy_version": item.strategy_version,
+            "sector": item.sector,
+            "global_rank": item.global_rank,
+            "risk_fraction": str(RISK_FRACTION_PER_POSITION),
+            "instrument_expression": "underlying_stock_fallback",
+            "instrument_reason": "option_engine_not_release_ready",
+            "entry": str(item.entry),
+            "stop": str(item.stop),
+            "target": str(item.target),
+            "shadow_only": True,
+        }
+        return conn.execute(
+            """INSERT INTO recommendations(
+                   ticker,action,recommendation_type,thesis,setup_type,
+                   entry_zone,entry_trigger,stop,target,risk_reward,confidence,
+                   position_size_suggestion,holding_period,status,notes)
+               VALUES (%s,'buy','underlying_stock_fallback',%s,%s,%s,%s,%s,%s,%s,
+                       'shadow',%s,'Up to 10 trading days','paper_candidate',%s::jsonb)
+               ON CONFLICT (ticker,(notes->>'signal_dt'),(notes->>'strategy_name'))
+                 WHERE status IN ('paper_candidate','paper_logged')
+                   AND notes->>'signal_dt' IS NOT NULL
+                   AND notes->>'strategy_name' IS NOT NULL
+               DO NOTHING RETURNING id""",
+            (
+                item.ticker,
+                f"Paper-only shadow fallback for {item.strategy_name}; no live execution.",
+                item.strategy_name,
+                str(item.entry),
+                f"Paper entry at {item.entry}",
+                f"Stop at {item.stop}",
+                f"Target at {item.target}",
+                str((item.target - item.entry) / (item.entry - item.stop)),
+                "Paper risk 5.00% of account; globally capped.",
+                json.dumps(notes, sort_keys=True),
+            ),
+        ).fetchone() is not None
+
+    ranked = [
+        RecommendationCandidate(
+            ticker=item.ticker,
+            strategy_name=item.strategy_name,
+            signal_dt=signal_dt,
+            sector=item.sector,
+            risk_fraction=RISK_FRACTION_PER_POSITION,
+        )
+        for item in fallbacks
+    ]
+    return write_ranked_recommendations(
+        conn,
+        candidates=ranked,
+        insert_candidate=insert_candidate,
+        max_to_write=MAXIMUM_POSITIONS,
         dry_run=dry_run,
     )
