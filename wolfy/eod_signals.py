@@ -8,6 +8,7 @@ setup tickets only when the originating strategy is already human-approved.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from datetime import date, datetime, timedelta
@@ -1229,6 +1230,92 @@ def _authorized_aggressive_v2_signal(raw: Mapping[str, Any], params: Mapping[str
     )
 
 
+def _durable_option_selection(
+    conn,
+    evaluation: Mapping[str, Any],
+    *,
+    ticker: str,
+    strategy_name: str,
+    signal_dt: date,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Reload and recompute an option decision from its immutable chain snapshot."""
+    evaluation_id = evaluation.get("evaluation_id")
+    snapshot_id = evaluation.get("snapshot_id")
+    if type(evaluation_id) is not int or not isinstance(snapshot_id, str) or not snapshot_id:
+        return None
+    row = conn.execute(
+        """SELECT e.ticker,e.signal_dt,e.strategy_name,e.underlying_price,
+                  e.technical_target,e.decision_at,e.evaluation,e.snapshot_id,
+                  s.ticker,s.available_at,s.payload_sha256,s.chain
+           FROM option_structure_evaluations e
+           JOIN option_chain_snapshots s ON s.snapshot_id=e.snapshot_id
+           WHERE e.id=%s""",
+        (evaluation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    (stored_ticker, stored_dt, stored_strategy, underlying_price, technical_target,
+     decision_at, stored_evaluation, stored_snapshot_id, snapshot_ticker,
+     available_at, payload_sha256, chain) = row
+    stored_payload_hash = hashlib.sha256(
+        json.dumps(chain, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if (
+        str(stored_ticker).upper() != ticker.upper()
+        or stored_dt != signal_dt
+        or stored_strategy != strategy_name
+        or stored_snapshot_id != snapshot_id
+        or str(snapshot_ticker).upper() != ticker.upper()
+        or available_at > decision_at
+        or stored_payload_hash != payload_sha256
+        or evaluation.get("ticker") != ticker.upper()
+        or evaluation.get("strategy_name") != strategy_name
+        or evaluation.get("payload_sha256") != payload_sha256
+    ):
+        return None
+    from options_structure_selector import (
+        SelectorPolicy,
+        aggressive_options_v2_policy,
+        select_bullish_option_structure,
+    )
+
+    policy_data = stored_evaluation.get("policy") if isinstance(stored_evaluation, Mapping) else None
+    try:
+        policy = (
+            aggressive_options_v2_policy(decision_time=decision_at)
+            if isinstance(policy_data, Mapping)
+            and policy_data.get("policy_version") == "aggressive_options_v2"
+            else SelectorPolicy()
+        )
+        recomputed = select_bullish_option_structure(
+            ticker=ticker,
+            underlying_price=Decimal(str(underlying_price)),
+            technical_target=Decimal(str(technical_target)),
+            as_of=signal_dt,
+            contracts=chain,
+            policy=policy,
+        )
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    canonical = recomputed.get("selected")
+    stored_selected = stored_evaluation.get("selected") if isinstance(stored_evaluation, Mapping) else None
+    submitted_selected = evaluation.get("selected")
+    if not all(isinstance(item, Mapping) for item in (canonical, stored_selected, submitted_selected)):
+        return None
+    serialized = {
+        json.dumps(dict(item), sort_keys=True, default=str, separators=(",", ":"))
+        for item in (canonical, stored_selected, submitted_selected)
+    }
+    if len(serialized) != 1:
+        return None
+    return dict(canonical), {
+        "option_evaluation_id": evaluation_id,
+        "option_chain_snapshot_id": snapshot_id,
+        "option_chain_payload_sha256": payload_sha256,
+        "option_decision_at": decision_at.isoformat(),
+    }
+
+
 def write_experimental_options_recommendations(
     conn,
     *,
@@ -1289,6 +1376,17 @@ def write_experimental_options_recommendations(
         if not isinstance(selected, Mapping) or selected.get("defined_risk") is not True:
             blocked += 1
             continue
+        durable = _durable_option_selection(
+            conn,
+            dict(evaluation),
+            ticker=str(ticker),
+            strategy_name=str(row_strategy_name),
+            signal_dt=signal_dt,
+        )
+        if durable is None:
+            blocked += 1
+            continue
+        selected, provenance = durable
         if aggressive_v2:
             canonical_selected = (
                 _recomputed_aggressive_v2_option_selection(
@@ -1310,7 +1408,7 @@ def write_experimental_options_recommendations(
         if debit <= 0 or (aggressive_v2 and debit > risk_budget):
             blocked += 1
             continue
-        eligible.append({"ticker": str(ticker), "raw": raw_dict, "strategy_id": int(strategy_id), "strategy_name": str(row_strategy_name), "strategy_status": str(strategy_status), "selected": dict(selected), "max_loss": debit, "max_hold_days": max_hold_days})
+        eligible.append({"ticker": str(ticker), "raw": raw_dict, "strategy_id": int(strategy_id), "strategy_name": str(row_strategy_name), "strategy_status": str(strategy_status), "selected": dict(selected), "provenance": provenance, "max_loss": debit, "max_hold_days": max_hold_days})
     eligible.sort(key=lambda item: (-_recommendation_score(item["raw"]), item["ticker"]))
     created = skipped = 0
     serializable: list[dict[str, Any]] = []
@@ -1345,6 +1443,7 @@ def write_experimental_options_recommendations(
             "max_loss_per_contract_usd": str(item["max_loss"]),
             "total_max_loss_usd": str(item["max_loss"] * contracts),
             "position_sizing_basis": "maximum_defined_option_loss",
+            **item["provenance"],
         }
         if aggressive_v2:
             notes.update(

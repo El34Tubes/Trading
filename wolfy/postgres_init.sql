@@ -2049,4 +2049,68 @@ CREATE TRIGGER trg_daily_evaluation_run_transition
     BEFORE INSERT OR UPDATE OR DELETE ON daily_evaluation_runs
     FOR EACH ROW EXECUTE FUNCTION wolfy_validate_daily_run_transition();
 
+-- Immutable read-only option chain provenance and ticker-bound evaluations.
+CREATE TABLE IF NOT EXISTS option_chain_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    market_at TIMESTAMPTZ NOT NULL,
+    available_at TIMESTAMPTZ NOT NULL,
+    payload_sha256 TEXT NOT NULL CHECK (payload_sha256 ~ '^[0-9a-f]{64}$'),
+    chain JSONB NOT NULL CHECK (jsonb_typeof(chain) = 'array'),
+    paper_only BOOLEAN NOT NULL DEFAULT TRUE CHECK (paper_only),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (market_at <= fetched_at),
+    CHECK (fetched_at <= available_at)
+);
+ALTER TABLE option_chain_snapshots
+    DROP CONSTRAINT IF EXISTS option_chain_snapshots_ticker_payload_sha256_key;
+CREATE OR REPLACE FUNCTION wolfy_reject_option_snapshot_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'option chain snapshots are append-only';
+END
+$$;
+DROP TRIGGER IF EXISTS trg_option_chain_snapshots_immutable ON option_chain_snapshots;
+CREATE TRIGGER trg_option_chain_snapshots_immutable
+    BEFORE UPDATE OR DELETE ON option_chain_snapshots
+    FOR EACH ROW EXECUTE FUNCTION wolfy_reject_option_snapshot_mutation();
+
+CREATE TABLE IF NOT EXISTS option_structure_evaluations (
+    id BIGSERIAL PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    signal_dt DATE NOT NULL,
+    strategy_name TEXT NOT NULL,
+    underlying_price NUMERIC NOT NULL,
+    technical_target NUMERIC NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL,
+    source TEXT NOT NULL,
+    chain JSONB NOT NULL,
+    evaluation JSONB NOT NULL,
+    selected_structure TEXT,
+    snapshot_id TEXT NOT NULL REFERENCES option_chain_snapshots(snapshot_id),
+    decision_at TIMESTAMPTZ NOT NULL,
+    source_signal_id BIGINT,
+    run_id BIGINT,
+    paper_only BOOLEAN NOT NULL DEFAULT TRUE CHECK (paper_only),
+    no_live_execution BOOLEAN NOT NULL DEFAULT TRUE CHECK (no_live_execution),
+    broker_order_submitted BOOLEAN NOT NULL DEFAULT FALSE CHECK (NOT broker_order_submitted),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (ticker, signal_dt, strategy_name)
+);
+ALTER TABLE option_structure_evaluations
+    ADD COLUMN IF NOT EXISTS snapshot_id TEXT REFERENCES option_chain_snapshots(snapshot_id),
+    ADD COLUMN IF NOT EXISTS decision_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS source_signal_id BIGINT,
+    ADD COLUMN IF NOT EXISTS run_id BIGINT;
+CREATE INDEX IF NOT EXISTS idx_option_structure_evaluations_signal
+    ON option_structure_evaluations(signal_dt DESC, ticker);
+CREATE INDEX IF NOT EXISTS idx_option_structure_evaluations_snapshot
+    ON option_structure_evaluations(snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_option_chain_snapshots_ticker_available
+    ON option_chain_snapshots(ticker, available_at DESC);
+
 COMMIT;

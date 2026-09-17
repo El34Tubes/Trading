@@ -7,22 +7,58 @@ import pytest
 from test_db import test_connection
 
 
+def _persist_evaluation(conn, *, ticker: str, signal_dt: date, strategy_name: str, evaluation: dict) -> dict:
+    from options_research_ledger import store_options_structure_evaluation
+
+    decision_at = datetime.combine(signal_dt, datetime.min.time(), tzinfo=timezone.utc).replace(hour=20, minute=5)
+    fetched_at = decision_at.replace(minute=1)
+    chain = evaluation.get("input_contracts")
+    assert isinstance(chain, list) and chain
+    provenance = store_options_structure_evaluation(
+        conn,
+        ticker=ticker,
+        signal_dt=signal_dt,
+        strategy_name=strategy_name,
+        underlying_price=Decimal("100"),
+        technical_target=Decimal("105"),
+        decision_at=decision_at,
+        fetched_at=fetched_at,
+        market_at=fetched_at.replace(minute=0),
+        available_at=fetched_at,
+        provider="unit",
+        source_url=f"https://example.invalid/{ticker}",
+        chain=chain,
+        evaluation=evaluation,
+    )
+    return {**evaluation, **provenance}
+
+
+def _v1_evaluation(ticker: str, signal_dt: date) -> dict:
+    from options_structure_selector import select_bullish_option_structure
+
+    quote_at = f"{signal_dt.isoformat()}T20:00:00Z"
+    contracts = [
+        {"symbol": f"{ticker}LONG", "option_type": "call", "expiration": "2099-03-20", "strike": "100", "bid": "2", "ask": "2.2", "open_interest": 500, "volume": 50, "quote_at": quote_at, "multiplier": 100, "standard_contract": True},
+        {"symbol": f"{ticker}SHORT", "option_type": "call", "expiration": "2099-03-20", "strike": "105", "bid": "0.7", "ask": "0.8", "open_interest": 500, "volume": 50, "quote_at": quote_at, "multiplier": 100, "standard_contract": True},
+    ]
+    evaluation = select_bullish_option_structure(
+        ticker=ticker,
+        underlying_price=Decimal("100"),
+        technical_target=Decimal("105"),
+        as_of=signal_dt,
+        contracts=contracts,
+    )
+    evaluation["input_contracts"] = contracts
+    return evaluation
+
+
 def test_research_only_options_signal_can_create_explicit_experimental_recommendation():
     pytest.importorskip("psycopg")
     from eod_signals import ensure_signal_schema, seed_default_strategies, write_experimental_options_recommendations
 
     signal_dt = date(2099, 3, 3)
     ticker = "ZZEXPOPT"
-    evaluation = {
-        "status": "selected",
-        "selected": {
-            "structure": "call_debit_spread", "expiration": "2099-03-20", "dte": 17,
-            "long_leg": {"symbol": "ZZLONG", "strike": "100", "bid": "2", "ask": "2.2"},
-            "short_leg": {"symbol": "ZZSHORT", "strike": "110", "bid": "0.4", "ask": "0.5"},
-            "conservative_debit": "1.80", "max_loss_per_contract": "180",
-            "max_profit_per_contract": "820", "defined_risk": True,
-        },
-    }
+    evaluation = _v1_evaluation(ticker, signal_dt)
     with test_connection() as conn:
         ensure_signal_schema(conn)
         seed_default_strategies(conn)
@@ -33,6 +69,11 @@ def test_research_only_options_signal_can_create_explicit_experimental_recommend
                 VALUES (%s,%s,%s,'long',%s::jsonb)
                 ON CONFLICT(ticker,dt,strategy_id) DO UPDATE SET raw=EXCLUDED.raw
             """, (ticker, signal_dt, strategy_id, '{"close":"100","invalidation":"95","target_r":"1.0","instrument_policy":"defined_risk_options_only"}'))
+            evaluation = _persist_evaluation(
+                conn, ticker=ticker, signal_dt=signal_dt,
+                strategy_name="liquid_rs_breakout_options_volatility_v1",
+                evaluation=evaluation,
+            )
             first = write_experimental_options_recommendations(
                 conn, signal_dt=signal_dt, option_evaluations={ticker: evaluation},
                 account_equity_usd=Decimal("5000"), risk_fraction=Decimal("0.05"), dry_run=False,
@@ -54,6 +95,9 @@ def test_research_only_options_signal_can_create_explicit_experimental_recommend
             assert row[2]["equity_fallback"] is False
             assert row[2]["option_structure"]["structure"] == "call_debit_spread"
             assert row[2]["paper_contracts"] == 1
+            assert isinstance(row[2]["option_evaluation_id"], int)
+            assert row[2]["option_chain_snapshot_id"].startswith("ocs_")
+            assert len(row[2]["option_chain_payload_sha256"]) == 64
         finally:
             conn.execute("DELETE FROM recommendations WHERE ticker=%s", (ticker,))
             conn.execute("DELETE FROM signals WHERE ticker=%s", (ticker,))
@@ -121,8 +165,13 @@ def test_aggressive_v2_writer_requires_exact_authorized_structure_and_emits_safe
                 (ticker, signal_dt, strategy_id,
                  '{"close":"100","invalidation":"96","target_r":"1.25","instrument_policy":"defined_risk_options_only","equity_fallback":false,"experimental_forward_recommendations_allowed":true,"strategy_validated":false,"paper_only":true,"no_live_execution":true,"selector_policy_version":"aggressive_options_v2"}'),
             )
+            evaluation = _persist_evaluation(
+                conn, ticker=ticker, signal_dt=signal_dt,
+                strategy_name="liquid_rs_breakout_aggressive_options_v2",
+                evaluation=_v2_evaluation(ticker),
+            )
             result = write_experimental_options_recommendations(
-                conn, signal_dt=signal_dt, option_evaluations={ticker: _v2_evaluation(ticker)},
+                conn, signal_dt=signal_dt, option_evaluations={ticker: evaluation},
                 strategy_name="liquid_rs_breakout_aggressive_options_v2",
                 account_equity_usd=Decimal("5000"), risk_fraction=Decimal("0.05"),
             )
@@ -227,8 +276,13 @@ def test_aggressive_v2_allows_multiple_contracts_with_total_loss_within_five_per
                    '{"close":"100","invalidation":"96","target_r":"1.25","instrument_policy":"defined_risk_options_only","equity_fallback":false,"experimental_forward_recommendations_allowed":true,"strategy_validated":false,"paper_only":true,"no_live_execution":true,"selector_policy_version":"aggressive_options_v2"}'::jsonb)
                    ON CONFLICT DO NOTHING""", (ticker, signal_dt, strategy_id),
             )
+            evaluation = _persist_evaluation(
+                conn, ticker=ticker, signal_dt=signal_dt,
+                strategy_name="liquid_rs_breakout_aggressive_options_v2",
+                evaluation=_v2_evaluation(ticker),
+            )
             result = write_experimental_options_recommendations(
-                conn, signal_dt=signal_dt, option_evaluations={ticker: _v2_evaluation(ticker)},
+                conn, signal_dt=signal_dt, option_evaluations={ticker: evaluation},
                 strategy_name="liquid_rs_breakout_aggressive_options_v2",
                 account_equity_usd=Decimal("10000"), risk_fraction=Decimal("0.20"),
             )
@@ -274,14 +328,22 @@ def test_aggressive_v2_global_daily_cap_applies_across_disjoint_calls():
                        '{"close":"100","invalidation":"96","target_r":"1.25","instrument_policy":"defined_risk_options_only","equity_fallback":false,"experimental_forward_recommendations_allowed":true,"strategy_validated":false,"paper_only":true,"no_live_execution":true,"selector_policy_version":"aggressive_options_v2"}'::jsonb)
                        ON CONFLICT DO NOTHING""", (ticker, signal_dt, strategy_id),
                 )
+            evaluations = {
+                ticker: _persist_evaluation(
+                    conn, ticker=ticker, signal_dt=signal_dt,
+                    strategy_name="liquid_rs_breakout_aggressive_options_v2",
+                    evaluation=_v2_evaluation(ticker),
+                )
+                for ticker in tickers
+            }
             first = write_experimental_options_recommendations(
                 conn, signal_dt=signal_dt,
-                option_evaluations={ticker: _v2_evaluation(ticker) for ticker in tickers[:3]},
+                option_evaluations={ticker: evaluations[ticker] for ticker in tickers[:3]},
                 strategy_name="liquid_rs_breakout_aggressive_options_v2",
             )
             second = write_experimental_options_recommendations(
                 conn, signal_dt=signal_dt,
-                option_evaluations={tickers[3]: _v2_evaluation(tickers[3])},
+                option_evaluations={tickers[3]: evaluations[tickers[3]]},
                 strategy_name="liquid_rs_breakout_aggressive_options_v2",
             )
         finally:
@@ -291,3 +353,43 @@ def test_aggressive_v2_global_daily_cap_applies_across_disjoint_calls():
     assert first["recommendations_ranked"] == 3
     assert second["recommendations_created"] == 0
     assert second["recommendations_ranked"] == 0
+
+
+def test_writer_rejects_missing_or_mismatched_durable_provenance():
+    pytest.importorskip("psycopg")
+    from eod_signals import seed_default_strategies, write_experimental_options_recommendations
+
+    signal_dt = date(2099, 3, 5)
+    ticker = "ZZPROVBIND"
+    strategy = "liquid_rs_breakout_aggressive_options_v2"
+    with test_connection() as conn:
+        seed_default_strategies(conn)
+        strategy_id = conn.execute("SELECT id FROM strategies WHERE name=%s", (strategy,)).fetchone()[0]
+        conn.execute(
+            """INSERT INTO signals(ticker,dt,strategy_id,direction,raw) VALUES (%s,%s,%s,'long',
+               '{"close":"100","invalidation":"96","target_r":"1.25","instrument_policy":"defined_risk_options_only","equity_fallback":false,"experimental_forward_recommendations_allowed":true,"strategy_validated":false,"paper_only":true,"no_live_execution":true,"selector_policy_version":"aggressive_options_v2"}'::jsonb)
+               ON CONFLICT DO NOTHING""",
+            (ticker, signal_dt, strategy_id),
+        )
+        valid = _persist_evaluation(
+            conn, ticker=ticker, signal_dt=signal_dt, strategy_name=strategy,
+            evaluation=_v2_evaluation(ticker),
+        )
+        malformed = [
+            {key: value for key, value in valid.items() if key != "snapshot_id"},
+            {**valid, "ticker": "OTHER"},
+            {**valid, "strategy_name": "other-strategy"},
+            {**valid, "payload_sha256": "0" * 64},
+        ]
+        for evaluation in malformed:
+            result = write_experimental_options_recommendations(
+                conn,
+                signal_dt=signal_dt,
+                option_evaluations={ticker: evaluation},
+                strategy_name=strategy,
+            )
+            assert result["recommendations_created"] == 0
+            assert result["blocked_by_option_quality"] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM recommendations WHERE ticker=%s", (ticker,)
+        ).fetchone()[0] == 0

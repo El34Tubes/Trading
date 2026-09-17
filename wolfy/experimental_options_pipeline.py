@@ -38,6 +38,7 @@ def evaluate_and_write_experimental_options(
     max_recommendations: int = 3, account_equity_usd: Decimal = Decimal("5000"),
     risk_fraction: Decimal = Decimal("0.05"), dry_run: bool = False,
 ) -> dict[str, Any]:
+    effective_decision_time = decision_time or fetched_at
     strategy_name, profile_policy = resolve_options_profile(profile, decision_time=decision_time)
     if policy is not None:
         if profile != "v1":
@@ -66,15 +67,24 @@ def evaluate_and_write_experimental_options(
             ticker=symbol, underlying_price=entry, technical_target=target,
             as_of=signal_dt, contracts=chain, policy=profile_policy,
         )
-        evaluations[symbol] = evaluation
         if evaluation.get("selected"):
             selected_count += 1
         if not dry_run:
-            store_options_structure_evaluation(
+            quote_times = [
+                datetime.fromisoformat(str(contract["quote_at"]).replace("Z", "+00:00"))
+                for contract in chain
+                if contract.get("quote_at") is not None
+            ]
+            provenance = store_options_structure_evaluation(
                 conn, ticker=symbol, signal_dt=signal_dt, strategy_name=strategy_name,
                 underlying_price=entry, technical_target=target,
-                fetched_at=fetched_at, source=source, chain=chain, evaluation=evaluation,
+                decision_at=effective_decision_time, fetched_at=fetched_at,
+                market_at=max(quote_times) if quote_times else fetched_at,
+                available_at=fetched_at, provider=source, source_url=source,
+                chain=chain, evaluation=evaluation,
             )
+            evaluation = {**evaluation, **provenance}
+        evaluations[symbol] = evaluation
     rec_result = write_experimental_options_recommendations(
         conn, signal_dt=signal_dt, option_evaluations=evaluations,
         max_recommendations=max_recommendations, account_equity_usd=account_equity_usd,
