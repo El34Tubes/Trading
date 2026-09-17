@@ -23,6 +23,11 @@ class SetupContractError(ValueError):
 
 APPROVED_BREAKOUT_STRATEGY_ID = "liquid_rs_breakout_close_confirm_1r"
 APPROVED_BREAKOUT_STRATEGY_VERSION = "approved-2026-08-03"
+TREND_PULLBACK_STRATEGY_ID = "mid_small_trend_pullback_reclaim_v1"
+TREND_PULLBACK_STRATEGY_VERSION = "research-v1"
+_PULLBACK_RECLAIM_TRIGGERS = frozenset(
+    {"close_above_20dma", "close_above_prior_day_high"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +59,45 @@ class ApprovedBreakoutFacts:
 class ApprovedBreakoutResult:
     """Common-contract evaluation plus candidate-ready approved terms."""
 
+    evaluation: "SetupEvaluation"
+    entry: Decimal | None
+    stop: Decimal | None
+    target: Decimal | None
+    facts_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class TrendPullbackFacts:
+    """Point-in-time inputs to the research-only pullback/reclaim gate."""
+
+    ticker: str
+    sector: str
+    decision_at: datetime
+    evaluated_at: datetime
+    features_available_at: datetime
+    universe_eligible: bool
+    close: object
+    prior_day_high: object
+    sma_20: object
+    sma_50: object
+    sma_50_20_sessions_ago: object
+    sma_200: object
+    atr_14: object
+    pullback_sessions: int
+    pullback_low: object
+    swing_low: object
+    pullback_average_volume: object
+    average_volume_20d: object
+    reclaim_trigger: str
+    event_landmine: bool
+    risk_veto: bool
+    benchmark_context: Mapping[str, Any]
+    source_fingerprint: str
+    provenance: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class TrendPullbackResult:
     evaluation: "SetupEvaluation"
     entry: Decimal | None
     stop: Decimal | None
@@ -110,6 +154,39 @@ def _score_components(value: object) -> dict[str, Decimal]:
     if len(normalized) != len(value):
         raise SetupContractError("score component names must be unique")
     return dict(sorted(normalized.items()))
+
+
+def _aware_datetime(value: object, field: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise SetupContractError(f"{field} must be timezone-aware")
+    return value
+
+
+def _benchmark_context(value: object, decision_at: datetime) -> dict[str, Any]:
+    context = _json_mapping(value, "benchmark_context")
+    if set(context) != {"SPY", "IWM", "MDY"}:
+        raise SetupContractError("benchmark_context must contain exactly SPY, IWM, and MDY")
+    normalized: dict[str, Any] = {}
+    for ticker in sorted(context):
+        observation = _json_mapping(context[ticker], f"benchmark_context.{ticker}")
+        if set(observation) != {"return_20d", "available_at"}:
+            raise SetupContractError("benchmark observations require return_20d and available_at")
+        benchmark_return = _decimal(observation["return_20d"], f"{ticker} return_20d")
+        raw_available_at = observation["available_at"]
+        if not isinstance(raw_available_at, str):
+            raise SetupContractError(f"{ticker} available_at must be an aware ISO timestamp")
+        try:
+            available_at = datetime.fromisoformat(raw_available_at)
+        except ValueError as exc:
+            raise SetupContractError(f"{ticker} available_at must be an aware ISO timestamp") from exc
+        _aware_datetime(available_at, f"{ticker} available_at")
+        if available_at > decision_at:
+            raise SetupContractError(f"{ticker} benchmark context was unavailable at decision time")
+        normalized[ticker] = {
+            "available_at": available_at.isoformat(),
+            "return_20d": format(benchmark_return, "f"),
+        }
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +340,127 @@ def evaluate_approved_breakout(facts: ApprovedBreakoutFacts) -> ApprovedBreakout
     stop = prior_high
     target = entry + (entry - stop)
     return ApprovedBreakoutResult(evaluation, entry, stop, target, facts_hash)
+
+
+def evaluate_trend_pullback(facts: TrendPullbackFacts) -> TrendPullbackResult:
+    """Evaluate the frozen research-only trend pullback/reclaim family."""
+    ticker = _text(facts.ticker, "ticker", uppercase=True)
+    sector = _text(facts.sector, "sector")
+    decision_at = _aware_datetime(facts.decision_at, "decision_at")
+    evaluated_at = _aware_datetime(facts.evaluated_at, "evaluated_at")
+    features_available_at = _aware_datetime(
+        facts.features_available_at, "features_available_at"
+    )
+    if features_available_at > decision_at:
+        raise SetupContractError("features were unavailable at decision time")
+    if type(facts.universe_eligible) is not bool:
+        raise SetupContractError("universe_eligible must be boolean")
+    if type(facts.event_landmine) is not bool or type(facts.risk_veto) is not bool:
+        raise SetupContractError("event_landmine and risk_veto must be boolean")
+    if type(facts.pullback_sessions) is not int:
+        raise SetupContractError("pullback_sessions must be an integer")
+    reclaim_trigger = _text(facts.reclaim_trigger, "reclaim_trigger")
+    if reclaim_trigger not in _PULLBACK_RECLAIM_TRIGGERS:
+        raise SetupContractError("reclaim_trigger is not a predeclared variant")
+    provenance = _json_mapping(facts.provenance, "provenance")
+    benchmark_context = _benchmark_context(facts.benchmark_context, decision_at)
+
+    close = _decimal(facts.close, "close", positive=True)
+    prior_day_high = _decimal(facts.prior_day_high, "prior_day_high", positive=True)
+    sma_20 = _decimal(facts.sma_20, "sma_20", positive=True)
+    sma_50 = _decimal(facts.sma_50, "sma_50", positive=True)
+    prior_sma_50 = _decimal(
+        facts.sma_50_20_sessions_ago, "sma_50_20_sessions_ago", positive=True
+    )
+    sma_200 = _decimal(facts.sma_200, "sma_200", positive=True)
+    atr = _decimal(facts.atr_14, "atr_14", positive=True)
+    pullback_low = _decimal(facts.pullback_low, "pullback_low", positive=True)
+    swing_low = _decimal(facts.swing_low, "swing_low", positive=True)
+    pullback_volume = _decimal(
+        facts.pullback_average_volume, "pullback_average_volume", positive=True
+    )
+    average_volume = _decimal(facts.average_volume_20d, "average_volume_20d", positive=True)
+    if swing_low > pullback_low:
+        raise SetupContractError("swing_low cannot exceed pullback_low")
+
+    trend_stack = close > sma_50 > sma_200 and sma_50 > prior_sma_50
+    held_50dma = pullback_low >= sma_50
+    near_20dma = abs(pullback_low - sma_20) <= atr
+    sessions_in_range = 2 <= facts.pullback_sessions <= 7
+    volume_contracted = pullback_volume < average_volume
+    reclaim_level = sma_20 if reclaim_trigger == "close_above_20dma" else prior_day_high
+    reclaim_confirmed = close > reclaim_level
+    stop_risk_pct = (close - swing_low) / close
+    stop_valid = swing_low < close and stop_risk_pct <= Decimal("0.08")
+    failures = (
+        (not facts.universe_eligible or facts.risk_veto, "security_ineligible"),
+        (facts.event_landmine, "event_landmine"),
+        (not trend_stack or not held_50dma, "trend_failed"),
+        (not sessions_in_range or not near_20dma, "pullback_shape_failed"),
+        (not volume_contracted, "volume_failed"),
+        (not reclaim_confirmed, "reclaim_not_confirmed"),
+        (not stop_valid, "stop_risk_too_wide"),
+    )
+    terminal_reason = next((reason for failed, reason in failures if failed), "passed")
+    passed = terminal_reason == "passed"
+    metrics = {
+        "atr_14": format(atr, "f"),
+        "pullback_sessions": facts.pullback_sessions,
+        "pullback_volume_ratio": str(pullback_volume / average_volume),
+        "stop_risk_pct": str(stop_risk_pct),
+        "trend_50dma_rise": str((sma_50 / prior_sma_50) - 1),
+    }
+    gate_facts = {
+        "benchmark_context": benchmark_context,
+        "benchmark_context_only": ["IWM", "MDY", "SPY"],
+        "event_landmine": facts.event_landmine,
+        "governance_status": "research_only",
+        "held_50dma": held_50dma,
+        "max_stop_risk_pct": "0.08",
+        "near_20dma_within_atr": near_20dma,
+        "pullback_sessions_in_range": sessions_in_range,
+        "reclaim_confirmed": reclaim_confirmed,
+        "reclaim_trigger": reclaim_trigger,
+        "risk_veto": facts.risk_veto,
+        "trend_stack_passed": trend_stack,
+        "universe_eligible": facts.universe_eligible,
+        "volume_contracted": volume_contracted,
+    }
+    hash_payload = json.dumps(
+        {
+            "decision_at": decision_at.isoformat(),
+            "gate_facts": gate_facts,
+            "metrics": metrics,
+            "provenance": provenance,
+            "ticker": ticker,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    facts_hash = hashlib.sha256(hash_payload.encode()).hexdigest()
+    evaluation = SetupEvaluation(
+        ticker=ticker,
+        strategy_id=TREND_PULLBACK_STRATEGY_ID,
+        strategy_version=TREND_PULLBACK_STRATEGY_VERSION,
+        sector=sector,
+        passed=passed,
+        reason_code_version=2,
+        reason_codes=(terminal_reason,),
+        terminal_reason=terminal_reason,
+        evaluated_at=evaluated_at,
+        metrics=metrics,
+        gate_facts=gate_facts,
+        source_fingerprint=facts.source_fingerprint,
+        provenance=provenance,
+        score_components={
+            "trend_50dma_rise": (sma_50 / prior_sma_50) - 1,
+            "volume_contraction": Decimal(1) - (pullback_volume / average_volume),
+        },
+    )
+    if not passed:
+        return TrendPullbackResult(evaluation, None, None, None, facts_hash)
+    target = close + (close - swing_low) * Decimal(2)
+    return TrendPullbackResult(evaluation, close, swing_low, target, facts_hash)
 
 
 @dataclass(frozen=True, slots=True)

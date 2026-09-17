@@ -21,6 +21,25 @@ BROKER_WIDE_SPREAD_WARNING_FRACTION = Decimal("0.02")
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
 DEFAULT_STRATEGIES = (
     (
+        "mid_small_trend_pullback_reclaim_v1",
+        "trend_pullback_reclaim",
+        {
+            "source": "Wolfy mid/small-cap multi-strategy pivot 2026-09-17",
+            "strategy_version": "research-v1",
+            "requires_backtest": True,
+            "requires_explicit_user_approval": True,
+            "trend_stack": "close_above_50dma_above_200dma",
+            "rising_50dma_lookback_sessions": 20,
+            "pullback_sessions_min": 2,
+            "pullback_sessions_max": 7,
+            "pullback_proximity": "20dma_within_1_atr",
+            "max_stop_risk_pct": "0.08",
+            "reclaim_triggers": ["close_above_20dma", "close_above_prior_day_high"],
+            "benchmarks_context_only": ["SPY", "IWM", "MDY"],
+        },
+        "Seeded as research_only for shadow evaluation; backtests cannot auto-approve and explicit user approval is required before paper recommendations.",
+    ),
+    (
         "pead",
         "post_earnings_announcement_drift",
         {"source": "Hermes-EOD Section 3", "requires_backtest": True},
