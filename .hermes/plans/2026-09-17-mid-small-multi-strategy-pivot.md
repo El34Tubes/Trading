@@ -4,7 +4,7 @@
 
 **Goal:** Deliver a paper-only Wolfy recommendation pipeline that ranks eligible U.S. mid/small-cap common stocks across multiple deterministic setups, prefers a fresh exact defined-risk option when safe, falls back to the underlying stock otherwise, manages up to 20 concurrent 5%-risk recommendations with no more than five per sector, and measures outcomes including accepted account-ruin risk.
 
-**Architecture:** Reuse the existing dedicated `wolfy_test` harness, immutable daily-run ledger, EOD readiness resolver, approved close-confirmed breakout, and options selector instead of recreating them. Add a point-in-time stock-only universe and common setup-candidate contract, route every setup through one global rank/allocator and one serialized writer, then attach an exact-chain instrument decision and separate underlying/option outcome ledgers. SPY, IWM, and MDY are context-only benchmarks; because ETF recommendations conflict with the approved stock-only universe, replace the proposed ETF-rotation sleeve with weekly mid/small-cap industry/sector relative-strength allocation over eligible common stocks.
+**Architecture:** Reuse the existing dedicated `wolfy_test` harness, immutable daily-run ledger, EOD readiness resolver, approved close-confirmed breakout, and options selector instead of recreating them. Add a point-in-time stock-only universe and common setup-candidate contract, route the approved breakout plus new pullback/reclaim and volatility-contraction sleeves through one global rank/allocator and one serialized writer, then attach an exact-chain instrument decision and separate underlying/option outcome ledgers. SPY, IWM, and MDY are context-only benchmarks and never recommendation sleeves.
 
 **Tech Stack:** Python 3.12, PostgreSQL 16, psycopg 3, pytest, existing Massive adjusted EOD pipeline, existing Cboe delayed read-only option adapter (optional read-only broker context only), Hermes cron, concise Discord delivery.
 
@@ -18,7 +18,7 @@ This plan is the approved policy pivot and must be implemented from branch `wolf
 - **Preserve and adapt:** approved close-confirmed breakout generation in `wolfy/eod_signals.py`, option selection in `wolfy/options_structure_selector.py`, option evaluation in `wolfy/experimental_options_pipeline.py`, outcome review in `wolfy/recommendation_outcome_review.py`, orchestration in `wolfy/orchestration_runner.py`, and concise delivery in `wolfy/recommendation_engine_daily_summary.py`.
 - **Supersede old policy:** stock recommendations are U.S. common stocks only; eligible market cap is $200M-$15B, close is at least $3, and trailing 20-session average dollar volume is at least $5M. ETFs (including SPY/IWM/MDY) are never recommendation candidates. The global cap is up to 20 concurrent recommendations/open paper positions, 5% defined paper risk each, 100% aggregate paper risk, and at most five positions in one sector. Account ruin is accepted for this paper experiment and must be measured rather than hidden by an unapproved lower heat cap.
 - **Supersede old option behavior:** a fresh exact safe option is preferred; when no safe option exists, publish the already-qualified underlying stock as an explicit fallback. Underlying and option outcomes remain separate.
-- **Resolve ETF-rotation incompatibility:** do not recommend weekly ETFs. Use SPY/IWM/MDY only for benchmark/regime context and implement weekly relative-strength allocation among eligible stocks grouped by point-in-time U.S. industry/sector.
+- **Remove rotation scope:** do not implement ETF or industry/sector rotation as a recommendation sleeve. Use SPY/IWM/MDY only for benchmark/regime context.
 - **Do not revive deferred scope:** PEAD, short strategies, live trading, broker writes, paid-data purchases, and automatic strategy approval remain out of scope.
 
 Before each implementation task, inspect current code because commits `14ea5aa` and `5c4b249` partially implement aggressive options v2. Extend or refactor those paths; do not add a parallel recommendation engine.
@@ -26,12 +26,12 @@ Before each implementation task, inspect current code because commits `14ea5aa` 
 ## 2. Non-negotiable contracts
 
 1. **Paper only:** no live orders, cancellations, exercise, money movement, or broker writes. Every emitted recommendation/trade/evaluation records `paper_only=true`, `no_live_execution=true`, and `broker_order_submitted=false`.
-2. **Production isolation:** all RED/GREEN tests and migration rehearsals run against exact database `wolfy_test`. No production DML, migration, cron edit, or external delivery occurs before Task 23's release gate.
+2. **Production isolation:** all RED/GREEN tests and migration rehearsals run against exact database `wolfy_test`. No production DML, migration, cron edit, or external delivery occurs before Task 22's release gate.
 3. **Point-in-time:** universe identity, market cap, sector/industry, security status, price/liquidity, benchmark context, and option quotes must have `available_at <= decision_at`. Unknown or conflicting identity fails closed.
 4. **Recommendation universe:** only source-verified U.S. common stocks with market cap in inclusive range `[200_000_000, 15_000_000_000]`, signal-date close `>= 3`, and mean of `close * volume` across exactly the latest 20 sessions through the signal date `>= 5_000_000`.
 5. **Absolute exclusions:** foreign issuers/listings and ADRs, OTC, ETFs/ETPs (especially leveraged/inverse/single-stock products), preferreds, warrants, rights, units, funds, ambiguous identities, inactive/delisted names, user denylist entries, manipulation-risk names, and foreign/government-interference-risk names.
 6. **Benchmarks only:** SPY, IWM, and MDY may be read for market regime and relative-strength denominators but cannot enter setup candidates, rankings, recommendations, paper trades, or outcomes.
-7. **Strategies:** preserve approved close-confirmed breakout unchanged; add trend pullback/reclaim, volatility-contraction breakout, and weekly industry/sector RS allocation as separately versioned research families.
+7. **Strategies:** preserve approved close-confirmed breakout unchanged; add trend pullback/reclaim and volatility-contraction breakout as separately versioned research families. No rotation sleeve is in scope.
 8. **One allocator:** globally rank all eligible candidate/setup rows, deduplicate ticker, enforce 20 total concurrent/recommended positions, 5% defined risk per position, 100% aggregate risk, and maximum five per sector. Fewer or zero is valid.
 9. **Instrument expression:** for each selected underlying, choose exactly one of `long_call`, `call_debit_spread`, or `underlying_stock_fallback`. An option requires a fresh exact read-only chain and a deterministic bounded-loss selection; no safe option means stock fallback, not candidate loss.
 10. **Outcome separation:** setup/underlying outcomes judge strategy quality; option outcomes judge option expression quality. Stock fallback outcomes are underlying-only. Option P&L cannot rewrite an underlying strategy gate.
@@ -43,7 +43,7 @@ Before each implementation task, inspect current code because commits `14ea5aa` 
 ```text
 EOD readiness + immutable DailyEvaluationRun(decision_at distinct from evaluated_at)
   -> point-in-time U.S. common-stock universe snapshot
-  -> breakout + pullback + VCP + weekly industry/sector-RS evaluations
+  -> breakout + pullback + VCP evaluations
   -> common SetupCandidate rows and gate/near-miss ledger
   -> global ticker dedupe/rank + 20-slot/100%-risk/5-per-sector allocator
   -> exact fresh read-only chain snapshot for selected finalists only
@@ -66,7 +66,7 @@ AllocationDecision(run_id, ticker, global_rank, sector_rank, risk_fraction, sele
 
 `decision_at` is supplied by the orchestration run and never derived from evaluation time, insert time, chain fetch time, or wall-clock `now()` inside an evaluator. `evaluated_at`/`created_at` are audit timestamps only.
 
-## 4. Implementation tasks (24 total)
+## 4. Implementation tasks (23 total)
 
 ### Task 1: Freeze the pivot contract and baseline the existing foundations
 
@@ -470,28 +470,7 @@ cd wolfy && python3 -m pytest test_options_volatility_strategy.py test_aggressiv
 
 **Commit:** `feat(wolfy): add research volatility contraction sleeve`
 
-### Task 19: Replace ETF rotation with weekly industry/sector stock allocation
-
-**Objective:** Preserve the weekly relative-strength idea without violating the stock-only universe.
-
-**Files:**
-- Create: `wolfy/weekly_relative_strength.py`
-- Create: `wolfy/test_weekly_relative_strength.py`
-- Modify: `wolfy/setup_evaluators.py`
-- Modify: `wolfy/eod_signals.py` (strategy seed/adapter only)
-
-**RED:** Assert SPY/IWM/MDY and all ETFs can be benchmark/context rows but never candidates. Cover weekly decision schedule, point-in-time sector/industry membership, missing sector failure, group RS ranking, stock ranking within leading groups, no lookahead, rebalance idempotency, and max-five-per-sector handoff to allocator.
-
-**GREEN:** Seed `mid_small_weekly_industry_rs_allocation_v1` as `research_only`. Compute group strength from eligible constituent stocks with SPY/IWM/MDY context; emit eligible common-stock candidates only. The global allocator—not this sleeve—owns final count and concentration.
-
-**Run:**
-```bash
-cd wolfy && python3 -m pytest test_weekly_relative_strength.py test_setup_evaluators.py -q
-```
-
-**Commit:** `feat(wolfy): add weekly stock relative strength sleeve`
-
-### Task 20: Add setup-native chronological backtests and governance
+### Task 19: Add setup-native chronological backtests and governance
 
 **Objective:** Validate each strategy without contaminating the preserved approved gate.
 
@@ -504,7 +483,7 @@ cd wolfy && python3 -m pytest test_weekly_relative_strength.py test_setup_evalua
 
 **RED:** Cover anchored/rolling chronological splits, purged hold boundaries, untouched holdout, next-session-open and EOD-reference entries, gaps, stop-first same bar, costs/slippage, delisting/missing bars, available-at joins, attempted-parameter logging, concentration, overlap, and immutable approval metadata.
 
-**GREEN:** Add versioned backtest modes for breakout parity, pullback, VCP, and weekly industry RS. Report sample counts, hit/stop rates, expectancy in R, drawdown, MFE/MAE, turnover, holding period, sector/regime concentration, date-clustered confidence intervals, sensitivity, and overlap. New families may become `candidate` only after their governed gate; explicit user approval remains mandatory.
+**GREEN:** Add versioned backtest modes for breakout parity, pullback, and VCP. Report sample counts, hit/stop rates, expectancy in R, drawdown, MFE/MAE, turnover, holding period, sector/regime concentration, date-clustered confidence intervals, sensitivity, and overlap. New families may become `candidate` only after their governed gate; explicit user approval remains mandatory.
 
 **Run:**
 ```bash
@@ -513,7 +492,7 @@ cd wolfy && python3 -m pytest test_multi_strategy_backtest.py test_eod_backtest.
 
 **Commit:** `feat(wolfy): govern multi strategy backtests`
 
-### Task 21: Backtest portfolio allocation and measure accepted ruin risk
+### Task 20: Backtest portfolio allocation and measure accepted ruin risk
 
 **Objective:** Quantify the consequences of 20 concurrent positions at 5% defined risk each.
 
@@ -533,7 +512,7 @@ cd wolfy && python3 -m pytest test_portfolio_backtest.py test_eod_backtest.py -q
 
 **Commit:** `feat(wolfy): measure portfolio ruin risk`
 
-### Task 22: Build the idempotent full orchestrator in shadow mode
+### Task 21: Build the idempotent full orchestrator in shadow mode
 
 **Objective:** Join readiness, all evaluators, allocator, chain decisions, writer, outcomes, and summary behind one state machine.
 
@@ -555,7 +534,7 @@ cd wolfy && python3 -m pytest test_daily_multi_strategy.py test_orchestration_ru
 
 **Commit:** `feat(wolfy): orchestrate pivot in shadow mode`
 
-### Task 23: Rehearse migrations and run the staged shadow release
+### Task 22: Rehearse migrations and run the staged shadow release
 
 **Objective:** Prove production safety and behavior before any production mutation.
 
@@ -582,13 +561,13 @@ cd wolfy && python3 -m pytest test_daily_multi_strategy.py test_orchestration_ru
 
 **Commit:** `test(wolfy): validate pivot shadow release`
 
-### Task 24: Gate production activation, canary, and rollback
+### Task 23: Gate production activation, canary, and rollback
 
 **Objective:** Activate only the approved breakout vertical slice first and retain a one-command rollback.
 
 **Files:**
-- Modify after Task 23 approval only: `scripts/wolfy_mid_small_daily.py`
-- Modify through Hermes cron management after Task 23 approval only: `cron/jobs.json`
+- Modify after Task 22 approval only: `scripts/wolfy_mid_small_daily.py`
+- Modify through Hermes cron management after Task 22 approval only: `cron/jobs.json`
 - Modify: `wolfy/test_orchestration_runner.py`
 - Modify: `wolfy/test_recommendation_engine_daily_summary.py`
 
@@ -601,7 +580,7 @@ cd wolfy && python3 -m pytest test_daily_multi_strategy.py test_orchestration_ru
 4. Read back global count/sector/risk invariants and production baseline deltas.
 5. Enable one scheduled publisher only after canary success. Keep routine output local.
 6. Roll back by disabling the pivot publisher/config and restoring the previous publisher; never delete audit/recommendation rows as rollback.
-7. Promote each new sleeve only after Task 20/21 evidence, forward shadow evidence, independent review, and explicit user approval.
+7. Promote each new sleeve only after Task 19/20 evidence, forward shadow evidence, independent review, and explicit user approval.
 
 **Run:**
 ```bash
@@ -643,7 +622,7 @@ The pivot is complete only when:
 2. Foreign/ADR, OTC, ETF/ETP, leveraged/inverse, manipulation-risk, government-risk, unknown, stale, and denylisted names fail closed with reasons.
 3. SPY/IWM/MDY are context-only and cannot be recommended.
 4. The approved close-confirmed breakout has zero parity drift.
-5. Pullback, VCP, and weekly industry/sector RS sleeves have versioned research evaluations and governed backtests; none auto-approves.
+5. Pullback and VCP sleeves have versioned research evaluations and governed backtests; neither auto-approves.
 6. One allocator globally ranks/deduplicates candidates and enforces up to 20 concurrent recommendations, 5% defined risk each, 100% aggregate risk, and five per sector under concurrency.
 7. Exact fresh read-only chain selection is preferred; unavailable/unsafe chains produce explicit underlying stock fallback without fabricating contracts.
 8. Decision time is independent from evaluation time; all timestamps are timezone-aware; malformed numerics/containers and invalid/bounded OI/volume fail closed.
