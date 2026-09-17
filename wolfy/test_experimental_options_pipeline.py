@@ -11,12 +11,25 @@ def test_pipeline_selects_persists_and_writes_experimental_recommendation():
     pytest.importorskip("psycopg")
     from eod_signals import ensure_signal_schema, seed_default_strategies
     from experimental_options_pipeline import evaluate_and_write_experimental_options
+    from option_chain_provider import normalize_option_chain_snapshot
     signal_dt = date(2099, 3, 5)
     ticker = "ZZPIPE"
+    fetched_at = datetime(2099, 3, 5, 20, 1, tzinfo=timezone.utc)
+    decision_at = datetime(2099, 3, 5, 20, 5, tzinfo=timezone.utc)
     chain = [
-        {"symbol":"ZZPIPELONG","option_type":"call","expiration":"2099-03-20","strike":"100","bid":"2.0","ask":"2.1","open_interest":500,"volume":50,"implied_volatility":"0.4","quote_at":"2099-03-05T20:00:00Z","multiplier":100,"standard_contract":True},
-        {"symbol":"ZZPIPESHORT","option_type":"call","expiration":"2099-03-20","strike":"105","bid":"0.7","ask":"0.8","open_interest":500,"volume":50,"implied_volatility":"0.4","quote_at":"2099-03-05T20:00:00Z","multiplier":100,"standard_contract":True},
+        {"symbol":"ZZPIPE990320C00100000","option_type":"call","expiration":"2099-03-20","strike":"100","bid":"2.0","ask":"2.1","bid_size":10,"ask_size":10,"open_interest":500,"volume":50,"implied_volatility":"0.4","quote_at":"2099-03-05T20:00:00Z","market_date":"2099-03-05","multiplier":100,"standard_contract":True},
+        {"symbol":"ZZPIPE990320C00105000","option_type":"call","expiration":"2099-03-20","strike":"105","bid":"0.7","ask":"0.8","bid_size":10,"ask_size":10,"open_interest":500,"volume":50,"implied_volatility":"0.4","quote_at":"2099-03-05T20:00:00Z","market_date":"2099-03-05","multiplier":100,"standard_contract":True},
     ]
+    snapshot = normalize_option_chain_snapshot(
+        {
+            "ticker": ticker, "source": "unit-read-only",
+            "source_url": "https://example.invalid/read-only/ZZPIPE",
+            "fetched_at": fetched_at, "available_at": fetched_at,
+            "market_at": datetime(2099, 3, 5, 20, tzinfo=timezone.utc),
+            "contracts": chain,
+        },
+        requested_ticker=ticker, signal_dt=signal_dt, decision_at=decision_at,
+    )
     with test_connection() as conn:
         ensure_signal_schema(conn)
         seed_default_strategies(conn)
@@ -24,13 +37,16 @@ def test_pipeline_selects_persists_and_writes_experimental_recommendation():
         try:
             conn.execute("INSERT INTO signals(ticker,dt,strategy_id,direction,raw) VALUES (%s,%s,%s,'long','{\"close\":\"100\",\"invalidation\":\"95\",\"target_r\":\"1\"}'::jsonb) ON CONFLICT DO NOTHING", (ticker,signal_dt,sid))
             result = evaluate_and_write_experimental_options(
-                conn, signal_dt=signal_dt, chain_snapshots={ticker: chain},
-                fetched_at=datetime(2099,3,5,20,tzinfo=timezone.utc), source="unit-read-only",
+                conn, signal_dt=signal_dt, chain_snapshots={ticker: snapshot},
+                fetched_at=fetched_at, source="unit-read-only", decision_time=decision_at,
             )
             assert result["evaluated"] == 1
             assert result["selected"] == 1
             assert result["recommendation_result"]["recommendations_created"] == 1
-            assert conn.execute("SELECT count(*) FROM option_structure_evaluations WHERE ticker=%s",(ticker,)).fetchone()[0] == 1
+            row = conn.execute(
+                "SELECT snapshot_id FROM option_structure_evaluations WHERE ticker=%s", (ticker,)
+            ).fetchone()
+            assert row == (snapshot.snapshot_id,)
         finally:
             conn.execute("DELETE FROM recommendations WHERE ticker=%s",(ticker,))
             conn.execute("DELETE FROM option_structure_evaluations WHERE ticker=%s",(ticker,))

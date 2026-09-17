@@ -68,13 +68,15 @@ def normalize_cboe_payload(payload: Mapping[str, Any], *, requested_ticker: str)
     data = strict_mapping(payload.get("data"), field="payload data")
     options = strict_mapping_sequence(data.get("options"), field="payload options")
 
-    ticker = str(data.get("symbol") or payload.get("symbol") or requested_ticker).upper()
+    requested = requested_ticker.upper().strip()
+    ticker = str(data.get("symbol") or payload.get("symbol") or "").upper().strip()
+    if not ticker or ticker != requested:
+        raise ValueError("Cboe response ticker mismatch")
     contracts: list[dict[str, Any]] = []
     for raw in options:
-        try:
-            parsed = parse_occ_symbol(str(raw.get("option") or ""))
-        except ValueError:
-            continue
+        parsed = parse_occ_symbol(str(raw.get("option") or ""))
+        if parsed["underlying"] != ticker:
+            raise ValueError("Cboe OCC underlying mismatch")
         bid = _text_decimal(raw.get("bid"), field="bid", required=True)
         ask = _text_decimal(raw.get("ask"), field="ask", required=True)
         bid_size = strict_bounded_nonnegative_integer(

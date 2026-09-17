@@ -5,13 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from experimental_options_pipeline import PROFILE_STRATEGIES, evaluate_and_write_experimental_options
 from options_research_ledger import DEFAULT_DSN
-from cboe_delayed_options import fetch_cboe_delayed_chain
+from option_chain_provider import acquire_option_chain_snapshot
 from options_structure_selector import (
     strict_aware_datetime,
     strict_mapping,
@@ -34,15 +34,19 @@ def load_chain_snapshot(path: Path) -> dict[str, Any]:
     }
 
 
-def fetch_cboe_snapshots(tickers: list[str]) -> dict[str, Any]:
+def fetch_cboe_snapshots(
+    tickers: list[str], *, signal_dt: date, decision_at: datetime
+) -> dict[str, Any]:
     chains: dict[str, Any] = {}
     fetched_times: list[datetime] = []
     for ticker in sorted({ticker.upper().strip() for ticker in tickers if ticker.strip()}):
-        snapshot = fetch_cboe_delayed_chain(ticker)
-        chains[ticker] = snapshot["contracts"]
-        fetched_times.append(snapshot["fetched_at"])
+        snapshot = acquire_option_chain_snapshot(
+            ticker, signal_dt=signal_dt, decision_at=decision_at
+        )
+        chains[ticker] = snapshot
+        fetched_times.append(snapshot.fetched_at)
     return {
-        "fetched_at": max(fetched_times) if fetched_times else datetime.now().astimezone(),
+        "fetched_at": max(fetched_times) if fetched_times else decision_at,
         "source": "cboe_public_delayed_options",
         "chains": chains,
     }
@@ -73,18 +77,24 @@ def main() -> int:
     import psycopg
     with psycopg.connect(args.dsn) as conn:
         if args.cboe_delayed:
+            decision_at = args.decision_time or datetime.now(timezone.utc)
             qualifying = conn.execute("""
                 SELECT DISTINCT s.ticker FROM signals s JOIN strategies st ON st.id=s.strategy_id
                 WHERE s.dt=%s AND st.name=%s
                   AND lower(coalesce(s.direction,'')) IN ('long','buy') ORDER BY s.ticker
             """, (args.signal_dt, PROFILE_STRATEGIES[args.profile])).fetchall()
-            snapshot = fetch_cboe_snapshots([str(row[0]) for row in qualifying])
+            snapshot = fetch_cboe_snapshots(
+                [str(row[0]) for row in qualifying],
+                signal_dt=args.signal_dt,
+                decision_at=decision_at,
+            )
         else:
             snapshot = load_chain_snapshot(args.chain_json)
+            decision_at = args.decision_time or snapshot["fetched_at"]
         result = evaluate_and_write_experimental_options(
             conn, signal_dt=args.signal_dt, chain_snapshots=snapshot["chains"],
             fetched_at=snapshot["fetched_at"], source=snapshot["source"], dry_run=args.dry_run,
-            profile=args.profile, decision_time=args.decision_time,
+            profile=args.profile, decision_time=decision_at,
         )
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
     return 0

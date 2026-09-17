@@ -51,6 +51,35 @@ def test_cboe_occ_parser_handles_puts_and_decimal_strikes():
     assert parsed == {"underlying":"BRK.B","expiration":date(2026,9,18),"option_type":"put","strike":"412.5"}
 
 
+def test_cboe_normalizer_requires_exact_requested_ticker():
+    from cboe_delayed_options import normalize_cboe_payload
+
+    with pytest.raises(ValueError, match="ticker mismatch"):
+        normalize_cboe_payload(
+            {"timestamp": "2026-08-13T03:44:36Z", "data": {"symbol": "OTHER", "options": []}},
+            requested_ticker="ABC",
+        )
+
+
+def test_cboe_normalizer_rejects_invalid_occ_row_instead_of_returning_partial_chain():
+    from cboe_delayed_options import normalize_cboe_payload
+
+    with pytest.raises(ValueError, match="OCC|option symbol"):
+        normalize_cboe_payload(
+            {
+                "timestamp": "2026-08-13T03:44:36Z",
+                "data": {
+                    "symbol": "ABC",
+                    "options": [{
+                        "option": "NOT-AN-OCC-SYMBOL", "bid": 2, "ask": 2.2,
+                        "bid_size": 1, "ask_size": 1, "volume": 1, "open_interest": 10,
+                    }],
+                },
+            },
+            requested_ticker="ABC",
+        )
+
+
 @pytest.mark.parametrize("timestamp", [None, "2026-08-13T03:44:36", "not-a-time"])
 def test_cboe_normalizer_rejects_missing_naive_or_invalid_snapshot_time(timestamp):
     from cboe_delayed_options import normalize_cboe_payload
