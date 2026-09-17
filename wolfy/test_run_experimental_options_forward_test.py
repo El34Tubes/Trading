@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,25 @@ def test_cli_normalizes_chain_payload_shape(tmp_path: Path):
     snapshot = load_chain_snapshot(path)
     assert snapshot["source"] == "unit-read-only"
     assert snapshot["chains"] == {"ABC": [{"symbol":"ABC1"}]}
+    assert snapshot["fetched_at"].tzinfo is timezone.utc
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"fetched_at": "2026-08-12T20:00:00", "chains": {}},
+        {"fetched_at": "2026-08-12T20:00:00Z", "chains": []},
+        {"fetched_at": "2026-08-12T20:00:00Z", "chains": {"ABC": {}}},
+        {"fetched_at": "2026-08-12T20:00:00Z", "chains": {"ABC": ["bad"]}},
+    ],
+)
+def test_cli_rejects_naive_snapshot_time_and_malformed_chain_containers(tmp_path, payload):
+    from run_experimental_options_forward_test import load_chain_snapshot
+
+    path = tmp_path / "chain.json"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="timezone|chains|sequence|mapping"):
+        load_chain_snapshot(path)
 
 
 def test_fetch_cboe_snapshots_is_bounded_to_qualifying_tickers(monkeypatch):
@@ -37,3 +57,16 @@ def test_cli_profile_choice_is_explicit_and_defaults_to_v1():
     assert parser.parse_args([*common, "--profile", "aggressive-v2"]).profile == "aggressive-v2"
     with pytest.raises(SystemExit):
         parser.parse_args([*common, "--profile", "unknown"])
+
+
+def test_cli_rejects_naive_decision_time_and_preserves_explicit_aware_time():
+    from run_experimental_options_forward_test import build_parser
+
+    parser = build_parser()
+    common = ["--signal-dt", "2026-08-12", "--chain-json", "snapshot.json"]
+    with pytest.raises(SystemExit):
+        parser.parse_args([*common, "--decision-time", "2026-08-12T20:05:00"])
+
+    expected = "2026-08-12T16:05:00-04:00"
+    args = parser.parse_args([*common, "--decision-time", expected])
+    assert args.decision_time.isoformat() == expected

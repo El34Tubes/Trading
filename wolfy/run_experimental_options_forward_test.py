@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -11,17 +12,25 @@ from typing import Any
 from experimental_options_pipeline import PROFILE_STRATEGIES, evaluate_and_write_experimental_options
 from options_research_ledger import DEFAULT_DSN
 from cboe_delayed_options import fetch_cboe_delayed_chain
+from options_structure_selector import (
+    strict_aware_datetime,
+    strict_mapping,
+    strict_mapping_sequence,
+)
 
 
 def load_chain_snapshot(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text())
-    if not isinstance(payload, dict) or not isinstance(payload.get("chains"), dict):
-        raise ValueError("snapshot must contain a ticker-keyed 'chains' object")
-    fetched_at = datetime.fromisoformat(str(payload["fetched_at"]).replace("Z", "+00:00"))
+    payload = strict_mapping(json.loads(path.read_text()), field="snapshot")
+    chains_payload = strict_mapping(payload.get("chains"), field="snapshot chains")
+    fetched_at = strict_aware_datetime(payload.get("fetched_at"), field="fetched_at")
+    chains: dict[str, list[Mapping[str, Any]]] = {}
+    for ticker, contracts in chains_payload.items():
+        contracts = strict_mapping_sequence(contracts, field="each chains value")
+        chains[str(ticker).upper()] = list(contracts)
     return {
         "fetched_at": fetched_at,
         "source": str(payload.get("source") or "normalized-read-only-chain-json"),
-        "chains": {str(ticker).upper(): contracts for ticker, contracts in payload["chains"].items()},
+        "chains": chains,
     }
 
 
@@ -40,10 +49,10 @@ def fetch_cboe_snapshots(tickers: list[str]) -> dict[str, Any]:
 
 
 def _aware_datetime(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise argparse.ArgumentTypeError("decision time must include a timezone")
-    return parsed
+    try:
+        return strict_aware_datetime(value, field="decision time")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("decision time must include a timezone") from exc
 
 
 def build_parser() -> argparse.ArgumentParser:

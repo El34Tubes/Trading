@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
+
+import pytest
 
 
 def test_normalize_cboe_delayed_chain_preserves_quotes_liquidity_and_greeks():
     from cboe_delayed_options import normalize_cboe_payload
     payload = {
-        "timestamp": "2026-08-13 03:44:36",
+        "timestamp": "2026-08-13T03:44:36Z",
         "data": {
             "symbol": "ABC", "current_price": 100.25, "bid": 100.2, "ask": 100.3,
             "options": [{
@@ -37,7 +39,7 @@ def test_normalize_cboe_delayed_chain_preserves_quotes_liquidity_and_greeks():
 
 def test_zero_cboe_iv_and_greeks_are_marked_unavailable_not_real_measurements():
     from cboe_delayed_options import normalize_cboe_payload
-    payload = {"timestamp":"2026-08-13 03:44:36","data":{"symbol":"ABC","options":[{"option":"ABC260828C00050000","bid":50,"ask":51,"volume":1,"open_interest":1,"iv":0,"delta":1,"gamma":0,"theta":0,"vega":0,"rho":0}]}}
+    payload = {"timestamp":"2026-08-13T03:44:36Z","data":{"symbol":"ABC","options":[{"option":"ABC260828C00050000","bid":50,"ask":51,"volume":1,"open_interest":1,"iv":0,"delta":1,"gamma":0,"theta":0,"vega":0,"rho":0}]}}
     contract = normalize_cboe_payload(payload, requested_ticker="ABC")["contracts"][0]
     assert contract["implied_volatility"] is None
     assert contract["greeks_available"] is False
@@ -47,3 +49,63 @@ def test_cboe_occ_parser_handles_puts_and_decimal_strikes():
     from cboe_delayed_options import parse_occ_symbol
     parsed = parse_occ_symbol("BRK.B260918P00412500")
     assert parsed == {"underlying":"BRK.B","expiration":date(2026,9,18),"option_type":"put","strike":"412.5"}
+
+
+@pytest.mark.parametrize("timestamp", [None, "2026-08-13T03:44:36", "not-a-time"])
+def test_cboe_normalizer_rejects_missing_naive_or_invalid_snapshot_time(timestamp):
+    from cboe_delayed_options import normalize_cboe_payload
+
+    with pytest.raises(ValueError, match="timestamp"):
+        normalize_cboe_payload(
+            {"timestamp": timestamp, "data": {"symbol": "ABC", "options": []}},
+            requested_ticker="ABC",
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"timestamp": "2026-08-13T03:44:36Z", "data": []},
+        {"timestamp": "2026-08-13T03:44:36Z", "data": {"options": {}}},
+        {"timestamp": "2026-08-13T03:44:36Z", "data": {"options": ["bad"]}},
+    ],
+)
+def test_cboe_normalizer_rejects_malformed_payload_containers(payload):
+    from cboe_delayed_options import normalize_cboe_payload
+
+    with pytest.raises(ValueError, match="mapping|sequence"):
+        normalize_cboe_payload(payload, requested_ticker="ABC")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("bid", True),
+        ("ask", "NaN"),
+        ("iv", "Infinity"),
+        ("open_interest", -1),
+        ("open_interest", 2_147_483_648),
+        ("volume", " 1"),
+        ("volume", "1e2"),
+        ("volume", None),
+    ],
+)
+def test_cboe_normalizer_rejects_malformed_contract_numeric_fields(field, value):
+    from cboe_delayed_options import normalize_cboe_payload
+
+    raw = {
+        "option": "ABC260828C00100000", "bid": 2, "ask": 2.2,
+        "bid_size": 1, "ask_size": 1, "volume": 1, "open_interest": 10,
+        "iv": 0.4, "delta": 0.5, "gamma": 0.03, "theta": -0.08,
+        "vega": 0.12, "rho": 0.04,
+    }
+    raw[field] = value
+    with pytest.raises(ValueError, match=field):
+        normalize_cboe_payload(
+            {
+                "timestamp": "2026-08-13T03:44:36Z",
+                "data": {"symbol": "ABC", "options": [raw]},
+            },
+            requested_ticker="ABC",
+        )

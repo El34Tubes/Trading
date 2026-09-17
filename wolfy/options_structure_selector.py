@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 
 D = Decimal
+MAX_PROVIDER_INTEGER = 2_147_483_647
 
 
 @dataclass(frozen=True)
@@ -49,30 +50,63 @@ def aggressive_options_v2_policy(*, decision_time: datetime | None = None) -> Se
     )
 
 
-def _d(value: Any) -> Decimal:
-    return D(str(value))
-
-
-def _strict_decimal(value: Any) -> Decimal:
+def strict_finite_decimal(value: Any, *, field: str = "value") -> Decimal:
     if isinstance(value, bool) or value is None:
-        raise ValueError("not a decimal")
+        raise ValueError(f"{field} must be a finite decimal")
     try:
         parsed = D(str(value))
     except (InvalidOperation, ValueError, TypeError) as exc:
-        raise ValueError("not a decimal") from exc
+        raise ValueError(f"{field} must be a finite decimal") from exc
     if not parsed.is_finite():
-        raise ValueError("decimal must be finite")
+        raise ValueError(f"{field} must be a finite decimal")
     return parsed
 
 
-def _strict_integer(value: Any) -> int:
+def strict_bounded_nonnegative_integer(value: Any, *, field: str = "value") -> int:
     if isinstance(value, bool):
-        raise ValueError("not an integer")
+        raise ValueError(f"{field} must be a canonical bounded nonnegative integer")
     if isinstance(value, int):
-        return value
-    if isinstance(value, str) and re.fullmatch(r"0|[1-9][0-9]*", value):
-        return int(value)
-    raise ValueError("not a canonical integer")
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"0|[1-9][0-9]*", value):
+        parsed = int(value)
+    else:
+        raise ValueError(f"{field} must be a canonical bounded nonnegative integer")
+    if not 0 <= parsed <= MAX_PROVIDER_INTEGER:
+        raise ValueError(f"{field} must be a canonical bounded nonnegative integer")
+    return parsed
+
+
+def strict_aware_datetime(value: Any, *, field: str = "timestamp") -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"{field} must be a timezone-aware datetime") from exc
+    else:
+        raise ValueError(f"{field} must be a timezone-aware datetime")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be a timezone-aware datetime")
+    return parsed
+
+
+def strict_mapping(value: Any, *, field: str = "value") -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field} must be a mapping")
+    return value
+
+
+def strict_mapping_sequence(
+    value: Any, *, field: str = "value"
+) -> Sequence[Mapping[str, Any]]:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray))
+        or not all(isinstance(item, Mapping) for item in value)
+    ):
+        raise ValueError(f"{field} must be a sequence of mappings")
+    return value
 
 
 def _q(value: Decimal) -> Decimal:
@@ -80,30 +114,36 @@ def _q(value: Decimal) -> Decimal:
 
 
 def _iso_dt(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    try:
+        return strict_aware_datetime(value, field="quote_at").astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 def _leg(contract: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "symbol": str(contract["symbol"]),
         "expiration": str(contract["expiration"]),
-        "strike": str(_d(contract["strike"])),
-        "bid": str(_d(contract["bid"])),
-        "ask": str(_d(contract["ask"])),
-        "open_interest": int(contract.get("open_interest") or 0),
-        "volume": int(contract.get("volume") or 0),
-        "implied_volatility": None if contract.get("implied_volatility") is None else str(_d(contract["implied_volatility"])),
+        "strike": str(strict_finite_decimal(contract["strike"], field="strike")),
+        "bid": str(strict_finite_decimal(contract["bid"], field="bid")),
+        "ask": str(strict_finite_decimal(contract["ask"], field="ask")),
+        "open_interest": strict_bounded_nonnegative_integer(
+            contract.get("open_interest"), field="open_interest"
+        ),
+        "volume": strict_bounded_nonnegative_integer(contract.get("volume"), field="volume"),
+        "implied_volatility": (
+            None
+            if contract.get("implied_volatility") is None
+            else str(
+                strict_finite_decimal(
+                    contract["implied_volatility"], field="implied_volatility"
+                )
+            )
+        ),
         "quote_at": str(contract.get("quote_at")),
-        "multiplier": int(contract.get("multiplier") or 100),
+        "multiplier": strict_bounded_nonnegative_integer(
+            contract.get("multiplier"), field="multiplier"
+        ),
     }
 
 
@@ -112,16 +152,21 @@ def _screen_contract(contract: Mapping[str, Any], *, as_of: date, policy: Select
     aggressive_v2 = policy.policy_version == "aggressive_options_v2"
     try:
         expiration = date.fromisoformat(str(contract["expiration"]))
-        decimal_parser = _strict_decimal if aggressive_v2 else _d
-        strike, bid, ask = (decimal_parser(contract[key]) for key in ("strike", "bid", "ask"))
-        if aggressive_v2:
-            open_interest = _strict_integer(contract.get("open_interest", 0))
-            volume = _strict_integer(contract.get("volume", 0))
-            multiplier = _strict_integer(contract.get("multiplier", 0))
-        else:
-            open_interest = int(contract.get("open_interest") or 0)
-            volume = int(contract.get("volume") or 0)
-            multiplier = int(contract.get("multiplier") or 0)
+        strike, bid, ask = (
+            strict_finite_decimal(contract[key], field=key)
+            for key in ("strike", "bid", "ask")
+        )
+        open_interest = strict_bounded_nonnegative_integer(
+            contract.get("open_interest"), field="open_interest"
+        )
+        volume = strict_bounded_nonnegative_integer(contract.get("volume"), field="volume")
+        multiplier = strict_bounded_nonnegative_integer(
+            contract.get("multiplier"), field="multiplier"
+        )
+        if contract.get("implied_volatility") is not None:
+            strict_finite_decimal(
+                contract["implied_volatility"], field="implied_volatility"
+            )
     except (KeyError, InvalidOperation, ValueError, TypeError):
         return ["invalid_contract_fields"], None
     dte = (expiration - as_of).days
@@ -188,6 +233,9 @@ def select_bullish_option_structure(
     after quote-width and time-value penalties. It never forces a selection.
     """
     policy = policy or SelectorPolicy()
+    if policy.decision_time is not None:
+        strict_aware_datetime(policy.decision_time, field="decision_time")
+    strict_mapping_sequence(contracts, field="contracts")
     if underlying_price <= 0 or technical_target <= underlying_price:
         raise ValueError("bullish target must be above a positive underlying price")
     eligible: list[dict[str, Any]] = []

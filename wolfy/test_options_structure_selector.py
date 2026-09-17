@@ -169,6 +169,30 @@ def test_aggressive_policy_requires_timezone_aware_decision_time():
 
 
 @pytest.mark.parametrize(
+    "evaluated_at",
+    [
+        datetime(2026, 8, 12, 20, 6, tzinfo=timezone.utc),
+        datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc),
+    ],
+)
+def test_decision_time_is_explicit_and_independent_of_evaluated_at(evaluated_at):
+    from options_structure_selector import aggressive_options_v2_policy
+
+    decision_time = datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)
+    evaluation_record = {
+        "evaluated_at": evaluated_at,
+        "result": select_bullish_option_structure(
+            ticker="CLOCK", underlying_price=Decimal("100"),
+            technical_target=Decimal("108"), as_of=date(2026, 8, 12),
+            contracts=[_c("CLOCK260821C00100000", "2026-08-21", "100", "2", "2.1")],
+            policy=aggressive_options_v2_policy(decision_time=decision_time),
+        ),
+    }
+
+    assert evaluation_record["result"]["policy"]["decision_time"] == decision_time.isoformat()
+
+
+@pytest.mark.parametrize(
     ("field", "value", "reason"),
     [
         ("bid", "NaN", "invalid_contract_fields"),
@@ -191,6 +215,64 @@ def test_aggressive_selector_rejects_malformed_contract_without_raising(field, v
     )
     assert result["selected"] is None
     assert result["rejected_contracts"][0]["reasons"] == [reason]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("strike", None),
+        ("bid", True),
+        ("ask", "NaN"),
+        ("implied_volatility", "Infinity"),
+        ("open_interest", -1),
+        ("open_interest", 2_147_483_648),
+        ("open_interest", " 10"),
+        ("volume", "1e2"),
+        ("volume", None),
+        ("multiplier", 2_147_483_648),
+    ],
+)
+def test_selector_rejects_noncanonical_or_unbounded_numeric_fields(field, value):
+    from options_structure_selector import aggressive_options_v2_policy
+
+    contract = _c("BADNUM", "2026-08-21", "100", "2", "2.1", oi=10, volume=1)
+    contract[field] = value
+    result = select_bullish_option_structure(
+        ticker="BAD", underlying_price=Decimal("100"), technical_target=Decimal("108"),
+        as_of=date(2026, 8, 12), contracts=[contract],
+        policy=aggressive_options_v2_policy(
+            decision_time=datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)
+        ),
+    )
+
+    assert result["selected"] is None
+    assert result["rejected_contracts"][0]["reasons"] == ["invalid_contract_fields"]
+
+
+@pytest.mark.parametrize("contracts", [None, {}, "not-a-chain", ["not-a-contract"]])
+def test_selector_rejects_malformed_chain_containers_at_boundary(contracts):
+    with pytest.raises(ValueError, match="contracts must be a sequence of mappings"):
+        select_bullish_option_structure(
+            ticker="BAD", underlying_price=Decimal("100"), technical_target=Decimal("108"),
+            as_of=date(2026, 8, 12), contracts=contracts,
+        )
+
+
+def test_selector_rejects_naive_quote_timestamp_instead_of_assuming_utc():
+    from options_structure_selector import aggressive_options_v2_policy
+
+    contract = _c("NAIVE", "2026-08-21", "100", "2", "2.1", oi=10, volume=1)
+    contract["quote_at"] = "2026-08-12T20:00:00"
+    result = select_bullish_option_structure(
+        ticker="NAIVE", underlying_price=Decimal("100"), technical_target=Decimal("108"),
+        as_of=date(2026, 8, 12), contracts=[contract],
+        policy=aggressive_options_v2_policy(
+            decision_time=datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)
+        ),
+    )
+
+    assert result["selected"] is None
+    assert result["rejected_contracts"][0]["reasons"] == ["missing_quote_timestamp"]
 
 
 def test_aggressive_selector_derives_new_york_market_date_and_rejects_spoof():
