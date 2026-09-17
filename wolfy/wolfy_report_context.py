@@ -13,8 +13,7 @@ try:
 except Exception:
     psycopg = None
 
-from wolfy_agent_coordination import connect, finish_agent_run, start_agent_run
-from insider_buying import ensure_insider_tables
+from wolfy_agent_coordination import connect, start_agent_run
 from eod_governance import print_eod_governance
 from lead_promotion_gate import promote_alpha_leads
 from wolfy_postgres_pipeline import fallback_warning, latest_scanner_freshness
@@ -415,7 +414,7 @@ def main() -> None:
     print('Promotion gate summary: ' + ' '.join(f'{k}={v}' for k, v in alpha_summary.items()))
     print(f'After report/recommendation DB writes, run: python3 {CLI} run-finish --run-id {run_id} --status completed --records-created <N> --summary "<Wolfy report/recommendation summary>"')
     print(f'If blocked, run: python3 {CLI} run-finish --run-id {run_id} --status blocked --error-message "<specific blocker>" --summary "<specific blocker>"')
-    print('User constraints: Robinhood-tradable only; no shorts; options allowed but defined-risk preferred; max 3 concurrent paper positions; $5,000 paper account; stops required; PDT-aware; avoid foreign manipulation/government-interference risk.')
+    print('Pivot constraints: U.S. mid/small-cap common stocks only ($200M-$15B, price >=$3, 20-session ADV >=$5M); SPY/IWM/MDY are benchmark context only; up to 20 paper positions at 5% defined risk each, <=100% aggregate risk, <=5 per sector; exact safe calls/spreads preferred with stock fallback; no live or broker writes.')
     print('Authority: Wolfy may create pending_review recommendations only from EOD closing-data/deterministic-signal support; Wolfy does not self-approve; Sentinel reviews next, Yang handles technical entry/exit after alpha is identified.')
     print('Report taxonomy: scanner leads are discovery only; promotion-gate complete tickets become pending_review recommendations for Sentinel; Sentinel-approved rows are paper-candidate inputs; watching/watch_only rows are explicitly non-actionable watch-only ideas.')
     for bucket_name in ('pending_review', 'sentinel_approved', 'watch_only'):
@@ -444,7 +443,7 @@ def main() -> None:
         print(f'Postgres run table unavailable: {type(e).__name__}: {e}')
     if scanner_freshness.get('action_gate') == 'no_trade':
         print('Freshness gate: scanner_stale/no-trade. Do not create actionable recommendations or pending_review trade tickets from stale scanner data.')
-    print('Required output: concise report separating FACT vs JUDGMENT. Use Postgres only. If scanner freshness action_gate=no_trade or current context is not EOD closing-data backed, say scanner_stale/no-trade/EOD-only and create no actionable recommendations. If no actionable setup, say watchlist/no-trade and still finish the run.')
+    print('Required output: concise report separating FACT vs JUDGMENT. Use Postgres only. Report pipeline_incomplete (never clean NO TRADE) when readiness or EOD data is partial. Use NO TRADE only for a complete run with no eligible setup; actionable rows must name signal date, strategy/rank/sector, entry/stop/target, 5% risk/max loss, exact option legs or stock-fallback reason, and paper/no-live status.')
 
 
 if __name__ == '__main__':
