@@ -1,5 +1,16 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-17 daily optimizer plan-only run
+
+- Time: 2026-09-17 02:16 ET / 06:16 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=478531 cap=200000` (exit 1), so this run remained PLAN-ONLY: deterministic review plus task/run/KPI/ledger state only; no code/config/cron/migration/strategy-approval/trading implementation.
+- Guardian/probation: no probation marker exists; production-home guardian returned `GUARDIAN=ok`; YAML/cron parsing, `hermes cron list`, gateway status, Postgres requirements, visible-progress ledger, and five guardian tests passed. Optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remain enabled.
+- Prior review: HEAD `3761eb504b46a40d43bbbb54436970b7e1d81c47` matches completed task `4137` / run `403119`, has ledger-only scope, passes `git show --check`, and retains 25/25 KPI rows with provenance. Corrective task `4133` remains queued; mutating full-suite tests were not rerun under the budget stop.
+- State/KPI: plan-only task `4144` / run `403527`; exactly 25 KPI keys recorded with measured/carried-forward provenance. Capture: 478531 completed tokens, 0% daily-cap headroom, 4 completed tokenized runs today, core freshness 34/34 at common date 2026-09-15, and depth readiness 1316/1358 at 495 bars.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: the deterministic token cap remains an absolute implementation stop; reconcile live schemas before KPI writes—the canonical strategy OOS field is `strategies.latest_oos_verdict`, not its metadata compatibility object.
+- NEXT ACTION: after budget headroom recovers, execute queued task `4133` first—identify and isolate the remaining approved-strategy revalidation writer, then prove two repeated full suites leave `strategies`, `backtests`, `research_log`, and related governance state byte-equivalent.
+
 ## 2026-09-16 daily optimizer plan-only run
 
 - Time: 2026-09-16 02:15 ET / 06:15 UTC; outside all protected market/report windows.
