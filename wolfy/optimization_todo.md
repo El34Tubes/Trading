@@ -1,5 +1,16 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-17 late daily optimizer plan-only run
+
+- Time: 2026-09-17 03:18 ET / 07:18 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=721252 cap=200000` (exit 1), so this run remained PLAN-ONLY: deterministic review plus task/run/KPI/ledger state only; no code/config/cron/migration/strategy-approval/trading implementation.
+- Guardian/probation: no probation marker exists. Guardian job `e55c9cc39d8d` auto-restored snapshot `20260917T024148389582Z` at 03:16 ET after a transient `optimizer_not_enabled` check, then the production-home guardian returned `GUARDIAN=ok`; optimizer `92f31b95fccc` and guardian remain enabled, YAML/cron parsing and `hermes cron list/status` pass, and the gateway is active. This run records one rollback but makes no orchestration change.
+- Prior review: HEAD `382f202e2e4b052bef67dc0e3ee71f1b8eef54f9` matches completed task `4144` / run `403527`, has ledger-only scope, passes `git show --check`, and retains 25/25 KPI rows with provenance. Five guardian tests and Postgres requirements passed. Corrective task `4133` remains queued and unclaimed because the budget stop prohibits implementation.
+- State/KPI: plan-only task `4145` / run `403573`; exactly 25 KPI keys recorded with measured/carried-forward provenance. Capture: 721252 completed tokens, 0% daily-cap headroom, 6 completed tokenized runs today, core freshness 34/34 at common date 2026-09-15, depth readiness 1316/1358 at 495 bars, and trailing Wolfy run success 17/19.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: guardian health must be checked after any auto-restore, not inferred from its last cron status; today the post-restore checks passed, but the transient `optimizer_not_enabled` rollback is now explicit in metrics and should be investigated deterministically rather than changing orchestration during a budget-blocked run.
+- NEXT ACTION: after budget headroom recovers, first diagnose why the guardian transiently observed the optimizer as disabled; if no persistent orchestration regression exists, execute queued task `4133`—isolate the remaining approved-strategy revalidation writer and prove two repeated full suites leave `strategies`, `backtests`, `research_log`, and related governance state byte-equivalent.
+
 ## 2026-09-17 daily optimizer plan-only run
 
 - Time: 2026-09-17 02:16 ET / 06:16 UTC; outside all protected market/report windows.
