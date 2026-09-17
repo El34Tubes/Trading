@@ -174,7 +174,12 @@ def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers
                     "INSERT INTO universe_symbols(symbol, name, source, active, wolfy_tier, backfill_enabled) VALUES (%s, %s, 'unit-test', true, 'small_cap', true) ON CONFLICT (symbol) DO UPDATE SET active=true",
                     (symbol, symbol),
                 )
-            auto_bars = _breakout_bars("ZZAUTO", daily_step=Decimal("0.70"), breakout_lift=Decimal("2.50"))
+            auto_bars = _breakout_bars(
+                "ZZAUTO",
+                start_close=Decimal("200"),
+                daily_step=Decimal("0.70"),
+                breakout_lift=Decimal("2.50"),
+            )
             ingest_price_bars(conn, auto_bars, source="unit-auto-universe")
             ingest_price_bars(conn, _breakout_bars("SPY", daily_step=Decimal("0.05"), breakout_lift=Decimal("0.00")), source="unit-auto-universe")
             compute_and_store_features(conn, tickers=tickers, sma_fast_window=5, sma_slow_window=20, volume_window=5, atr_window=5, min_dollar_vol=Decimal("1000"))
@@ -186,6 +191,14 @@ def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers
             )
 
             result = generate_eod_signals(conn, tickers=None, signal_dt=signal_dt, momentum_lookback_days=20, momentum_top_n=1)
+            adapted = conn.execute(
+                """SELECT s.raw
+                     FROM signals AS s
+                     JOIN strategies AS st ON st.id=s.strategy_id
+                    WHERE s.ticker='ZZAUTO' AND s.dt=%s
+                      AND st.name='liquid_rs_breakout_close_confirm_1r'""",
+                (signal_dt,),
+            ).fetchone()
         finally:
             _cleanup(conn, tickers)
             _restore_default_strategy_statuses(conn)
@@ -193,6 +206,10 @@ def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers
     assert result["universe_source"] == "immutable_mid_small_snapshot"
     assert "ZZAUTO" in result["tickers_considered"]
     assert result["signals_by_strategy"]["liquid_rs_breakout_continuation"] >= 1
+    assert adapted is not None
+    assert adapted[0]["common_setup_evaluation"]["strategy_version"] == "approved-2026-08-03"
+    assert adapted[0]["common_setup_evaluation"]["reason_codes"] == ["passed"]
+    assert adapted[0]["common_setup_candidate_terms"]["stop"] == adapted[0]["prior_5d_high"]
 
 
 def test_seed_default_strategies_includes_rs_breakout_as_research_only():

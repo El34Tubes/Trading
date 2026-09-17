@@ -1,6 +1,7 @@
 """Common, fail-closed setup evaluation and allocator-candidate contracts."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -18,6 +19,46 @@ _ASCII_EDGE = "".join(chr(codepoint) for codepoint in range(33)) + "\x7f"
 
 class SetupContractError(ValueError):
     """Raised before writes when a setup evaluation or candidate is unsafe."""
+
+
+APPROVED_BREAKOUT_STRATEGY_ID = "liquid_rs_breakout_close_confirm_1r"
+APPROVED_BREAKOUT_STRATEGY_VERSION = "approved-2026-08-03"
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedBreakoutFacts:
+    """Point-in-time inputs to the immutable approved breakout gate."""
+
+    ticker: str
+    sector: str
+    evaluated_at: datetime
+    universe_eligible: bool
+    close: object
+    high: object
+    prior_five_high: object
+    prior_five_low: object
+    sma_fast: object
+    sma_slow: object
+    volume_ratio: object
+    atr: object
+    ticker_return_20d: object
+    spy_return_20d: object
+    spy_close: object
+    spy_sma_50: object
+    source_fingerprint: str
+    provenance: Mapping[str, Any]
+    benchmark_context: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedBreakoutResult:
+    """Common-contract evaluation plus candidate-ready approved terms."""
+
+    evaluation: "SetupEvaluation"
+    entry: Decimal | None
+    stop: Decimal | None
+    target: Decimal | None
+    facts_hash: str
 
 
 def _text(value: object, field: str, *, uppercase: bool = False) -> str:
@@ -117,6 +158,111 @@ class SetupEvaluation:
             raise SetupContractError("source_fingerprint must be lowercase SHA-256")
         object.__setattr__(self, "provenance", _json_mapping(self.provenance, "provenance"))
         object.__setattr__(self, "score_components", _score_components(self.score_components))
+
+
+def evaluate_approved_breakout(facts: ApprovedBreakoutFacts) -> ApprovedBreakoutResult:
+    """Adapt the approved close-confirmed breakout without changing its gate.
+
+    IWM and MDY remain recorded context only. Candidate terms are returned only
+    for an eligible universe member that passes every immutable approved rule.
+    """
+    ticker = _text(facts.ticker, "ticker", uppercase=True)
+    sector = _text(facts.sector, "sector")
+    if type(facts.universe_eligible) is not bool:
+        raise SetupContractError("universe_eligible must be boolean")
+    if not isinstance(facts.evaluated_at, datetime) or facts.evaluated_at.tzinfo is None or facts.evaluated_at.utcoffset() is None:
+        raise SetupContractError("evaluated_at must be timezone-aware")
+    provenance = _json_mapping(facts.provenance, "provenance")
+    _json_mapping(facts.benchmark_context, "benchmark_context")
+
+    close = _decimal(facts.close, "close", positive=True)
+    high = _decimal(facts.high, "high", positive=True)
+    prior_high = _decimal(facts.prior_five_high, "prior_five_high", positive=True)
+    prior_low = _decimal(facts.prior_five_low, "prior_five_low", positive=True)
+    sma_fast = None if facts.sma_fast is None else _decimal(facts.sma_fast, "sma_fast", positive=True)
+    sma_slow = None if facts.sma_slow is None else _decimal(facts.sma_slow, "sma_slow", positive=True)
+    volume_ratio = _decimal(facts.volume_ratio, "volume_ratio")
+    atr = _decimal(facts.atr, "atr", positive=True)
+    ticker_return = _decimal(facts.ticker_return_20d, "ticker_return_20d")
+    spy_return = _decimal(facts.spy_return_20d, "spy_return_20d")
+    spy_close = _decimal(facts.spy_close, "spy_close", positive=True)
+    spy_sma = _decimal(facts.spy_sma_50, "spy_sma_50", positive=True)
+
+    rs_excess = ticker_return - spy_return
+    stop_risk_pct = (close - prior_low) / close
+    within_five_pct = close >= max(high, prior_high) * Decimal("0.95")
+    trend_passed = (sma_fast is None or close > sma_fast) and (
+        sma_fast is None or sma_slow is None or sma_fast >= sma_slow
+    )
+    failures = (
+        (not facts.universe_eligible, "security_ineligible"),
+        (spy_close <= spy_sma, "market_regime_failed"),
+        (not trend_passed, "trend_failed"),
+        (close <= prior_high, "breakout_not_confirmed"),
+        (not (ticker_return > spy_return and rs_excess >= Decimal("0.02")), "relative_strength_failed"),
+        (volume_ratio < Decimal("1.2"), "volume_failed"),
+        (stop_risk_pct > Decimal("0.05"), "stop_risk_too_wide"),
+        (not within_five_pct, "overextended"),
+    )
+    terminal_reason = next((reason for failed, reason in failures if failed), "passed")
+    passed = terminal_reason == "passed"
+    metrics = {
+        "atr": format(atr, "f"),
+        "atr_pct": str(atr / close),
+        "prior_5d_high": format(prior_high, "f"),
+        "prior_5d_low": format(prior_low, "f"),
+        "rs_excess_20d": format(rs_excess, "f"),
+        "spy_return_20d": format(spy_return, "f"),
+        "stop_risk_pct": str(stop_risk_pct),
+        "ticker_return_20d": format(ticker_return, "f"),
+        "vol_ratio": format(volume_ratio, "f"),
+    }
+    gate_facts = {
+        "approved_rules": {
+            "breakout_lookback_days": 5,
+            "market_regime": "SPY_above_50_sma",
+            "max_hold_days": 10,
+            "max_prior_low_risk_pct": "0.05",
+            "min_rs_excess_20d": "0.02",
+            "min_vol_ratio": "1.2",
+            "stop_rule": "close_below_breakout_level",
+            "target_r": "1.0",
+        },
+        "benchmark_context_only": ("IWM", "MDY"),
+        "breakout_confirmed": close > prior_high,
+        "market_regime_passed": spy_close > spy_sma,
+        "trend_passed": trend_passed,
+        "universe_eligible": facts.universe_eligible,
+        "within_5pct_recent_high": within_five_pct,
+    }
+    hash_payload = json.dumps(
+        {"gate_facts": gate_facts, "metrics": metrics, "provenance": provenance, "ticker": ticker},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    facts_hash = hashlib.sha256(hash_payload.encode()).hexdigest()
+    evaluation = SetupEvaluation(
+        ticker=ticker,
+        strategy_id=APPROVED_BREAKOUT_STRATEGY_ID,
+        strategy_version=APPROVED_BREAKOUT_STRATEGY_VERSION,
+        sector=sector,
+        passed=passed,
+        reason_code_version=2,
+        reason_codes=(terminal_reason,),
+        terminal_reason=terminal_reason,
+        evaluated_at=facts.evaluated_at,
+        metrics=metrics,
+        gate_facts=gate_facts,
+        source_fingerprint=facts.source_fingerprint,
+        provenance=provenance,
+        score_components={"relative_strength": rs_excess, "volume_confirmation": volume_ratio},
+    )
+    if not passed:
+        return ApprovedBreakoutResult(evaluation, None, None, None, facts_hash)
+    entry = close
+    stop = prior_high
+    target = entry + (entry - stop)
+    return ApprovedBreakoutResult(evaluation, entry, stop, target, facts_hash)
 
 
 @dataclass(frozen=True, slots=True)

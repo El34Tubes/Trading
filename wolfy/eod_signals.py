@@ -11,7 +11,7 @@ import argparse
 import hashlib
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -601,6 +601,49 @@ def _generate_liquid_rs_breakout(
         if not within_5pct_recent_high:
             continue
 
+        approved_adapter_result = None
+        if strategy_name == "liquid_rs_breakout_close_confirm_1r":
+            from orchestration_config import MID_SMALL_PIVOT_POLICY
+            from setup_evaluators import ApprovedBreakoutFacts, evaluate_approved_breakout
+
+            member = conn.execute(
+                """SELECT m.sector, m.facts_hash, m.snapshot_id
+                     FROM recommendation_universe_members AS m
+                     JOIN recommendation_universe_snapshots AS s ON s.snapshot_id=m.snapshot_id
+                    WHERE m.ticker=%s AND m.included AND s.signal_dt=%s
+                      AND s.policy_version=%s
+                    ORDER BY s.decision_at DESC, s.source_fingerprint DESC
+                    LIMIT 1""",
+                (ticker, signal_dt, MID_SMALL_PIVOT_POLICY.version),
+            ).fetchone()
+            if member is not None:
+                sector, member_facts_hash, snapshot_id = member
+                approved_adapter_result = evaluate_approved_breakout(
+                    ApprovedBreakoutFacts(
+                        ticker=ticker,
+                        sector=str(sector),
+                        evaluated_at=datetime.combine(signal_dt, datetime.max.time(), tzinfo=timezone.utc),
+                        universe_eligible=True,
+                        close=close_dec,
+                        high=high_dec,
+                        prior_five_high=prior_high_dec,
+                        prior_five_low=prior_low_dec,
+                        sma_fast=sma_fast,
+                        sma_slow=sma_slow,
+                        volume_ratio=vol_ratio_dec,
+                        atr=atr_dec,
+                        ticker_return_20d=ticker_return,
+                        spy_return_20d=spy_return,
+                        spy_close=spy_row[0],
+                        spy_sma_50=spy_sma,
+                        source_fingerprint=str(member_facts_hash),
+                        provenance={"universe_snapshot_id": str(snapshot_id)},
+                        benchmark_context={"IWM": {"role": "context_only"}, "MDY": {"role": "context_only"}},
+                    )
+                )
+                if not approved_adapter_result.evaluation.passed:
+                    continue
+
         options_volatility_facts: dict[str, Any] | None = None
         if require_options_volatility_setup:
             feature_row = conn.execute(
@@ -709,6 +752,20 @@ def _generate_liquid_rs_breakout(
             raw["option_liquidity_hard_gate"] = True
         if signal_metadata:
             raw.update(signal_metadata)
+        if approved_adapter_result is not None:
+            evaluation = approved_adapter_result.evaluation
+            raw["common_setup_evaluation"] = {
+                "facts_hash": approved_adapter_result.facts_hash,
+                "gate_facts": evaluation.gate_facts,
+                "reason_codes": evaluation.reason_codes,
+                "strategy_version": evaluation.strategy_version,
+            }
+            raw["common_setup_candidate_terms"] = {
+                "entry": approved_adapter_result.entry,
+                "stop": approved_adapter_result.stop,
+                "target": approved_adapter_result.target,
+                "score_components": evaluation.score_components,
+            }
         _upsert_signal(conn, ticker=ticker, signal_dt=signal_dt, strategy_id=strategy_id, direction="long", raw=raw)
         generated += 1
     return generated
