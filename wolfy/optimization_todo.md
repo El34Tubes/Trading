@@ -1,5 +1,16 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-19 daily optimizer plan-only run
+
+- Time: 2026-09-19 02:15 ET / 06:15 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block low_headroom_pct=13.50 threshold=15.00` (exit 1) with 173001 completed tokens against the 200000 cap, so this run remained PLAN-ONLY: deterministic review plus task/run/KPI/ledger state only; no code/config/cron/migration/strategy-approval/trading implementation.
+- Guardian/probation: no probation marker exists; production-home guardian returned `GUARDIAN=ok`; optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remain enabled, YAML/cron parsing and `hermes cron list/status` pass, the gateway is active, and no rollback was observed this run.
+- Prior review: HEAD `60969d4f3a1ebb2b5931c5f9748f09e64ff6d338` matches completed task `4151` / run `404722`, has ledger-only scope, passes `git show --check`, retains 25/25 KPI rows with provenance, and five guardian tests pass. Corrective task `4133` remains queued and unclaimed because the budget stop prohibits implementation.
+- State/KPI: plan-only task `4154` / run `406066`; exactly 25 KPI keys recorded with measured/carried-forward provenance. Decision-time capture: 173001 completed tokens, 13.50% daily-cap headroom, 2 completed tokenized runs today, core freshness 34/34 at common date 2026-09-17, depth readiness 1316/1358 at 495 bars, and trailing Wolfy run success 32/34.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: preserve decision-time budget evidence before accounting work, and escape literal `%` as `%%` in parameterized psycopg queries; the first KPI transaction failed closed and rolled back completely before the corrected 25-row transaction committed.
+- NEXT ACTION: after budget headroom recovers, execute queued task `4133` first—identify and isolate the remaining approved-strategy revalidation writer, then prove two repeated full suites leave `strategies`, `backtests`, `research_log`, and related governance state byte-equivalent.
+
 ## 2026-09-18 daily optimizer plan-only run
 
 - Time: 2026-09-18 02:16 ET / 06:16 UTC; outside all protected market/report windows.
