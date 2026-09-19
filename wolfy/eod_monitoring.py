@@ -14,6 +14,7 @@ This module is intentionally conservative:
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import os
 from collections.abc import Mapping
@@ -46,6 +47,31 @@ _CONSERVATIVE_SETUP_GATE_THRESHOLDS = {
     "min_median_mfe_r": "1.0",
     "oos_fraction": "0.25",
 }
+
+
+def govern_research_backtest(
+    *, current_status: str, strategy_id: str, gate_passed: bool, metadata: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Advance new sleeves at most to candidate without manufacturing approval."""
+    copied_metadata = deepcopy(dict(metadata))
+    if strategy_id == "close_confirmed_breakout_v1":
+        next_status = current_status
+    elif strategy_id in {
+        "mid_small_trend_pullback_reclaim_v1",
+        "mid_small_volatility_contraction_breakout_v1",
+    }:
+        next_status = "candidate" if gate_passed and current_status == "research_only" else current_status
+    else:
+        raise ValueError("strategy is outside the governed three-sleeve scope")
+    return {
+        "status": next_status,
+        "metadata": copied_metadata,
+        "gate_passed": bool(gate_passed),
+        "paper_publication_authorized": strategy_id == "close_confirmed_breakout_v1"
+        and current_status == "approved"
+        and copied_metadata.get("paper_recommendation_approval") is True,
+        "requires_explicit_user_approval": strategy_id != "close_confirmed_breakout_v1",
+    }
 
 
 def _parse_gate_count(value: Any) -> int | None:
