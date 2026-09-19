@@ -14,6 +14,22 @@ STRATEGY = "liquid_rs_breakout_aggressive_options_v2"
 SIGNAL_DT = date(2099, 2, 4)
 
 
+def test_vcp_research_sleeve_does_not_mutate_aggressive_v2_expression_policy():
+    from eod_signals import DEFAULT_STRATEGIES
+    from setup_evaluators import VCP_STRATEGY_ID
+
+    by_name = {row[0]: row for row in DEFAULT_STRATEGIES}
+    vcp = by_name[VCP_STRATEGY_ID]
+    aggressive = by_name[STRATEGY]
+
+    assert vcp[1] == "volatility_contraction_breakout"
+    assert vcp[2]["requires_option_chain_for_underlying_setup"] is False
+    assert vcp[2]["instrument_policy"] == "option_preferred_with_underlying_stock_fallback"
+    assert aggressive[1] == "rs_breakout_aggressive_options"
+    assert aggressive[2]["instrument_policy"] == "defined_risk_options_only"
+    assert aggressive[2]["equity_fallback"] is False
+
+
 def _seed_market(conn, ticker: str, *, include_feature: bool = True, include_breadth: bool = True) -> None:
     from eod_signals import seed_default_strategies
 

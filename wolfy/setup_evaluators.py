@@ -6,7 +6,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
@@ -25,6 +25,8 @@ APPROVED_BREAKOUT_STRATEGY_ID = "liquid_rs_breakout_close_confirm_1r"
 APPROVED_BREAKOUT_STRATEGY_VERSION = "approved-2026-08-03"
 TREND_PULLBACK_STRATEGY_ID = "mid_small_trend_pullback_reclaim_v1"
 TREND_PULLBACK_STRATEGY_VERSION = "research-v1"
+VCP_STRATEGY_ID = "mid_small_volatility_contraction_breakout_v1"
+VCP_STRATEGY_VERSION = "research-v1"
 _PULLBACK_RECLAIM_TRIGGERS = frozenset(
     {"close_above_20dma", "close_above_prior_day_high"}
 )
@@ -99,6 +101,43 @@ class TrendPullbackFacts:
 @dataclass(frozen=True, slots=True)
 class TrendPullbackResult:
     evaluation: "SetupEvaluation"
+    entry: Decimal | None
+    stop: Decimal | None
+    target: Decimal | None
+    facts_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class VolatilityContractionFacts:
+    """Point-in-time inputs to the research-only VCP breakout gate."""
+
+    ticker: str
+    sector: str
+    decision_at: datetime
+    evaluated_at: datetime
+    features_available_at: datetime
+    universe_eligible: bool
+    close: object
+    prior_consolidation_high: object
+    contraction_low: object
+    sma_50: object
+    sma_200: object
+    ticker_return_20d: object
+    pre_breakout_contraction_ratio: object
+    range_expansion_ratio: object
+    close_location_value: object
+    volume_percentile: object
+    event_landmine: bool
+    risk_veto: bool
+    benchmark_context: Mapping[str, Any]
+    source_fingerprint: str
+    provenance: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class VolatilityContractionResult:
+    evaluation: "SetupEvaluation"
+    underlying_setup_passed: bool
     entry: Decimal | None
     stop: Decimal | None
     target: Decimal | None
@@ -461,6 +500,151 @@ def evaluate_trend_pullback(facts: TrendPullbackFacts) -> TrendPullbackResult:
         return TrendPullbackResult(evaluation, None, None, None, facts_hash)
     target = close + (close - swing_low) * Decimal(2)
     return TrendPullbackResult(evaluation, close, swing_low, target, facts_hash)
+
+
+def evaluate_volatility_contraction(
+    facts: VolatilityContractionFacts,
+) -> VolatilityContractionResult:
+    """Evaluate an underlying VCP breakout independently of option availability."""
+    ticker = _text(facts.ticker, "ticker", uppercase=True)
+    sector = _text(facts.sector, "sector")
+    decision_at = _aware_datetime(facts.decision_at, "decision_at")
+    evaluated_at = _aware_datetime(facts.evaluated_at, "evaluated_at")
+    features_available_at = _aware_datetime(
+        facts.features_available_at, "features_available_at"
+    )
+    if features_available_at > decision_at:
+        raise SetupContractError("features were unavailable at decision time")
+    if decision_at - features_available_at > timedelta(days=1):
+        raise SetupContractError("features are stale at decision time")
+    if type(facts.universe_eligible) is not bool:
+        raise SetupContractError("universe_eligible must be boolean")
+    if type(facts.event_landmine) is not bool or type(facts.risk_veto) is not bool:
+        raise SetupContractError("event_landmine and risk_veto must be boolean")
+    provenance = _json_mapping(facts.provenance, "provenance")
+    benchmark_context = _benchmark_context(facts.benchmark_context, decision_at)
+
+    close = _decimal(facts.close, "close", positive=True)
+    prior_high = _decimal(
+        facts.prior_consolidation_high, "prior_consolidation_high", positive=True
+    )
+    contraction_low = _decimal(facts.contraction_low, "contraction_low", positive=True)
+    sma_50 = _decimal(facts.sma_50, "sma_50", positive=True)
+    sma_200 = _decimal(facts.sma_200, "sma_200", positive=True)
+    ticker_return = _decimal(facts.ticker_return_20d, "ticker_return_20d")
+    contraction = _decimal(
+        facts.pre_breakout_contraction_ratio,
+        "pre_breakout_contraction_ratio",
+        positive=True,
+    )
+    expansion = _decimal(
+        facts.range_expansion_ratio, "range_expansion_ratio", positive=True
+    )
+    close_location = _decimal(facts.close_location_value, "close_location_value")
+    volume_percentile = _decimal(facts.volume_percentile, "volume_percentile")
+    if not Decimal(0) <= close_location <= Decimal(1):
+        raise SetupContractError("close_location_value must be between zero and one")
+    if not Decimal(0) <= volume_percentile <= Decimal(1):
+        raise SetupContractError("volume_percentile must be between zero and one")
+    if contraction_low >= close:
+        raise SetupContractError("contraction_low must be below close")
+
+    benchmark_returns = tuple(
+        Decimal(observation["return_20d"])
+        for observation in benchmark_context.values()
+    )
+    strongest_benchmark_return = max(benchmark_returns)
+    trend_confirmed = close > sma_50 > sma_200
+    relative_strength_confirmed = ticker_return > strongest_benchmark_return
+    contraction_confirmed = contraction <= Decimal("0.75")
+    expansion_confirmed = (
+        expansion >= Decimal("1.50") and close_location >= Decimal("0.70")
+    )
+    volume_confirmed = volume_percentile >= Decimal("0.50")
+    breakout_confirmed = close > prior_high
+    stop_risk_pct = (close - contraction_low) / close
+    stop_valid = stop_risk_pct <= Decimal("0.08")
+    failures = (
+        (not facts.universe_eligible or facts.risk_veto, "security_ineligible"),
+        (facts.event_landmine, "event_landmine"),
+        (not trend_confirmed, "trend_failed"),
+        (not relative_strength_confirmed, "relative_strength_failed"),
+        (not contraction_confirmed, "volatility_contraction_failed"),
+        (not expansion_confirmed, "range_expansion_failed"),
+        (not volume_confirmed, "volume_failed"),
+        (not breakout_confirmed, "breakout_not_confirmed"),
+        (not stop_valid, "stop_risk_too_wide"),
+    )
+    terminal_reason = next((reason for failed, reason in failures if failed), "passed")
+    passed = terminal_reason == "passed"
+    metrics = {
+        "close_location_value": format(close_location, "f"),
+        "pre_breakout_contraction_ratio": format(contraction, "f"),
+        "range_expansion_ratio": format(expansion, "f"),
+        "relative_strength_excess": format(
+            ticker_return - strongest_benchmark_return, "f"
+        ),
+        "stop_risk_pct": str(stop_risk_pct),
+        "ticker_return_20d": format(ticker_return, "f"),
+        "volume_percentile": format(volume_percentile, "f"),
+    }
+    gate_facts = {
+        "benchmark_context": benchmark_context,
+        "benchmark_context_only": ["IWM", "MDY", "SPY"],
+        "breakout_confirmed": breakout_confirmed,
+        "event_landmine": facts.event_landmine,
+        "governance_status": "research_only",
+        "instrument_selection": "downstream_option_preferred_or_stock_fallback",
+        "range_expansion_confirmed": expansion_confirmed,
+        "relative_strength_confirmed": relative_strength_confirmed,
+        "risk_veto": facts.risk_veto,
+        "trend_confirmed": trend_confirmed,
+        "underlying_setup_passed": passed,
+        "universe_eligible": facts.universe_eligible,
+        "volatility_contraction_confirmed": contraction_confirmed,
+        "volume_confirmed": volume_confirmed,
+    }
+    hash_payload = json.dumps(
+        {
+            "decision_at": decision_at.isoformat(),
+            "gate_facts": gate_facts,
+            "metrics": metrics,
+            "provenance": provenance,
+            "ticker": ticker,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    facts_hash = hashlib.sha256(hash_payload.encode()).hexdigest()
+    evaluation = SetupEvaluation(
+        ticker=ticker,
+        strategy_id=VCP_STRATEGY_ID,
+        strategy_version=VCP_STRATEGY_VERSION,
+        sector=sector,
+        passed=passed,
+        reason_code_version=2,
+        reason_codes=(terminal_reason,),
+        terminal_reason=terminal_reason,
+        evaluated_at=evaluated_at,
+        metrics=metrics,
+        gate_facts=gate_facts,
+        source_fingerprint=facts.source_fingerprint,
+        provenance=provenance,
+        score_components={
+            "relative_strength": ticker_return - strongest_benchmark_return,
+            "range_expansion": expansion,
+            "volume_percentile": volume_percentile,
+            "volatility_contraction": Decimal(1) - contraction,
+        },
+    )
+    if not passed:
+        return VolatilityContractionResult(
+            evaluation, False, None, None, None, facts_hash
+        )
+    target = close + (close - contraction_low) * Decimal(2)
+    return VolatilityContractionResult(
+        evaluation, True, close, contraction_low, target, facts_hash
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -21,6 +21,27 @@ BROKER_WIDE_SPREAD_WARNING_FRACTION = Decimal("0.02")
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
 DEFAULT_STRATEGIES = (
     (
+        "mid_small_volatility_contraction_breakout_v1",
+        "volatility_contraction_breakout",
+        {
+            "source": "Wolfy mid/small-cap multi-strategy pivot 2026-09-17",
+            "strategy_version": "research-v1",
+            "requires_backtest": True,
+            "requires_explicit_user_approval": True,
+            "max_contraction_ratio": "0.75",
+            "min_range_expansion_ratio": "1.50",
+            "min_close_location_value": "0.70",
+            "min_volume_percentile": "0.50",
+            "trend_confirmation": "close_above_50dma_above_200dma",
+            "relative_strength_benchmarks": ["SPY", "IWM", "MDY"],
+            "max_stop_risk_pct": "0.08",
+            "target_r": "2.0",
+            "instrument_policy": "option_preferred_with_underlying_stock_fallback",
+            "requires_option_chain_for_underlying_setup": False,
+        },
+        "Seeded as research_only for underlying shadow evaluation; chain availability affects only downstream expression and explicit user approval is required before paper recommendations.",
+    ),
+    (
         "mid_small_trend_pullback_reclaim_v1",
         "trend_pullback_reclaim",
         {
