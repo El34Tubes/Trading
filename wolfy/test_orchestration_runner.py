@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+from decimal import Decimal
+import uuid
 
 from test_db import test_connection
 
@@ -184,3 +186,95 @@ def test_eod_signal_runner_stops_before_paper_lifecycle_on_signal_failure(monkey
 
     assert rc == 7
     assert lifecycle_called is False
+
+
+def test_mid_small_shadow_runner_uses_persisted_candidates_and_never_invokes_writer(monkeypatch):
+    import orchestration_runner
+    from daily_multi_strategy import SHADOW_STAGE_NAMES
+    from eod_readiness import EODReadiness, SourceMode
+    from option_chain_provider import OptionChainProviderUnavailable
+    from portfolio_allocator import PortfolioCandidate
+
+    snapshot_id = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    run_id = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    signal_dt = date(2099, 5, 1)
+    candidate = PortfolioCandidate(
+        candidate_id=uuid.uuid4(),
+        universe_snapshot_id=snapshot_id,
+        ticker="ZZORCH",
+        strategy_id="liquid_rs_breakout_close_confirm_1r",
+        strategy_version="approved-2026-08-03",
+        sector="Industrials",
+        score=Decimal("2"),
+        entry=Decimal("20"),
+        stop=Decimal("19"),
+        target=Decimal("22"),
+    )
+    readiness = EODReadiness(
+        expected_session=signal_dt,
+        latest_complete_session=signal_dt,
+        coverage_numerator=4,
+        coverage_denominator=4,
+        missing_symbols=(),
+        source_mode=SourceMode.FREE_T_PLUS_1,
+        publishable=True,
+        universe_snapshot_id=str(snapshot_id),
+        universe_policy_version="mid_small_multi_strategy_pivot_v1",
+        universe_source_fingerprint="a" * 64,
+        benchmark_coverage_numerator=3,
+        benchmark_coverage_denominator=3,
+        member_coverage_numerator=1,
+        member_coverage_denominator=1,
+    )
+    monkeypatch.setattr(
+        orchestration_runner,
+        "load_mid_small_portfolio_candidates",
+        lambda conn, selected_run_id: (candidate,),
+    )
+    monkeypatch.setattr(
+        orchestration_runner,
+        "load_mid_small_existing_positions",
+        lambda conn: (),
+    )
+
+    result = orchestration_runner.run_mid_small_shadow_orchestrator(
+        object(),
+        run_id=run_id,
+        signal_dt=signal_dt,
+        decision_at=datetime(2099, 5, 2, tzinfo=timezone.utc),
+        readiness=readiness,
+        account_equity=Decimal("10000"),
+        chain_acquirer=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OptionChainProviderUnavailable("offline")
+        ),
+    )
+
+    assert result.status == "shadow_complete"
+    assert result.stage_names == SHADOW_STAGE_NAMES
+    assert result.instrument_decisions[0].expression == "underlying_stock_fallback"
+    assert result.recommendations_created == 0
+    assert result.broker_orders_created == 0
+    assert result.external_deliveries == 0
+
+
+def test_mid_small_shadow_cli_accepts_only_bounded_shadow_controls():
+    from orchestration_runner import parse_mid_small_shadow_args
+
+    args = parse_mid_small_shadow_args(
+        [
+            "--shadow",
+            "--dry-run",
+            "--signal-dt",
+            "2099-05-01",
+            "--strategy",
+            "trend_pullback_reclaim",
+            "--tickers",
+            "AAA,BBB",
+        ]
+    )
+
+    assert args.shadow is True
+    assert args.dry_run is True
+    assert args.signal_dt == "2099-05-01"
+    assert args.strategy == ["trend_pullback_reclaim"]
+    assert args.tickers == "AAA,BBB"

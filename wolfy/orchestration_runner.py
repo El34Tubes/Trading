@@ -224,6 +224,264 @@ def eod_readiness_payload(readiness) -> dict:
     }
 
 
+def load_mid_small_portfolio_candidates(conn, run_id) -> tuple[object, ...]:
+    """Read immutable common-contract candidates for one daily run."""
+    import uuid
+
+    from portfolio_allocator import PortfolioCandidate
+
+    try:
+        canonical_run_id = uuid.UUID(str(run_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("run_id must be a UUID") from exc
+    rows = conn.execute(
+        """SELECT candidate_id,universe_snapshot_id,ticker,strategy_id,
+                  strategy_version,sector,score,entry,stop,target
+             FROM setup_candidates
+            WHERE run_id=%s
+            ORDER BY score DESC,ticker,strategy_id""",
+        (canonical_run_id,),
+    ).fetchall()
+    return tuple(
+        PortfolioCandidate(
+            candidate_id=uuid.UUID(str(row[0])),
+            universe_snapshot_id=uuid.UUID(str(row[1])),
+            ticker=row[2],
+            strategy_id=row[3],
+            strategy_version=row[4],
+            sector=row[5],
+            score=row[6],
+            entry=row[7],
+            stop=row[8],
+            target=row[9],
+        )
+        for row in rows
+    )
+
+
+def load_mid_small_existing_positions(conn) -> tuple[object, ...]:
+    """Read active paper positions for pure pre-allocation capacity accounting."""
+    from decimal import Decimal, InvalidOperation
+
+    from portfolio_allocator import ExistingPosition
+
+    rows = conn.execute(
+        """SELECT DISTINCT ON (ticker) ticker,
+                  coalesce(notes->>'sector','Unknown') AS sector,
+                  coalesce(notes->>'risk_fraction','0.05') AS risk_fraction
+             FROM recommendations
+            WHERE status IN ('paper_candidate','paper_logged')
+              AND notes->>'paper_only'='true'
+              AND notes->>'no_live_execution'='true'
+            ORDER BY ticker,id DESC"""
+    ).fetchall()
+    positions = []
+    for ticker, sector, raw_risk in rows:
+        try:
+            risk = Decimal(str(raw_risk))
+        except (InvalidOperation, ValueError, TypeError):
+            risk = Decimal("0.05")
+        if not risk.is_finite() or risk <= 0 or risk > Decimal("0.05"):
+            risk = Decimal("0.05")
+        positions.append(ExistingPosition(str(ticker).upper(), sector or "Unknown", risk))
+    return tuple(positions)
+
+
+def run_mid_small_shadow_orchestrator(
+    conn,
+    *,
+    run_id,
+    signal_dt: dt.date,
+    decision_at: dt.datetime,
+    readiness,
+    account_equity,
+    strategies: Sequence[str] = (
+        "close_confirmed_breakout",
+        "trend_pullback_reclaim",
+        "volatility_contraction_breakout",
+    ),
+    tickers: Sequence[str] = (),
+    dry_run: bool = True,
+    chain_acquirer=None,
+    ledger=None,
+):
+    """Run persisted setup candidates through every pre-release shadow stage."""
+    import uuid
+
+    from daily_multi_strategy import (
+        ShadowPipelineHooks,
+        ShadowPipelineRequest,
+        run_shadow_pipeline,
+    )
+    from option_chain_provider import acquire_option_chain_snapshot
+
+    snapshot_id = uuid.UUID(str(getattr(readiness, "universe_snapshot_id", "")))
+    fingerprint = str(getattr(readiness, "universe_source_fingerprint", ""))
+    request = ShadowPipelineRequest(
+        run_id=uuid.UUID(str(run_id)),
+        signal_dt=signal_dt,
+        decision_at=decision_at,
+        universe_snapshot_id=snapshot_id,
+        universe_fingerprint=fingerprint,
+        account_equity=account_equity,
+        strategies=tuple(strategies),
+        tickers=tuple(tickers),
+        dry_run=dry_run,
+        shadow=True,
+    )
+    acquire = chain_acquirer or acquire_option_chain_snapshot
+
+    def no_shadow_write(*_args, **_kwargs):
+        raise RuntimeError("recommendation writes are disabled in Task 21 shadow mode")
+
+    hooks = ShadowPipelineHooks(
+        readiness=lambda _request: readiness,
+        universe=lambda _request, _readiness: {
+            "snapshot_id": str(request.universe_snapshot_id),
+            "fingerprint": request.universe_fingerprint,
+        },
+        features=lambda _request, _universe: {
+            "readiness_verified": True,
+            "benchmark_coverage": getattr(readiness, "benchmark_coverage_numerator", 0),
+        },
+        evaluations=lambda _request, _universe, _features: load_mid_small_portfolio_candidates(
+            conn, run_id
+        ),
+        candidate_persistence=lambda _request, candidates: candidates,
+        existing_positions=lambda _request: load_mid_small_existing_positions(conn),
+        acquire_chain=lambda _request, candidate: acquire(
+            candidate.ticker,
+            signal_dt=signal_dt,
+            decision_at=decision_at,
+        ),
+        recommendation_writer=no_shadow_write,
+        outcomes=lambda _request, decisions, _dry_run: {
+            "read_only": True,
+            "decision_count": len(decisions),
+            "underlying_writes": 0,
+            "option_writes": 0,
+        },
+        summary=lambda _request, payload: {
+            "status": payload["status"],
+            "external_delivery": False,
+        },
+    )
+    return run_shadow_pipeline(request, hooks, ledger=ledger)
+
+
+def parse_mid_small_shadow_args(argv: Sequence[str] | None = None):
+    """Parse the bounded Task 21 CLI; no production/release switch exists."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Run Wolfy's mid/small-cap pipeline in paper-only shadow mode"
+    )
+    parser.add_argument("--shadow", action="store_true", default=True)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--signal-dt")
+    parser.add_argument("--strategy", action="append")
+    parser.add_argument("--tickers")
+    parser.add_argument("--run-id")
+    parser.add_argument("--account-equity", default="100000")
+    parser.add_argument(
+        "--dsn", default="dbname=wolfy_test user=root host=/var/run/postgresql"
+    )
+    return parser.parse_args(argv)
+
+
+def main_mid_small_shadow(argv: Sequence[str] | None = None) -> int:
+    """Execute the CLI against ``wolfy_test`` with zero publication/delivery."""
+    from dataclasses import asdict
+    from decimal import Decimal
+    import uuid
+
+    import psycopg
+
+    args = parse_mid_small_shadow_args(argv)
+    strategies = tuple(
+        args.strategy
+        or (
+            "close_confirmed_breakout",
+            "trend_pullback_reclaim",
+            "volatility_contraction_breakout",
+        )
+    )
+    tickers = tuple(parse_tickers(args.tickers, default=()))
+    with psycopg.connect(args.dsn) as conn:
+        database_row = conn.execute("SELECT current_database()").fetchone()
+        if database_row is None or database_row[0] != "wolfy_test":
+            raise RuntimeError(
+                "Task 21 shadow orchestrator is restricted to exact database wolfy_test"
+            )
+        decision_at = dt.datetime.now(dt.timezone.utc)
+        if args.signal_dt:
+            signal_dt = dt.date.fromisoformat(args.signal_dt)
+            readiness = evaluate_replay_eod_readiness(
+                conn,
+                tickers=tickers,
+                signal_dt=signal_dt,
+                decision_at=decision_at,
+            )
+        else:
+            readiness = evaluate_current_eod_readiness(
+                conn, tickers=tickers, decision_at=decision_at
+            )
+            signal_dt = readiness.expected_session
+        if not getattr(readiness, "universe_snapshot_id", None):
+            print(
+                json.dumps(
+                    {
+                        "status": "pipeline_incomplete",
+                        "paper_only": True,
+                        "no_live_execution": True,
+                        "broker_orders_created": 0,
+                        "external_deliveries": 0,
+                        "eod_readiness": eod_readiness_payload(readiness),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 3
+        if args.run_id:
+            run_id = uuid.UUID(args.run_id)
+        else:
+            row = conn.execute(
+                """SELECT id FROM daily_evaluation_runs
+                    WHERE target_session=%s AND universe_snapshot_id=%s
+                    ORDER BY created_at DESC,id DESC LIMIT 1""",
+                (signal_dt, readiness.universe_snapshot_id),
+            ).fetchone()
+            if row is None:
+                print(
+                    json.dumps(
+                        {
+                            "status": "pipeline_incomplete",
+                            "incomplete_reasons": ["daily_evaluation_run_missing"],
+                            "paper_only": True,
+                            "no_live_execution": True,
+                            "broker_orders_created": 0,
+                            "external_deliveries": 0,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 3
+            run_id = row[0]
+        result = run_mid_small_shadow_orchestrator(
+            conn,
+            run_id=run_id,
+            signal_dt=signal_dt,
+            decision_at=decision_at,
+            readiness=readiness,
+            account_equity=Decimal(args.account_equity),
+            strategies=strategies,
+            tickers=tickers,
+            dry_run=args.dry_run,
+        )
+    print(json.dumps(asdict(result), sort_keys=True, default=str))
+    return 0 if result.status in {"shadow_complete", "no_candidates", "allocation_blocked"} else 3
+
+
 def run_mid_small_underlying_shadow(
     conn,
     *,

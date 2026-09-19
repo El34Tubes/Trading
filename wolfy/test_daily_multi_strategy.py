@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import replace
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import uuid
+
+import pytest
 
 from eod_readiness import EODReadiness, SourceMode
 from test_db import test_connection
@@ -140,3 +143,172 @@ def test_zero_candidates_and_research_only_candidates_do_not_publish():
     assert empty["status"] == "no_candidates"
     assert blocked["status"] == "no_candidates"
     assert blocked["research_only_blocked"] == 1
+
+
+def _shadow_request(**overrides):
+    from daily_multi_strategy import ShadowPipelineRequest
+
+    values = {
+        "run_id": uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        "signal_dt": date(2099, 5, 1),
+        "decision_at": datetime(2099, 5, 2, 1, tzinfo=timezone.utc),
+        "universe_snapshot_id": SNAPSHOT_ID,
+        "universe_fingerprint": "a" * 64,
+        "account_equity": Decimal("10000"),
+        "strategies": (
+            "close_confirmed_breakout",
+            "trend_pullback_reclaim",
+            "volatility_contraction_breakout",
+        ),
+        "tickers": (),
+        "dry_run": False,
+        "shadow": True,
+    }
+    values.update(overrides)
+    return ShadowPipelineRequest(**values)
+
+
+def _shadow_hooks(events, *, candidates=None, readiness=None, chain_value=None, crash_once=None):
+    from daily_multi_strategy import ShadowPipelineHooks
+
+    candidate_rows = [_candidate()] if candidates is None else candidates
+    ready = _readiness() if readiness is None else readiness
+
+    def stage(name, value):
+        def invoke(_context, *args):
+            del args
+            events.append(name)
+            if crash_once == name and events.count(name) == 1:
+                raise RuntimeError(f"{name} crash")
+            return value
+
+        return invoke
+
+    def chains(_context, candidate):
+        events.append(f"chain:{candidate.ticker}")
+        if isinstance(chain_value, Exception):
+            raise chain_value
+        return chain_value
+
+    def forbidden_writer(*_args, **_kwargs):
+        raise AssertionError("shadow mode invoked recommendation writer")
+
+    return ShadowPipelineHooks(
+        readiness=stage("readiness", ready),
+        universe=stage(
+            "universe",
+            {"snapshot_id": str(SNAPSHOT_ID), "fingerprint": "a" * 64},
+        ),
+        features=stage("features", {"feature_rows": 1}),
+        evaluations=stage("evaluations", tuple(candidate_rows)),
+        existing_positions=stage("existing_positions", ()),
+        acquire_chain=chains,
+        recommendation_writer=forbidden_writer,
+        outcomes=stage("outcomes", {"underlying": 0, "option": 0}),
+        summary=stage("summary", "shadow summary"),
+    )
+
+
+def test_full_shadow_orchestrator_runs_all_stages_and_falls_back_on_chain_outage():
+    from daily_multi_strategy import ShadowStageLedger, run_shadow_pipeline
+    from option_chain_provider import OptionChainProviderUnavailable
+
+    events = []
+    ledger = ShadowStageLedger()
+    result = run_shadow_pipeline(
+        _shadow_request(),
+        _shadow_hooks(events, chain_value=OptionChainProviderUnavailable("offline")),
+        ledger=ledger,
+    )
+
+    assert result.status == "shadow_complete"
+    assert result.stage_names == (
+        "readiness",
+        "universe",
+        "features_context",
+        "setup_evaluations",
+        "candidate_persistence",
+        "allocation",
+        "finalist_chains",
+        "instrument_decisions",
+        "serialized_write",
+        "outcomes",
+        "summary",
+    )
+    assert result.instrument_decisions[0].expression == "underlying_stock_fallback"
+    assert result.instrument_decisions[0].fallback_reasons == ("option_chain_unavailable",)
+    assert result.recommendations_created == 0
+    assert result.broker_orders_created == 0
+    assert result.external_deliveries == 0
+    assert "serialized_write" not in events
+    assert ledger.read_back(result.run_id, result.input_fingerprint) == result.stage_names
+
+    completed_events = tuple(events)
+    rerun = run_shadow_pipeline(
+        _shadow_request(),
+        _shadow_hooks(events, chain_value=OptionChainProviderUnavailable("offline")),
+        ledger=ledger,
+    )
+    assert rerun == result
+    assert tuple(events) == completed_events
+
+
+def test_shadow_orchestrator_retries_after_stage_crash_and_rejects_conflicting_fingerprint():
+    from daily_multi_strategy import ShadowPipelineConflict, ShadowStageLedger, run_shadow_pipeline
+
+    events = []
+    ledger = ShadowStageLedger()
+    hooks = _shadow_hooks(events, crash_once="features")
+    request = _shadow_request()
+    with pytest.raises(RuntimeError, match="features crash"):
+        run_shadow_pipeline(request, hooks, ledger=ledger)
+
+    result = run_shadow_pipeline(request, hooks, ledger=ledger)
+    assert result.status == "shadow_complete"
+    assert events.count("readiness") == 1
+    assert events.count("universe") == 1
+    assert events.count("features") == 2
+
+    with pytest.raises(ShadowPipelineConflict, match="fingerprint"):
+        run_shadow_pipeline(
+            replace(request, account_equity=Decimal("11000")), hooks, ledger=ledger
+        )
+
+
+@pytest.mark.parametrize("mode", ["missing_readiness", "no_candidates", "allocation_blocked"])
+def test_shadow_orchestrator_handles_incomplete_empty_and_capacity_states(mode):
+    from daily_multi_strategy import ShadowStageLedger, run_shadow_pipeline
+    from portfolio_allocator import ExistingPosition
+
+    events = []
+    readiness = _readiness(publishable=False) if mode == "missing_readiness" else _readiness()
+    candidates = [] if mode == "no_candidates" else [_candidate()]
+    hooks = _shadow_hooks(events, candidates=candidates, readiness=readiness)
+    if mode == "allocation_blocked":
+        hooks = replace(
+            hooks,
+            existing_positions=lambda _context: tuple(
+                ExistingPosition(f"ZZ{i:02d}", f"Sector{i}") for i in range(20)
+            ),
+        )
+    result = run_shadow_pipeline(_shadow_request(), hooks, ledger=ShadowStageLedger())
+
+    expected = {
+        "missing_readiness": "pipeline_incomplete",
+        "no_candidates": "no_candidates",
+        "allocation_blocked": "allocation_blocked",
+    }
+    assert result.status == expected[mode]
+    assert result.recommendations_created == 0
+    assert result.broker_orders_created == 0
+
+
+def test_shadow_orchestrator_blocks_release_and_bounds_strategy_and_ticker_replay():
+    from daily_multi_strategy import ShadowPipelineValidationError
+
+    with pytest.raises(ShadowPipelineValidationError, match="shadow mode"):
+        replace(_shadow_request(), shadow=False)
+    with pytest.raises(ShadowPipelineValidationError, match="at most 20"):
+        replace(_shadow_request(), tickers=tuple(f"ZZ{i:02d}" for i in range(21)))
+    with pytest.raises(ShadowPipelineValidationError, match="strategy"):
+        replace(_shadow_request(), strategies=("industry_rotation",))
