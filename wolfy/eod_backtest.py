@@ -12,6 +12,8 @@ from decimal import Decimal
 from statistics import mean, median, pstdev
 from typing import Any, Sequence
 
+from portfolio_backtest import PortfolioBacktestCandidate, run_portfolio_backtest
+
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
 DEFAULT_SLIPPAGE_BPS = Decimal("10")
 DEFAULT_COMMISSION_PER_TRADE = Decimal("0")
@@ -360,6 +362,24 @@ def run_multi_strategy_backtest(
             "commission_per_trade": str(DEFAULT_COMMISSION_PER_TRADE),
         },
     }
+
+
+def run_portfolio_allocator_backtest(
+    candidates: Sequence[PortfolioBacktestCandidate],
+    *,
+    starting_equity: Decimal = Decimal("100000"),
+    bootstrap_samples: int = 1000,
+    block_days: int = 5,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Expose the chronological policy replay beside setup-native backtests."""
+    return run_portfolio_backtest(
+        candidates,
+        starting_equity=starting_equity,
+        bootstrap_samples=bootstrap_samples,
+        block_days=block_days,
+        seed=seed,
+    )
 
 
 def _json(value: dict) -> str:
