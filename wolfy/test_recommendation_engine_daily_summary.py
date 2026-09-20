@@ -146,3 +146,57 @@ def test_pivot_summary_rejects_false_safety_flags():
 
     assert "SAFETY BLOCKER" in report
     assert "NO TRADE" not in report
+
+
+def test_pivot_summary_labels_bounded_canary_and_rollback_state():
+    report = build_daily_summary(
+        _pivot_data(
+            "paper_canary_complete",
+            canary=True,
+            recommendations=[
+                {
+                    "ticker": "ABCD",
+                    "strategy": "liquid_rs_breakout_close_confirm_1r",
+                    "global_rank": 1,
+                    "sector": "Industrials",
+                    "entry": "20",
+                    "stop": "19",
+                    "target": "22",
+                    "risk_fraction": "0.05",
+                    "expression": "underlying_stock_fallback",
+                    "max_loss": "500",
+                    "fallback_reasons": ["option_chain_unavailable"],
+                }
+            ],
+            rollback_ready=True,
+            production_schedule_authorized=False,
+        )
+    )
+
+    assert "BOUNDED PAPER-ONLY CANARY" in report
+    assert "rollback ready: yes" in report
+    assert "scheduled publisher: disabled" in report
+    assert "live" not in report.lower().replace("no live execution", "")
+
+
+def test_pivot_summary_blocks_unsafe_canary_release_state():
+    report = build_daily_summary(
+        _pivot_data(
+            "paper_canary_complete",
+            canary=True,
+            rollback_ready=False,
+            production_schedule_authorized=True,
+        )
+    )
+
+    assert "SAFETY BLOCKER" in report
+    assert "BOUNDED PAPER-ONLY CANARY" not in report
+
+    omitted_flag = build_daily_summary(
+        _pivot_data(
+            "paper_canary_complete",
+            rollback_ready=True,
+            production_schedule_authorized=False,
+        )
+    )
+    assert "SAFETY BLOCKER" in omitted_flag

@@ -68,12 +68,19 @@ def _format_instrument(item: Mapping[str, Any]) -> str:
 def _build_pivot_summary(pivot: Mapping[str, Any]) -> str:
     """Render only actionable pivot output or a meaningful terminal/blocker state."""
     signal_dt = _value(pivot, "signal_dt", "unknown")
+    status = str(pivot.get("status") or "pipeline_incomplete")
     broker_orders = pivot.get("broker_orders_created")
+    canary_safety_ok = status != "paper_canary_complete" or (
+        pivot.get("canary") is True
+        and pivot.get("rollback_ready") is True
+        and pivot.get("production_schedule_authorized") is False
+    )
     safety_ok = (
         pivot.get("paper_only") is True
         and pivot.get("no_live_execution") is True
         and type(broker_orders) is int
         and broker_orders == 0
+        and canary_safety_ok
     )
     lines = [f"Wolfy mid/small-cap pivot — signal date: {signal_dt}"]
     if not safety_ok:
@@ -84,9 +91,16 @@ def _build_pivot_summary(pivot: Mapping[str, Any]) -> str:
         )
         return "\n".join(lines)
 
-    status = str(pivot.get("status") or "pipeline_incomplete")
     recommendations = _items(pivot.get("recommendations"))
     writer_blocked = _items(pivot.get("writer_blocked"))
+    if status == "paper_canary_complete" and pivot.get("canary") is True:
+        lines.append("BOUNDED PAPER-ONLY CANARY — approved breakout only")
+        lines.append(
+            "rollback ready: "
+            f"{'yes' if pivot.get('rollback_ready') is True else 'no'} | "
+            "scheduled publisher: "
+            f"{'enabled' if pivot.get('production_schedule_authorized') is True else 'disabled'}"
+        )
     if status == "pipeline_incomplete":
         reasons = _reasons(pivot.get("incomplete_reasons")) or ["unspecified_incomplete_stage"]
         lines.append(f"PIPELINE INCOMPLETE — {', '.join(reasons)}")

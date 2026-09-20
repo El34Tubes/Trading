@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Safe entrypoint for the Task 21 mid/small-cap shadow orchestrator."""
+"""Safe entrypoint for the mid/small-cap orchestrator.
+
+The command remains shadow-only by default. Task 23 canary authorization is an
+explicit in-process gate and never enables or creates a scheduled publisher.
+"""
 from __future__ import annotations
 
 from pathlib import Path

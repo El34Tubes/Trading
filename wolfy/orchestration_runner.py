@@ -8,10 +8,15 @@ EOD date/session handling.
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass, field as dataclass_field
+from decimal import Decimal, InvalidOperation
+import hashlib
 import json
+import re
 import subprocess
 import sys
-from typing import Sequence
+from typing import Callable, Mapping, Sequence
+import uuid
 
 from orchestration_config import (
     CORE_EOD_UNIVERSE,
@@ -23,6 +28,369 @@ from orchestration_config import (
     parse_tickers,
     tickers_csv,
 )
+
+
+MID_SMALL_PAPER_RELEASE_CONFIG_VERSION = "mid-small-paper-canary-v1"
+# Fail closed until a real, durable Task 22 exact-snapshot approval artifact is
+# reviewed and installed in a separate release change. The executable CLI
+# remains shadow-only; unit tests exercise the bounded callbacks with fakes.
+MID_SMALL_PRODUCTION_CANARY_ENABLED = False
+_CANONICAL_SHA256 = re.compile(r"[0-9a-f]{64}")
+_CANARY_STRATEGIES = ("close_confirmed_breakout",)
+
+
+class PaperCanaryGateError(RuntimeError):
+    """A release or canary invariant failed closed."""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperCanaryAuthorization:
+    """One-shot authorization; it never authorizes a scheduled publisher."""
+
+    snapshot_fingerprint: str
+    config_version: str
+    strategies: tuple[str, ...]
+    rollback_command: str
+    canary_authorized: bool = True
+    production_schedule_authorized: bool = False
+    max_new_recommendations: int = 20
+    paper_only: bool = True
+    no_live_execution: bool = True
+    _preflight_authorized: bool = dataclass_field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            _CANONICAL_SHA256.fullmatch(self.snapshot_fingerprint) is None
+            or self.config_version != MID_SMALL_PAPER_RELEASE_CONFIG_VERSION
+            or self.strategies != _CANARY_STRATEGIES
+            or not self.rollback_command
+            or self.canary_authorized is not True
+            or self.production_schedule_authorized is not False
+            or self.max_new_recommendations != 20
+            or self.paper_only is not True
+            or self.no_live_execution is not True
+        ):
+            raise PaperCanaryGateError("paper canary authorization is malformed")
+
+    @property
+    def scope_fingerprint(self) -> str:
+        payload = json.dumps(
+            {
+                "config_version": self.config_version,
+                "snapshot_fingerprint": self.snapshot_fingerprint,
+                "strategies": self.strategies,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class PaperCanaryResult:
+    status: str
+    snapshot_fingerprint: str
+    recommendations_created: int
+    idempotent_rerun: bool
+    rollback_ready: bool
+    production_schedule_authorized: bool = False
+    broker_orders_created: int = 0
+    paper_only: bool = True
+    no_live_execution: bool = True
+
+
+def authorize_mid_small_paper_canary(
+    *,
+    shadow_report,
+    snapshot_fingerprint: str,
+    release_enabled: bool,
+    config_version: str,
+    strategies: Sequence[str],
+    publisher_count: int,
+    rollback_command: str,
+) -> PaperCanaryAuthorization:
+    """Authorize one bounded paper canary from exact Task 22 evidence."""
+    from shadow_pivot_report import (
+        REQUIRED_SHADOW_SCENARIOS,
+        STRATEGY_SLEEVES,
+        ShadowReleaseReport,
+    )
+
+    if MID_SMALL_PRODUCTION_CANARY_ENABLED is not True:
+        raise PaperCanaryGateError(
+            "production canary disabled: durable Task 22 approval artifact is not installed"
+        )
+    if not isinstance(shadow_report, ShadowReleaseReport):
+        raise PaperCanaryGateError("exact Task 22 ShadowReleaseReport is required")
+    if release_enabled is not True:
+        raise PaperCanaryGateError("explicit paper canary release flag is required")
+    if config_version != MID_SMALL_PAPER_RELEASE_CONFIG_VERSION:
+        raise PaperCanaryGateError("reviewed paper canary config version is required")
+    if (
+        not isinstance(snapshot_fingerprint, str)
+        or _CANONICAL_SHA256.fullmatch(snapshot_fingerprint) is None
+        or shadow_report.snapshot_fingerprint != snapshot_fingerprint
+    ):
+        raise PaperCanaryGateError("Task 22 review must match the exact release snapshot")
+    if not (
+        shadow_report.approved is True
+        and shadow_report.task23_preflight_eligible is True
+        and shadow_report.production_activation_authorized is False
+        and shadow_report.production_baselines_unchanged is True
+        and shadow_report.paper_only is True
+        and shadow_report.no_live_execution is True
+        and shadow_report.strategy_sleeves == STRATEGY_SLEEVES
+        and shadow_report.replay_scenarios == REQUIRED_SHADOW_SCENARIOS
+        and not shadow_report.failure_reasons
+    ):
+        raise PaperCanaryGateError("Task 22 exact-snapshot release review did not pass")
+    if (
+        not isinstance(strategies, Sequence)
+        or isinstance(strategies, (str, bytes))
+        or tuple(strategies) != _CANARY_STRATEGIES
+    ):
+        raise PaperCanaryGateError("paper canary permits only the approved breakout sleeve")
+    if type(publisher_count) is not int or publisher_count != 1:
+        raise PaperCanaryGateError("exactly one existing publisher must be identified")
+    if not isinstance(rollback_command, str) or not rollback_command.strip():
+        raise PaperCanaryGateError("a non-destructive rollback command is required")
+    authorization = PaperCanaryAuthorization(
+        snapshot_fingerprint=snapshot_fingerprint,
+        config_version=config_version,
+        strategies=_CANARY_STRATEGIES,
+        rollback_command=rollback_command.strip(),
+    )
+    object.__setattr__(authorization, "_preflight_authorized", True)
+    return authorization
+
+
+def _nonnegative_canary_int(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PaperCanaryGateError(f"{field} must be a nonnegative integer")
+    return value
+
+
+def _canary_decimal(value: object, field: str) -> Decimal:
+    if isinstance(value, bool):
+        raise PaperCanaryGateError(f"{field} must be a finite decimal")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise PaperCanaryGateError(f"{field} must be a finite decimal") from exc
+    if not result.is_finite():
+        raise PaperCanaryGateError(f"{field} must be a finite decimal")
+    return result
+
+
+def _validate_scope(payload: Mapping[str, object], authorization: PaperCanaryAuthorization) -> None:
+    if (
+        payload.get("scope_fingerprint") != authorization.scope_fingerprint
+        or payload.get("snapshot_fingerprint") != authorization.snapshot_fingerprint
+        or payload.get("config_version") != authorization.config_version
+        or payload.get("strategies") != authorization.strategies
+    ):
+        raise PaperCanaryGateError("canary evidence is not bound to the authorized scope")
+
+
+def _recommendation_ids(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (tuple, list)):
+        raise PaperCanaryGateError("canary recommendation_ids are malformed")
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise PaperCanaryGateError("canary recommendation_ids are malformed")
+        try:
+            canonical = str(uuid.UUID(item))
+        except ValueError as exc:
+            raise PaperCanaryGateError("canary recommendation_ids must be UUIDs") from exc
+        if canonical != item:
+            raise PaperCanaryGateError("canary recommendation_ids must be canonical UUIDs")
+        normalized.append(canonical)
+    if len(set(normalized)) != len(normalized):
+        raise PaperCanaryGateError("canary recommendation_ids must be unique")
+    return tuple(normalized)
+
+
+def _result_fingerprint(
+    authorization: PaperCanaryAuthorization, recommendation_ids: tuple[str, ...]
+) -> str:
+    payload = json.dumps(
+        {
+            "recommendation_ids": recommendation_ids,
+            "scope_fingerprint": authorization.scope_fingerprint,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_canary_publication(
+    payload: object,
+    *,
+    authorization: PaperCanaryAuthorization,
+    rerun: bool,
+) -> tuple[Mapping[str, object], tuple[str, ...]]:
+    if not isinstance(payload, Mapping):
+        raise PaperCanaryGateError("canary publisher returned malformed evidence")
+    _validate_scope(payload, authorization)
+    for field, expected in (
+        ("status", "paper_canary_complete"),
+        ("paper_only", True),
+        ("no_live_execution", True),
+        ("broker_order_submitted", False),
+        ("broker_orders_created", 0),
+        ("external_deliveries", 0),
+        ("research_only_published", 0),
+    ):
+        if payload.get(field) != expected or type(payload.get(field)) is not type(expected):
+            raise PaperCanaryGateError(f"canary {field} invariant failed")
+    created = _nonnegative_canary_int(
+        payload.get("recommendations_created"), "recommendations_created"
+    )
+    if created > authorization.max_new_recommendations or (rerun and created != 0):
+        raise PaperCanaryGateError("canary idempotency/recommendation bound failed")
+    recommendation_ids = _recommendation_ids(payload.get("recommendation_ids"))
+    if len(recommendation_ids) > authorization.max_new_recommendations:
+        raise PaperCanaryGateError("canary durable recommendation bound failed")
+    if (not rerun and created != len(recommendation_ids)) or (rerun and created != 0):
+        raise PaperCanaryGateError("canary created count does not match durable IDs")
+    expected_fingerprint = _result_fingerprint(authorization, recommendation_ids)
+    if payload.get("result_fingerprint") != expected_fingerprint:
+        raise PaperCanaryGateError("canary result fingerprint was not derived from durable IDs")
+    return payload, recommendation_ids
+
+
+def _validate_canary_invariants(
+    payload: object,
+    authorization: PaperCanaryAuthorization,
+    recommendation_ids: tuple[str, ...],
+) -> None:
+    if not isinstance(payload, Mapping):
+        raise PaperCanaryGateError("canary read-back evidence is malformed")
+    _validate_scope(payload, authorization)
+    if _recommendation_ids(payload.get("recommendation_ids")) != recommendation_ids:
+        raise PaperCanaryGateError("canary durable recommendation read-back changed")
+    recommendation_strategies = payload.get("recommendation_strategies")
+    if not isinstance(recommendation_strategies, Mapping) or set(
+        recommendation_strategies
+    ) != set(recommendation_ids):
+        raise PaperCanaryGateError("canary strategy read-back is not bound to durable IDs")
+    if any(
+        strategy != "liquid_rs_breakout_close_confirm_1r"
+        for strategy in recommendation_strategies.values()
+    ):
+        raise PaperCanaryGateError("canary read-back contains a research-only strategy")
+    positions = _nonnegative_canary_int(payload.get("positions_total"), "positions_total")
+    sector = _nonnegative_canary_int(
+        payload.get("maximum_sector_positions"), "maximum_sector_positions"
+    )
+    risks = payload.get("risk_fractions")
+    if (
+        positions > 20
+        or sector > 5
+        or not isinstance(risks, (tuple, list))
+        or len(risks) != positions
+        or any(_canary_decimal(value, "risk_fractions") != Decimal("0.05") for value in risks)
+    ):
+        raise PaperCanaryGateError("canary position/sector/exact-risk invariant failed")
+    aggregate = _canary_decimal(payload.get("aggregate_risk"), "aggregate_risk")
+    if aggregate != Decimal("0.05") * positions or aggregate > Decimal("1"):
+        raise PaperCanaryGateError("canary aggregate_risk invariant failed")
+    for field, expected in (
+        ("instrument_provenance_or_fallback", True),
+        ("outcomes_linked", True),
+        ("paper_only", True),
+        ("no_live_execution", True),
+        ("broker_order_submitted", False),
+        ("broker_orders_created", 0),
+        ("research_only_published", 0),
+    ):
+        if payload.get(field) != expected or type(payload.get(field)) is not type(expected):
+            raise PaperCanaryGateError(f"canary read-back {field} invariant failed")
+
+
+def _execute_safe_rollback(
+    rollback: Callable[..., object],
+    authorization: PaperCanaryAuthorization,
+    *,
+    dry_run: bool,
+) -> None:
+    evidence = rollback(
+        authorization=authorization,
+        command=authorization.rollback_command,
+        dry_run=dry_run,
+    )
+    expected_enabled = True if dry_run else False
+    if not isinstance(evidence, Mapping) or not (
+        evidence.get("command") == authorization.rollback_command
+        and evidence.get("scope_fingerprint") == authorization.scope_fingerprint
+        and evidence.get("snapshot_fingerprint") == authorization.snapshot_fingerprint
+        and evidence.get("pivot_publisher_enabled") is expected_enabled
+        and evidence.get("previous_publisher_restored") is (not dry_run)
+        and evidence.get("previous_universe_restored") is (not dry_run)
+        and evidence.get("rows_deleted") == 0
+        and type(evidence.get("rows_deleted")) is int
+        and evidence.get("validated") is True
+    ):
+        raise PaperCanaryGateError("rollback evidence is unsafe or incomplete")
+
+
+def run_bounded_paper_canary(
+    authorization: PaperCanaryAuthorization,
+    *,
+    publish: Callable[..., object],
+    read_invariants: Callable[..., object],
+    rollback: Callable[..., object],
+) -> PaperCanaryResult:
+    """Run one paper-only canary and idempotent rerun, rolling back on failure."""
+    if MID_SMALL_PRODUCTION_CANARY_ENABLED is not True:
+        raise PaperCanaryGateError(
+            "production canary disabled: durable Task 22 approval artifact is not installed"
+        )
+    if (
+        not isinstance(authorization, PaperCanaryAuthorization)
+        or authorization._preflight_authorized is not True
+    ):
+        raise PaperCanaryGateError("valid preflight-minted paper canary authorization is required")
+    # Prove the configured rollback is recognized without changing publisher state.
+    _execute_safe_rollback(rollback, authorization, dry_run=True)
+    try:
+        first, first_ids = _validate_canary_publication(
+            publish(authorization=authorization, rerun=False),
+            authorization=authorization,
+            rerun=False,
+        )
+        second, second_ids = _validate_canary_publication(
+            publish(authorization=authorization, rerun=True),
+            authorization=authorization,
+            rerun=True,
+        )
+        if first_ids != second_ids:
+            raise PaperCanaryGateError("canary rerun durable IDs changed")
+        _validate_canary_invariants(
+            read_invariants(authorization=authorization), authorization, first_ids
+        )
+    except Exception as exc:
+        try:
+            _execute_safe_rollback(rollback, authorization, dry_run=False)
+        except Exception as rollback_exc:
+            raise PaperCanaryGateError(
+                f"canary failed and rollback could not be verified: {rollback_exc}"
+            ) from exc
+        if isinstance(exc, PaperCanaryGateError):
+            raise
+        raise PaperCanaryGateError(f"canary execution failed: {exc}") from exc
+    created = _nonnegative_canary_int(
+        first["recommendations_created"], "recommendations_created"
+    )
+    return PaperCanaryResult(
+        status="paper_canary_complete",
+        snapshot_fingerprint=authorization.snapshot_fingerprint,
+        recommendations_created=created,
+        idempotent_rerun=True,
+        rollback_ready=True,
+    )
 
 
 def eod_price_features_command(

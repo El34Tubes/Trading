@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import uuid
+
+import pytest
 
 from test_db import test_connection
 
@@ -278,3 +281,295 @@ def test_mid_small_shadow_cli_accepts_only_bounded_shadow_controls():
     assert args.signal_dt == "2099-05-01"
     assert args.strategy == ["trend_pullback_reclaim"]
     assert args.tickers == "AAA,BBB"
+
+
+def _approved_shadow_release(snapshot: str):
+    from shadow_pivot_report import ShadowReleaseReport
+
+    return ShadowReleaseReport(
+        snapshot_fingerprint=snapshot,
+        approved=True,
+        task23_preflight_eligible=True,
+        production_activation_authorized=False,
+        production_baselines_unchanged=True,
+        failure_reasons=(),
+        replay_scenarios=(
+            "ordinary",
+            "no_signal",
+            "chain_unavailable",
+            "sector_concentrated",
+            "near_cap",
+        ),
+    )
+
+
+def test_paper_canary_preflight_requires_explicit_exact_release_and_breakout_only(monkeypatch):
+    import orchestration_runner
+
+    from orchestration_runner import (
+        MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        PaperCanaryGateError,
+        authorize_mid_small_paper_canary,
+    )
+
+    snapshot = "a" * 64
+    report = _approved_shadow_release(snapshot)
+    kwargs = {
+        "shadow_report": report,
+        "snapshot_fingerprint": snapshot,
+        "release_enabled": True,
+        "config_version": MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        "strategies": ("close_confirmed_breakout",),
+        "publisher_count": 1,
+        "rollback_command": "restore_previous_publisher",
+    }
+
+    with pytest.raises(PaperCanaryGateError, match="durable Task 22 approval artifact"):
+        authorize_mid_small_paper_canary(**kwargs)
+
+    monkeypatch.setattr(orchestration_runner, "MID_SMALL_PRODUCTION_CANARY_ENABLED", True)
+    authorization = authorize_mid_small_paper_canary(**kwargs)
+    assert authorization.strategies == ("close_confirmed_breakout",)
+    assert authorization.production_schedule_authorized is False
+    assert authorization.paper_only is True
+    assert authorization.no_live_execution is True
+
+    with pytest.raises(PaperCanaryGateError, match="approved breakout"):
+        authorize_mid_small_paper_canary(
+            **{**kwargs, "strategies": ("trend_pullback_reclaim",)}
+        )
+    with pytest.raises(PaperCanaryGateError, match="exactly one existing publisher"):
+        authorize_mid_small_paper_canary(**{**kwargs, "publisher_count": 2})
+
+
+def test_paper_canary_execution_rejects_authorization_not_minted_by_preflight(monkeypatch):
+    import orchestration_runner
+    from orchestration_runner import (
+        MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        PaperCanaryAuthorization,
+        PaperCanaryGateError,
+        run_bounded_paper_canary,
+    )
+
+    forged = PaperCanaryAuthorization(
+        snapshot_fingerprint="d" * 64,
+        config_version=MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        strategies=("close_confirmed_breakout",),
+        rollback_command="restore_previous_publisher",
+    )
+    monkeypatch.setattr(orchestration_runner, "MID_SMALL_PRODUCTION_CANARY_ENABLED", True)
+    with pytest.raises(PaperCanaryGateError, match="preflight-minted"):
+        run_bounded_paper_canary(
+            forged,
+            publish=lambda **_kwargs: pytest.fail("publisher must not run"),
+            read_invariants=lambda **_kwargs: pytest.fail("read-back must not run"),
+            rollback=lambda **_kwargs: pytest.fail("rollback must not run"),
+        )
+
+
+def test_bounded_paper_canary_runs_once_reruns_idempotently_and_never_schedules(monkeypatch):
+    import orchestration_runner
+
+    from orchestration_runner import (
+        MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        run_bounded_paper_canary,
+    )
+
+    snapshot = "c" * 64
+    monkeypatch.setattr(orchestration_runner, "MID_SMALL_PRODUCTION_CANARY_ENABLED", True)
+    authorization = orchestration_runner.authorize_mid_small_paper_canary(
+        shadow_report=_approved_shadow_release(snapshot),
+        snapshot_fingerprint=snapshot,
+        release_enabled=True,
+        config_version=MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        strategies=("close_confirmed_breakout",),
+        publisher_count=1,
+        rollback_command="restore_previous_publisher",
+    )
+    calls = []
+    recommendation_ids = ("11111111-1111-4111-8111-111111111111",)
+
+    def publication(authorization, *, created):
+        result_material = json.dumps(
+            {
+                "recommendation_ids": recommendation_ids,
+                "scope_fingerprint": authorization.scope_fingerprint,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return {
+            "status": "paper_canary_complete",
+            "recommendations_created": created,
+            "recommendation_ids": recommendation_ids,
+            "result_fingerprint": hashlib.sha256(result_material).hexdigest(),
+            "scope_fingerprint": authorization.scope_fingerprint,
+            "snapshot_fingerprint": authorization.snapshot_fingerprint,
+            "config_version": authorization.config_version,
+            "strategies": authorization.strategies,
+            "research_only_published": 0,
+            "paper_only": True,
+            "no_live_execution": True,
+            "broker_order_submitted": False,
+            "broker_orders_created": 0,
+            "external_deliveries": 0,
+        }
+
+    def publish(*, authorization, rerun: bool):
+        calls.append(rerun)
+        return publication(authorization, created=0 if rerun else 1)
+
+    def read_invariants(*, authorization):
+        return {
+            "scope_fingerprint": authorization.scope_fingerprint,
+            "snapshot_fingerprint": authorization.snapshot_fingerprint,
+            "config_version": authorization.config_version,
+            "strategies": authorization.strategies,
+            "recommendation_ids": recommendation_ids,
+            "recommendation_strategies": {
+                recommendation_ids[0]: "liquid_rs_breakout_close_confirm_1r"
+            },
+            "positions_total": 20,
+            "maximum_sector_positions": 5,
+            "risk_fractions": ("0.05",) * 20,
+            "aggregate_risk": "1.00",
+            "instrument_provenance_or_fallback": True,
+            "outcomes_linked": True,
+            "research_only_published": 0,
+            "paper_only": True,
+            "no_live_execution": True,
+            "broker_order_submitted": False,
+            "broker_orders_created": 0,
+        }
+
+    def rollback(*, authorization, command, dry_run):
+        assert command == authorization.rollback_command
+        return {
+            "command": command,
+            "scope_fingerprint": authorization.scope_fingerprint,
+            "snapshot_fingerprint": authorization.snapshot_fingerprint,
+            "pivot_publisher_enabled": dry_run,
+            "previous_publisher_restored": not dry_run,
+            "previous_universe_restored": not dry_run,
+            "rows_deleted": 0,
+            "validated": True,
+        }
+
+    monkeypatch.setattr(orchestration_runner, "MID_SMALL_PRODUCTION_CANARY_ENABLED", True)
+    result = run_bounded_paper_canary(
+        authorization,
+        publish=publish,
+        read_invariants=read_invariants,
+        rollback=rollback,
+    )
+
+    assert calls == [False, True]
+    assert result.status == "paper_canary_complete"
+    assert result.idempotent_rerun is True
+    assert result.rollback_ready is True
+    assert result.production_schedule_authorized is False
+    assert result.broker_orders_created == 0
+
+
+def test_paper_canary_safety_failure_rolls_back_without_deleting_audit_rows(monkeypatch):
+    import orchestration_runner
+
+    from orchestration_runner import (
+        MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        PaperCanaryGateError,
+        run_bounded_paper_canary,
+    )
+
+    snapshot = "e" * 64
+    monkeypatch.setattr(orchestration_runner, "MID_SMALL_PRODUCTION_CANARY_ENABLED", True)
+    authorization = orchestration_runner.authorize_mid_small_paper_canary(
+        shadow_report=_approved_shadow_release(snapshot),
+        snapshot_fingerprint=snapshot,
+        release_enabled=True,
+        config_version=MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        strategies=("close_confirmed_breakout",),
+        publisher_count=1,
+        rollback_command="restore_previous_publisher",
+    )
+    rollback_calls = []
+
+    def rollback(*, authorization, command, dry_run):
+        rollback_calls.append(dry_run)
+        return {
+            "command": command,
+            "scope_fingerprint": authorization.scope_fingerprint,
+            "snapshot_fingerprint": authorization.snapshot_fingerprint,
+            "pivot_publisher_enabled": dry_run,
+            "previous_publisher_restored": not dry_run,
+            "previous_universe_restored": not dry_run,
+            "rows_deleted": 0,
+            "validated": True,
+        }
+
+    def unsafe_publish(*, authorization, rerun):
+        del rerun
+        recommendation_ids = ("22222222-2222-4222-8222-222222222222",)
+        material = json.dumps(
+            {
+                "recommendation_ids": recommendation_ids,
+                "scope_fingerprint": authorization.scope_fingerprint,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return {
+            "status": "paper_canary_complete",
+            "recommendations_created": 1,
+            "recommendation_ids": recommendation_ids,
+            "result_fingerprint": hashlib.sha256(material).hexdigest(),
+            "scope_fingerprint": authorization.scope_fingerprint,
+            "snapshot_fingerprint": authorization.snapshot_fingerprint,
+            "config_version": authorization.config_version,
+            "strategies": authorization.strategies,
+            "research_only_published": 0,
+            "paper_only": True,
+            "no_live_execution": True,
+            "broker_order_submitted": False,
+            "broker_orders_created": 1,
+            "external_deliveries": 0,
+        }
+
+    monkeypatch.setattr(orchestration_runner, "MID_SMALL_PRODUCTION_CANARY_ENABLED", True)
+    with pytest.raises(PaperCanaryGateError, match="broker_orders_created"):
+        run_bounded_paper_canary(
+            authorization,
+            publish=unsafe_publish,
+            read_invariants=lambda **_kwargs: {},
+            rollback=rollback,
+        )
+    assert rollback_calls == [True, False]
+
+
+def test_paper_canary_rollback_requires_previous_universe_restoration():
+    from orchestration_runner import (
+        MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        PaperCanaryAuthorization,
+        PaperCanaryGateError,
+        _execute_safe_rollback,
+    )
+
+    authorization = PaperCanaryAuthorization(
+        snapshot_fingerprint="f" * 64,
+        config_version=MID_SMALL_PAPER_RELEASE_CONFIG_VERSION,
+        strategies=("close_confirmed_breakout",),
+        rollback_command="restore_previous_publisher",
+    )
+
+    def incomplete_rollback(*, authorization, command, dry_run):
+        return {
+            "command": command,
+            "scope_fingerprint": authorization.scope_fingerprint,
+            "snapshot_fingerprint": authorization.snapshot_fingerprint,
+            "pivot_publisher_enabled": dry_run,
+            "previous_publisher_restored": not dry_run,
+            "rows_deleted": 0,
+            "validated": True,
+        }
+
+    with pytest.raises(PaperCanaryGateError, match="rollback evidence"):
+        _execute_safe_rollback(incomplete_rollback, authorization, dry_run=False)
