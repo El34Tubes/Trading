@@ -1,5 +1,16 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-20 daily optimizer plan-only run
+
+- Time: 2026-09-20 02:17 ET / 06:17 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=292616 cap=200000` (exit 1), so this run remained PLAN-ONLY: deterministic review plus task/run/KPI/ledger state only; no code/config/cron/migration/strategy-approval/trading implementation.
+- Guardian/probation: no probation marker exists; production-home guardian returned `GUARDIAN=ok`; optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remain enabled, YAML/cron parsing and `hermes cron list/status` pass, and the gateway is active.
+- Prior review: HEAD `891d5a0888660536078fbe39c62fae84a708a55e` matches completed task `4154` / run `406066`, has ledger-only scope, passes `git show --check`, retains 25/25 KPI rows with provenance, and five guardian tests pass. Corrective task `4133` remains queued and unclaimed because the budget stop prohibits implementation.
+- State/KPI: plan-only task `4167` / run `406888`; exactly 25 KPI keys recorded with measured/carried-forward provenance. Decision-time capture: 292616 completed tokens, 0% daily-cap headroom, 3 completed tokenized runs today, core freshness 34/34 at common date 2026-09-17, depth readiness 1316/1358 at 495 bars, and trailing Wolfy run success 18/20.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: budget-gated closure must resolve the prior task by exact HEAD/fingerprint because its task type is `optimizer_plan_only`, not the older `optimization_plan_only` spelling; preserve token-cap evidence and do not claim corrective task `4133` while blocked.
+- NEXT ACTION: after budget headroom recovers, execute queued task `4133` first—identify and isolate the remaining approved-strategy revalidation writer, then prove two repeated full suites leave `strategies`, `backtests`, `research_log`, and related governance state byte-equivalent.
+
 ## 2026-09-19 daily optimizer plan-only run
 
 - Time: 2026-09-19 02:15 ET / 06:15 UTC; outside all protected market/report windows.
