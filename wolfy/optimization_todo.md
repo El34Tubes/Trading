@@ -1,5 +1,16 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-09-30 daily optimizer plan-only run
+
+- Time: 2026-09-30 02:16 ET / 06:16 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=222210 cap=200000` (exit 1), so this run remained PLAN-ONLY: deterministic review plus task/run/KPI/ledger state only; no code/config/cron/migration/strategy-approval/trading implementation.
+- Guardian/probation: no probation marker exists; production-home guardian returned `GUARDIAN=ok`; optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remain enabled, YAML/cron parsing and `hermes cron list/status` pass, and the gateway is active.
+- Prior review: HEAD `ae17feb524ba18b7bb9661a4dfc09e717f8cea07` matches completed task `4204` / run `412174`, has ledger-only scope, passes `git show --check`, retains 25/25 KPI rows with measured/carried-forward provenance, and five config-guardian tests pass. Corrective task `4133` remains queued and unclaimed because the budget stop prohibits implementation.
+- State/KPI: plan-only task `4206` / run `412563`; exactly 25 KPI keys recorded with measured/carried-forward provenance. Decision-time capture: 222210 tokens against the 200000 daily cap, 2 completed tokenized runs today, core freshness 34/34 at common date 2026-09-28, depth readiness 1320/1358 at 495 bars, and trailing Wolfy run success 12/12.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: the deterministic daily token cap remains an absolute implementation stop; preserve the exact decision-time gate output, keep task `4133` queued and unclaimed, and do not infer implementation budget from otherwise healthy control-plane checks.
+- Next action: when deterministic headroom recovers, execute queued Tier S task `4133` to isolate remaining approved-strategy revalidation writes and prove protected Postgres tables byte-equivalent across repeated full suites.
+
 ## 2026-09-29 daily optimizer plan-only run
 
 - Time: 2026-09-29 02:16 ET / 06:16 UTC; outside all protected market/report windows.
