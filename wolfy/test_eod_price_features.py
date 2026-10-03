@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from test_db import future_fixture, test_connection
+from test_db import future_fixture, resolve_test_dsn, test_connection
 
 
 def test_default_massive_eod_end_dt_uses_previous_business_day(monkeypatch):
@@ -283,7 +283,7 @@ def test_incremental_massive_plan_refetches_full_history_after_split(monkeypatch
     psycopg = pytest.importorskip("psycopg")
     from eod_price_features import PriceBar, _fetch_incremental_massive_bars, ensure_eod_feature_schema, ingest_price_bars, validate_price_data_quality
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    dsn = resolve_test_dsn()
     ticker = "ZZSPLITAPI"
     end_dt = date(2026, 7, 20)
     days = 730
@@ -384,7 +384,7 @@ def test_massive_ingest_records_completed_split_refetch(monkeypatch):
     psycopg = pytest.importorskip("psycopg")
     from eod_price_features import PriceBar, ensure_eod_feature_schema, massive_ingest
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    dsn = resolve_test_dsn()
     ticker = "ZZSPLITMARKER"
     end_dt = date(2026, 7, 20)
     split_dt = "2026-07-15"
