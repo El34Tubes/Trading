@@ -192,6 +192,35 @@ class PivotRecommendationWriteResult:
     broker_orders_created: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class ProductionPaperScope:
+    """Exact paper-only capability minted by the Task 23 release adapter."""
+
+    scope_fingerprint: str
+    snapshot_id: uuid.UUID
+    strategy_id: str
+    strategy_version: str
+    paper_only: bool = True
+    no_live_execution: bool = True
+    broker_execution_enabled: bool = False
+    external_delivery_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.scope_fingerprint, str)
+            or len(self.scope_fingerprint) != 64
+            or any(ch not in "0123456789abcdef" for ch in self.scope_fingerprint)
+            or not isinstance(self.snapshot_id, uuid.UUID)
+            or self.strategy_id != "liquid_rs_breakout_close_confirm_1r"
+            or self.strategy_version != "approved-2026-08-03"
+            or self.paper_only is not True
+            or self.no_live_execution is not True
+            or self.broker_execution_enabled is not False
+            or self.external_delivery_enabled is not False
+        ):
+            raise ValueError("production paper scope is malformed or unsafe")
+
+
 def _finite_positive_decimal(value: object, field: str) -> Decimal:
     if isinstance(value, bool):
         raise ValueError(f"{field} must be a finite positive decimal")
@@ -495,6 +524,7 @@ def write_pivot_instrument_recommendations(
     recommendations: Sequence[PivotInstrumentRecommendation],
     signal_dt: date,
     dry_run: bool,
+    production_scope: ProductionPaperScope | None = None,
 ) -> PivotRecommendationWriteResult:
     """Persist selected exact instruments and their paper ledger rows atomically.
 
@@ -514,10 +544,21 @@ def write_pivot_instrument_recommendations(
     ]
     if len(set(identities)) != len(identities):
         raise ValueError("recommendations contain duplicate ticker/strategy identities")
+    if production_scope is not None:
+        for item in recommendations:
+            source = item.allocation.candidate
+            if (
+                source.universe_snapshot_id != production_scope.snapshot_id
+                or source.strategy_id != production_scope.strategy_id
+                or source.strategy_version != production_scope.strategy_version
+            ):
+                raise ValueError("recommendation is outside the exact production paper scope")
     if not dry_run:
         database = conn.execute("SELECT current_database()").fetchone()[0]
-        if database != "wolfy_test":
-            raise RuntimeError("pivot recommendation publication is disabled outside wolfy_test")
+        permitted = database == "wolfy_test" and production_scope is None
+        permitted = permitted or (database == "wolfy" and production_scope is not None)
+        if not permitted:
+            raise RuntimeError("pivot recommendation publication is disabled for this database/scope")
     for item in recommendations:
         _validate_pivot_database_bindings(conn, item=item, signal_dt=signal_dt)
 
@@ -569,6 +610,9 @@ def write_pivot_instrument_recommendations(
             "long_leg": long_leg,
             "short_leg": short_leg,
             "fallback_reasons": list(decision.fallback_reasons),
+            "production_release_scope": (
+                production_scope.scope_fingerprint if production_scope is not None else None
+            ),
             "source_signal": {
                 "close": str(source.entry),
                 "invalidation": str(source.stop),
