@@ -62,6 +62,8 @@ def _fetch_future_bars(conn, ticker: str, *, entry_date: date, as_of: date, max_
 
 
 def _exit_price(entry: Decimal, stop: Decimal, target: Decimal, outcome: Mapping[str, Any], future_bars: Sequence[Mapping[str, Any]]) -> Decimal | None:
+    if outcome.get("exit_price") is not None:
+        return _dec(outcome.get("exit_price"))
     if outcome.get("hit_target"):
         return target
     if outcome.get("hit_stop"):
@@ -71,6 +73,62 @@ def _exit_price(entry: Decimal, stop: Decimal, target: Decimal, outcome: Mapping
         if str(bar.get("dt")) == str(exit_dt):
             return _dec(bar.get("close"), entry)
     return None
+
+
+def _evaluate_next_session_outcome(
+    *,
+    signal_dt: date,
+    reference_entry: Decimal,
+    stop: Decimal,
+    target: Decimal,
+    future_bars: Sequence[Mapping[str, Any]],
+    max_hold_days: int,
+    stop_mode: str,
+) -> tuple[Decimal, dict[str, Any]]:
+    """Use the next session open and reject unsafe gaps before grading bars."""
+    first_open = _dec(future_bars[0].get("open"))
+    first_dt = future_bars[0].get("dt")
+    if first_open <= stop:
+        return reference_entry, {
+            "classification": "gap_below_stop_no_entry",
+            "entry_triggered": False,
+            "hit_target": False,
+            "hit_stop": False,
+            "mfe_r": "0",
+            "mae_r": "0",
+            "mfe_pct": "0",
+            "mae_pct": "0",
+            "exit_dt": first_dt.isoformat(),
+            "exit_price": str(first_open),
+            "exit_reason": "gap_below_stop_no_entry",
+        }
+    if first_open >= target:
+        return reference_entry, {
+            "classification": "gap_above_target_no_entry",
+            "entry_triggered": False,
+            "hit_target": False,
+            "hit_stop": False,
+            "mfe_r": "0",
+            "mae_r": "0",
+            "mfe_pct": "0",
+            "mae_pct": "0",
+            "exit_dt": first_dt.isoformat(),
+            "exit_price": str(first_open),
+            "exit_reason": "gap_above_target_no_entry",
+        }
+    target_r = (target - first_open) / (first_open - stop)
+    outcome = evaluate_underlying_setup_outcome(
+        signal_dt=signal_dt,
+        entry=first_open,
+        stop=stop,
+        future_bars=future_bars,
+        target_r=target_r,
+        max_hold_days=max_hold_days,
+        stop_mode=stop_mode,
+    )
+    outcome["entry_triggered"] = True
+    outcome["actual_entry"] = str(first_open)
+    return first_open, outcome
 
 
 def _canonical_exit_reason(outcome: Mapping[str, Any], target_r: Decimal) -> str:
@@ -105,7 +163,11 @@ def review_open_paper_trade_setups(
     trades when target/stop/time-horizon outcome is known; it does not execute,
     cancel, or route real broker orders.
     """
-    ensure_paper_trade_metric_columns(conn)
+    database = conn.execute("SELECT current_database()").fetchone()[0]
+    if not dry_run and database != "wolfy_test":
+        raise RuntimeError("pivot outcome writes are disabled outside wolfy_test")
+    if database == "wolfy_test":
+        ensure_paper_trade_metric_columns(conn)
     params: list[Any] = [as_of]
     scope_clause = ""
     if tickers is not None:
@@ -136,14 +198,24 @@ def review_open_paper_trade_setups(
             skipped_existing += 1
             reviewed.append({"paper_trade_id": str(trade_id), "ticker": str(ticker), "status": "existing"})
             continue
-        if entry_price is None or stop_price is None or target_price is None or quantity is None:
+        rec_payload = rec_notes if isinstance(rec_notes, Mapping) else {}
+        source_signal = rec_payload.get("source_signal")
+        source_signal = source_signal if isinstance(source_signal, Mapping) else {}
+        instrument_expression = str(
+            rec_payload.get("instrument_expression")
+            or (trade_notes.get("instrument_expression") if isinstance(trade_notes, Mapping) else "")
+            or "underlying_stock_fallback"
+        )
+        reference_entry_raw = source_signal.get("close", entry_price)
+        stop_raw = source_signal.get("invalidation", stop_price)
+        target_raw = source_signal.get("target", target_price)
+        if reference_entry_raw is None or stop_raw is None or target_raw is None:
             blocked_incomplete += 1
             reviewed.append({"paper_trade_id": str(trade_id), "ticker": str(ticker), "status": "blocked_incomplete"})
             continue
-        entry = _dec(entry_price)
-        stop = _dec(stop_price)
-        target = _dec(target_price)
-        qty = _dec(quantity)
+        entry = _dec(reference_entry_raw)
+        stop = _dec(stop_raw)
+        target = _dec(target_raw)
         try:
             tr = _target_r(entry, stop, target)
         except ValueError:
@@ -155,31 +227,50 @@ def review_open_paper_trade_setups(
             blocked_incomplete += 1
             reviewed.append({"paper_trade_id": str(trade_id), "ticker": str(ticker), "status": "blocked_no_future_bars"})
             continue
-        outcome = evaluate_underlying_setup_outcome(
+        actual_entry, outcome = _evaluate_next_session_outcome(
             signal_dt=entry_dt,
-            entry=entry,
+            reference_entry=entry,
             stop=stop,
+            target=target,
             future_bars=future_bars,
-            target_r=tr,
             max_hold_days=max_hold_days,
-            stop_mode="close_below" if (rec_notes or {}).get("stop_rule") == "close_below_breakout_level" else "intrabar_low",
+            stop_mode="close_below" if rec_payload.get("stop_rule") == "close_below_breakout_level" else "intrabar_low",
         )
         exit_reason = _canonical_exit_reason(outcome, tr)
+        entry_triggered = bool(outcome.get("entry_triggered", True))
         exit_dt = outcome.get("exit_dt")
-        exit_px = _exit_price(entry, stop, target, outcome, future_bars)
+        exit_px = _exit_price(actual_entry, stop, target, outcome, future_bars)
         days_held = None
         if exit_dt:
             days_held = (date.fromisoformat(str(exit_dt)) - entry_dt).days
-        pnl = None if exit_px is None else (exit_px - entry) * qty
-        r_multiple = None if exit_px is None else (exit_px - entry) / (entry - stop)
+        is_stock_fallback = instrument_expression == "underlying_stock_fallback"
+        qty = _dec(quantity) if quantity is not None and is_stock_fallback else None
+        pnl = (
+            (exit_px - actual_entry) * qty
+            if entry_triggered and exit_px is not None and qty is not None
+            else None
+        )
+        r_multiple = (
+            (exit_px - actual_entry) / (actual_entry - stop)
+            if entry_triggered and exit_px is not None
+            else None
+        )
         mfe_r = _dec(outcome.get("mfe_r"), Decimal("0"))
         mae_r = _dec(outcome.get("mae_r"), Decimal("0"))
         exit_efficiency = None if r_multiple is None or mfe_r <= 0 else float(r_multiple / mfe_r)
-        stop_distance_atr = _stop_distance_atr(conn, str(ticker), entry_date=entry_dt, entry=entry, stop=stop)
+        stop_distance_atr = _stop_distance_atr(conn, str(ticker), entry_date=entry_dt, entry=actual_entry, stop=stop)
         notes = {
             **dict(outcome),
+            "outcome_type": "underlying_setup",
+            "instrument_expression": instrument_expression,
+            "option_outcome_applicability": (
+                "option_outcome_not_applicable"
+                if is_stock_fallback
+                else "required_separate_review"
+            ),
             "paper_only": True,
             "no_live_execution": True,
+            "broker_order_submitted": False,
             "stop_distance_atr": stop_distance_atr,
             "setup_success_metric": "underlying_stock_technical_setup_not_option_fill_pnl",
             "source": "recommendation_outcome_review.py",
@@ -187,12 +278,13 @@ def review_open_paper_trade_setups(
         if not dry_run:
             conn.execute(
                 """
-                INSERT INTO recommendation_outcomes(recommendation_id,paper_trade_id,entry_triggered,hit_stop,hit_target,max_gain_pct,max_drawdown_pct,r_multiple,pnl,days_held,exit_reason,notes)
-                VALUES (%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                INSERT INTO recommendation_outcomes(recommendation_id,paper_trade_id,entry_triggered,hit_stop,hit_target,max_gain_pct,max_drawdown_pct,r_multiple,pnl,days_held,exit_reason,notes,outcome_type)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'underlying_setup')
                 """,
                 (
                     str(rec_id),
                     str(trade_id),
+                    entry_triggered,
                     bool(outcome.get("hit_stop")),
                     bool(outcome.get("hit_target")),
                     float(_dec(outcome.get("mfe_pct"), Decimal("0"))),
@@ -204,7 +296,13 @@ def review_open_paper_trade_setups(
                     _json(notes),
                 ),
             )
-            if status == "open" and exit_px is not None and exit_dt is not None:
+            if (
+                is_stock_fallback
+                and status == "open"
+                and entry_triggered
+                and exit_px is not None
+                and exit_dt is not None
+            ):
                 conn.execute(
                     """
                     UPDATE paper_trades

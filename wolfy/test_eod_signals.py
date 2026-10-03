@@ -1,23 +1,20 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 
 from eod_price_features import PriceBar, compute_and_store_features, ingest_price_bars
-
-
-@contextmanager
-def _rollback_connection(psycopg, dsn: str):
-    """Run a live-schema integration test without committing production state."""
-    conn = psycopg.connect(dsn)
-    try:
-        yield conn
-    finally:
-        conn.rollback()
-        conn.close()
+from recommendation_universe import (
+    AdjustedDailyBarObservation,
+    MarketCapObservation,
+    UniverseSecurityEvidence,
+    build_universe_snapshot,
+    persist_universe_snapshot,
+)
+from security_master import SecurityEligibilityDecision
+from test_db import test_connection
 
 
 def _bars(ticker: str, *, start: date = date(2099, 1, 1), n: int = 35, volume: int = 2_000_000) -> list[PriceBar]:
@@ -75,60 +72,99 @@ def _restore_default_strategy_statuses(conn) -> None:
     return None
 
 
-def test_recommendation_universe_uses_broad_current_universe_with_data_gates():
-    psycopg = pytest.importorskip("psycopg")
+def _persist_eligible_snapshot(conn, *, ticker: str, signal_dt: date, price_bars: list[PriceBar]) -> None:
+    decision_at = datetime.combine(signal_dt, datetime.max.time(), tzinfo=timezone.utc)
+    identity = SecurityEligibilityDecision(
+        ticker=ticker,
+        decision_at=decision_at,
+        eligible=True,
+        reason_codes=("eligible_us_common_stock",),
+        identity_observation_ids=(f"identity:{ticker}",),
+        risk_observation_ids=(),
+        denylist_observation_ids=(),
+    )
+    observed_bars = tuple(
+        AdjustedDailyBarObservation(
+            observation_id=f"bar:{ticker}:{bar.dt}",
+            ticker=ticker,
+            session=bar.dt,
+            close=Decimal(bar.close),
+            volume=bar.volume,
+            provider="unit-test",
+            source_url="https://example.test/adjusted-bars",
+            available_at=decision_at - timedelta(minutes=1),
+            adjusted=True,
+        )
+        for bar in price_bars
+    )
+    item = UniverseSecurityEvidence(
+        ticker=ticker,
+        sector="Industrials",
+        identity_decision=identity,
+        market_cap_observations=(
+            MarketCapObservation(
+                observation_id=f"cap:{ticker}",
+                ticker=ticker,
+                market_cap=Decimal("1000000000"),
+                provider="unit-test",
+                source_url="https://example.test/market-cap",
+                effective_at=decision_at - timedelta(hours=2),
+                available_at=decision_at - timedelta(hours=1),
+            ),
+        ),
+        bars=observed_bars,
+    )
+    persist_universe_snapshot(
+        conn,
+        build_universe_snapshot(
+            signal_dt=signal_dt,
+            decision_at=decision_at,
+            evidence=(item,),
+        ),
+    )
+
+
+def test_recommendation_universe_requires_immutable_policy_snapshot():
+    pytest.importorskip("psycopg")
     from eod_signals import recommendation_universe_tickers, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    tickers = ["ZZBLUE", "ZZSMALL", "ZZNONE", "ZZINACT", "ZZSTALE", "ZZTHIN"]
+    tickers = ["ZZBLUE", "ZZUNSNAP"]
     signal_dt = date(2099, 2, 4)
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
-            rows = [
-                ("ZZBLUE", "blue_chip", True),
-                ("ZZSMALL", "small_cap", True),
-                ("ZZNONE", None, True),
-                ("ZZINACT", "large_cap", False),
-                ("ZZSTALE", "mid_cap", True),
-                ("ZZTHIN", "small_cap", True),
-            ]
-            for symbol, tier, active in rows:
+            for symbol in tickers:
                 conn.execute(
                     """
                     INSERT INTO universe_symbols(symbol, name, source, active, wolfy_tier, backfill_enabled)
-                    VALUES (%s, %s, 'unit-test', %s, %s, true)
+                    VALUES (%s, %s, 'unit-test', true, 'small_cap', true)
                     """,
-                    (symbol, symbol, active, tier),
+                    (symbol, symbol),
                 )
-            for ticker in ["ZZBLUE", "ZZSMALL", "ZZNONE", "ZZINACT", "ZZSTALE"]:
-                ingest_price_bars(conn, _breakout_bars(ticker), source="unit-broad-universe")
-                compute_and_store_features(conn, tickers=[ticker], sma_fast_window=5, sma_slow_window=20, volume_window=5, atr_window=5, min_dollar_vol=Decimal("1000"))
-            ingest_price_bars(conn, _breakout_bars("ZZTHIN", n=8), source="unit-broad-universe")
-            compute_and_store_features(conn, tickers=["ZZTHIN"], sma_fast_window=3, sma_slow_window=5, volume_window=3, atr_window=3, min_dollar_vol=Decimal("1000"))
-            conn.execute("DELETE FROM features WHERE ticker='ZZSTALE' AND dt=%s", (signal_dt,))
-
+                ticker_bars = _breakout_bars(symbol)
+                ingest_price_bars(conn, ticker_bars, source="unit-snapshot-universe")
+                compute_and_store_features(conn, tickers=[symbol], sma_fast_window=5, sma_slow_window=20, volume_window=5, atr_window=5, min_dollar_vol=Decimal("1000"))
+            _persist_eligible_snapshot(
+                conn,
+                ticker="ZZBLUE",
+                signal_dt=signal_dt,
+                price_bars=_breakout_bars("ZZBLUE"),
+            )
             result = recommendation_universe_tickers(conn, signal_dt=signal_dt, min_history_bars=20)
         finally:
             _cleanup(conn, tickers)
 
-    assert "ZZBLUE" in result
-    assert "ZZSMALL" in result
-    assert "ZZNONE" in result
-    assert "ZZINACT" not in result
-    assert "ZZSTALE" not in result
-    assert "ZZTHIN" not in result
+    assert result == ["ZZBLUE"]
 
 
 def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers_omitted():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZAUTO", "SPY"]
     signal_dt = date(2099, 2, 4)
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -138,26 +174,49 @@ def test_generate_eod_signals_can_use_broad_recommendation_universe_when_tickers
                     "INSERT INTO universe_symbols(symbol, name, source, active, wolfy_tier, backfill_enabled) VALUES (%s, %s, 'unit-test', true, 'small_cap', true) ON CONFLICT (symbol) DO UPDATE SET active=true",
                     (symbol, symbol),
                 )
-            ingest_price_bars(conn, _breakout_bars("ZZAUTO", daily_step=Decimal("0.70"), breakout_lift=Decimal("2.50")), source="unit-auto-universe")
+            auto_bars = _breakout_bars(
+                "ZZAUTO",
+                start_close=Decimal("200"),
+                daily_step=Decimal("0.70"),
+                breakout_lift=Decimal("2.50"),
+            )
+            ingest_price_bars(conn, auto_bars, source="unit-auto-universe")
             ingest_price_bars(conn, _breakout_bars("SPY", daily_step=Decimal("0.05"), breakout_lift=Decimal("0.00")), source="unit-auto-universe")
             compute_and_store_features(conn, tickers=tickers, sma_fast_window=5, sma_slow_window=20, volume_window=5, atr_window=5, min_dollar_vol=Decimal("1000"))
+            _persist_eligible_snapshot(
+                conn,
+                ticker="ZZAUTO",
+                signal_dt=signal_dt,
+                price_bars=auto_bars,
+            )
 
             result = generate_eod_signals(conn, tickers=None, signal_dt=signal_dt, momentum_lookback_days=20, momentum_top_n=1)
+            adapted = conn.execute(
+                """SELECT s.raw
+                     FROM signals AS s
+                     JOIN strategies AS st ON st.id=s.strategy_id
+                    WHERE s.ticker='ZZAUTO' AND s.dt=%s
+                      AND st.name='liquid_rs_breakout_close_confirm_1r'""",
+                (signal_dt,),
+            ).fetchone()
         finally:
             _cleanup(conn, tickers)
             _restore_default_strategy_statuses(conn)
 
-    assert result["universe_source"] == "broad_current_with_data_gates"
+    assert result["universe_source"] == "immutable_mid_small_snapshot"
     assert "ZZAUTO" in result["tickers_considered"]
     assert result["signals_by_strategy"]["liquid_rs_breakout_continuation"] >= 1
+    assert adapted is not None
+    assert adapted[0]["common_setup_evaluation"]["strategy_version"] == "approved-2026-08-03"
+    assert adapted[0]["common_setup_evaluation"]["reason_codes"] == ["passed"]
+    assert adapted[0]["common_setup_candidate_terms"]["stop"] == adapted[0]["prior_5d_high"]
 
 
 def test_seed_default_strategies_includes_rs_breakout_as_research_only():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         seed_default_strategies(conn)
         _restore_default_strategy_statuses(conn)
         rows = conn.execute(
@@ -182,13 +241,12 @@ def test_seed_default_strategies_includes_rs_breakout_as_research_only():
 
 
 def test_generate_liquid_rs_breakout_continuation_signal():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZRSBO", "SPY"]
     signal_dt = date(2099, 2, 4)
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -228,13 +286,12 @@ def test_generate_liquid_rs_breakout_continuation_signal():
 
 
 def test_generate_eod_signals_seeds_research_only_strategies_and_writes_deterministic_signals():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZSIG", "ZZMOM"]
     signal_dt = date(2099, 2, 4)
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -268,19 +325,27 @@ def test_generate_eod_signals_seeds_research_only_strategies_and_writes_determin
 
 
 def test_write_approved_paper_recommendations_only_uses_approved_signals_and_caps_daily_rows():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import seed_default_strategies, write_approved_paper_recommendations
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     signal_dt = date(2099, 2, 4)
     tickers = ["ZZREC1", "ZZREC2", "ZZREC3", "ZZREC4", "ZZBLOCK"]
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
             approved_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_close_confirm_1r'").fetchone()[0]
             blocked_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_continuation'").fetchone()[0]
-            conn.execute("UPDATE strategies SET status='approved' WHERE id=%s", (approved_id,))
+            conn.execute(
+                """
+                UPDATE strategies
+                SET status='approved',
+                    metadata=coalesce(metadata, '{}'::jsonb) ||
+                        '{"approval_scope":"paper_only_no_live_execution","paper_recommendation_approval":true}'::jsonb
+                WHERE id=%s
+                """,
+                (approved_id,),
+            )
             conn.execute("UPDATE strategies SET status='research_only' WHERE id=%s", (blocked_id,))
             for idx, ticker in enumerate(tickers, start=1):
                 ingest_price_bars(conn, _breakout_bars(ticker, start_close=Decimal("50") + idx), source="unit-recommendation-writer")
@@ -323,19 +388,50 @@ def test_write_approved_paper_recommendations_only_uses_approved_signals_and_cap
     assert rows[0][7]["review_gate_required"] is False
 
 
+def test_runtime_schema_helper_does_not_create_recommendation_unique_indexes():
+    from eod_signals import ensure_signal_schema
+
+    class RecordingConnection:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, statement, params=None):
+            del params
+            self.statements.append(str(statement))
+            return self
+
+        def fetchone(self):
+            return None
+
+    conn = RecordingConnection()
+    ensure_signal_schema(conn)
+    runtime_sql = "\n".join(conn.statements).lower()
+    assert "uq_experimental_paper_recommendation_signal" not in runtime_sql
+    assert "uq_paper_recommendation_signal" not in runtime_sql
+    assert "duplicate experimental paper recommendations" not in runtime_sql
+
+
 def test_log_approved_paper_recommendation_trades_creates_open_paper_rows_idempotently():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import log_approved_paper_recommendation_trades, seed_default_strategies, write_approved_paper_recommendations
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     signal_dt = date(2099, 2, 4)
     tickers = ["ZZPLOG1", "ZZPLOG2", "ZZPLOG3", "ZZPLOG4"]
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _cleanup(conn, tickers)
             approved_id = conn.execute("SELECT id FROM strategies WHERE name='liquid_rs_breakout_close_confirm_1r'").fetchone()[0]
-            conn.execute("UPDATE strategies SET status='approved' WHERE id=%s", (approved_id,))
+            conn.execute(
+                """
+                UPDATE strategies
+                SET status='approved',
+                    metadata=coalesce(metadata, '{}'::jsonb) ||
+                        '{"approval_scope":"paper_only_no_live_execution","paper_recommendation_approval":true}'::jsonb
+                WHERE id=%s
+                """,
+                (approved_id,),
+            )
             for idx, ticker in enumerate(tickers, start=1):
                 raw = {
                     "strategy": "liquid_rs_breakout_close_confirm_1r",
@@ -389,13 +485,12 @@ def test_log_approved_paper_recommendation_trades_creates_open_paper_rows_idempo
 
 
 def test_approved_strategy_gate_creates_setups_only_for_approved_signals():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, propose_approved_setups, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZGATE"
     signal_dt = date(2099, 2, 4)
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -427,13 +522,12 @@ def test_approved_strategy_gate_creates_setups_only_for_approved_signals():
 
 
 def test_nightly_screening_dry_run_ranks_setups_without_writing_rows():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, propose_approved_setups, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZDRY"
     signal_dt = date(2099, 2, 4)
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -467,13 +561,12 @@ def test_nightly_screening_dry_run_ranks_setups_without_writing_rows():
 
 
 def test_nightly_screening_blocks_liquidity_events_options_and_portfolio_breakers():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, propose_approved_setups, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZILLQ", "ZZEVNT", "ZZOPT", "ZZHEAT"]
     signal_dt = date(2099, 2, 4)
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)
@@ -523,13 +616,12 @@ def test_nightly_screening_blocks_liquidity_events_options_and_portfolio_breaker
 
 
 def test_nightly_screening_applies_cumulative_heat_and_position_slots():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_signals import generate_eod_signals, propose_approved_setups, seed_default_strategies
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     tickers = ["ZZSLOT1", "ZZSLOT2", "ZZSLOT3", "ZZSLOT4"]
     signal_dt = date(2099, 2, 4)
-    with _rollback_connection(psycopg, dsn) as conn:
+    with test_connection() as conn:
         try:
             seed_default_strategies(conn)
             _restore_default_strategy_statuses(conn)

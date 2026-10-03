@@ -2,23 +2,20 @@
 """Smoke tests for Wolfy/Jonah/Sentinel Postgres run/task coordination."""
 from __future__ import annotations
 
-import uuid
-
 from wolfy_agent_coordination import (
-    DEFAULT_PG_DSN,
     block_task,
     claim_next_task,
     complete_task,
-    connect,
     ensure_agent_task,
     finish_agent_run,
     start_agent_run,
 )
+from test_db import future_fixture, test_connection
 
 
 def test_agent_run_rows_insert_and_finish():
-    marker = f"smoke-run-{uuid.uuid4()}"
-    with connect(DEFAULT_PG_DSN) as conn:
+    marker = future_fixture("agent-run").strategy_name
+    with test_connection() as conn:
         run_id = start_agent_run(
             conn,
             agent_name="Jonah",
@@ -53,8 +50,8 @@ def test_agent_run_rows_insert_and_finish():
 
 
 def test_agent_tasks_claiming_dedupes_by_fingerprint():
-    fingerprint = f"smoke-task-{uuid.uuid4()}"
-    with connect(DEFAULT_PG_DSN) as conn:
+    fingerprint = future_fixture("agent-task").strategy_name
+    with test_connection() as conn:
         first = ensure_agent_task(
             conn,
             agent_name="Jonah",
@@ -109,9 +106,9 @@ def test_agent_tasks_claiming_dedupes_by_fingerprint():
 
 
 def test_agent_task_block_adds_reason_and_status():
-    fingerprint = f"smoke-block-{uuid.uuid4()}"
+    fingerprint = future_fixture("agent-block").strategy_name
     reason = "smoke block reason"
-    with connect(DEFAULT_PG_DSN) as conn:
+    with test_connection() as conn:
         task = ensure_agent_task(
             conn,
             agent_name="Sentinel",
@@ -125,9 +122,8 @@ def test_agent_task_block_adds_reason_and_status():
         with conn.cursor() as cur:
             cur.execute("SELECT status, description FROM agent_tasks WHERE id = %s", (task.id,))
             status, description = cur.fetchone()
-        # Keep this live-DB smoke non-polluting for recurring ops probes: the
-        # assertion proves block_task(), then the synthetic blocker is closed so
-        # production queues do not accumulate fake Sentinel work.
+        # Assert the complete state transition even though the test transaction
+        # is rolled back by test_connection().
         complete_task(conn, task.id, summary="cleared synthetic smoke blocked task")
 
     assert status == "blocked"

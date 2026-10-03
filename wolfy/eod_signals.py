@@ -8,9 +8,10 @@ setup tickets only when the originating strategy is already human-approved.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -19,6 +20,46 @@ BROKER_WIDE_SPREAD_WARNING_FRACTION = Decimal("0.02")
 
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
 DEFAULT_STRATEGIES = (
+    (
+        "mid_small_volatility_contraction_breakout_v1",
+        "volatility_contraction_breakout",
+        {
+            "source": "Wolfy mid/small-cap multi-strategy pivot 2026-09-17",
+            "strategy_version": "research-v1",
+            "requires_backtest": True,
+            "requires_explicit_user_approval": True,
+            "max_contraction_ratio": "0.75",
+            "min_range_expansion_ratio": "1.50",
+            "min_close_location_value": "0.70",
+            "min_volume_percentile": "0.50",
+            "trend_confirmation": "close_above_50dma_above_200dma",
+            "relative_strength_benchmarks": ["SPY", "IWM", "MDY"],
+            "max_stop_risk_pct": "0.08",
+            "target_r": "2.0",
+            "instrument_policy": "option_preferred_with_underlying_stock_fallback",
+            "requires_option_chain_for_underlying_setup": False,
+        },
+        "Seeded as research_only for underlying shadow evaluation; chain availability affects only downstream expression and explicit user approval is required before paper recommendations.",
+    ),
+    (
+        "mid_small_trend_pullback_reclaim_v1",
+        "trend_pullback_reclaim",
+        {
+            "source": "Wolfy mid/small-cap multi-strategy pivot 2026-09-17",
+            "strategy_version": "research-v1",
+            "requires_backtest": True,
+            "requires_explicit_user_approval": True,
+            "trend_stack": "close_above_50dma_above_200dma",
+            "rising_50dma_lookback_sessions": 20,
+            "pullback_sessions_min": 2,
+            "pullback_sessions_max": 7,
+            "pullback_proximity": "20dma_within_1_atr",
+            "max_stop_risk_pct": "0.08",
+            "reclaim_triggers": ["close_above_20dma", "close_above_prior_day_high"],
+            "benchmarks_context_only": ["SPY", "IWM", "MDY"],
+        },
+        "Seeded as research_only for shadow evaluation; backtests cannot auto-approve and explicit user approval is required before paper recommendations.",
+    ),
     (
         "pead",
         "post_earnings_announcement_drift",
@@ -130,6 +171,45 @@ DEFAULT_STRATEGIES = (
             "option_dte_max": 35,
         },
         "New research_only options strategy: volatility contraction then expansion, breadth and sector confirmation; high realized volatility is allowed and no live execution is authorized.",
+    ),
+    (
+        "liquid_rs_breakout_aggressive_options_v2",
+        "rs_breakout_aggressive_options",
+        {
+            "source": "Wolfy aggressive options-only experimental paper profile v2 2026-09-12",
+            "parent_strategy": "liquid_rs_breakout_options_volatility_v1",
+            "requires_backtest": True,
+            "strategy_validated": False,
+            "breakout_lookback_days": 5,
+            "rs_benchmark": "SPY",
+            "rs_window_days": 20,
+            "min_vol_ratio": "0.80",
+            "min_rs_excess_20d": "-0.03",
+            "requires_positive_ticker_return_20d": True,
+            "max_prior_low_risk_pct": "0.10",
+            "market_regime": "SPY_context_only_not_hard_gate",
+            "requires_options_volatility_setup": True,
+            "requires_breadth_pct_above_50dma": "0.35",
+            "sector_confirmation_role": "context_only_not_required",
+            "high_realized_volatility_allowed": True,
+            "max_realized_volatility": None,
+            "vix_role": "context_not_hard_cap",
+            "instrument_policy": "defined_risk_options_only",
+            "equity_fallback": False,
+            "stop_rule": "close_below_breakout_level",
+            "target_r": "1.25",
+            "max_hold_days": 7,
+            "option_liquidity_hard_gate": True,
+            "experimental_forward_recommendations_allowed": True,
+            "historical_approval_required_for_experimental_paper": False,
+            "allowed_option_structures_v2": ["long_call", "call_debit_spread"],
+            "option_dte_min": 7,
+            "option_dte_max": 28,
+            "selector_policy_version": "aggressive_options_v2",
+            "paper_only": True,
+            "no_live_execution": True,
+        },
+        "Separate research_only aggressive options paper profile with lighter underlying gates, exact defined-risk structures, no equity fallback, and no live execution.",
     ),
 )
 
@@ -264,37 +344,48 @@ def _strategy_ids(conn) -> dict[str, tuple[int, str]]:
     return {str(name): (int(strategy_id), str(status)) for strategy_id, name, status in rows}
 
 
-def recommendation_universe_tickers(conn, *, signal_dt: date, min_history_bars: int = 20) -> list[str]:
-    """Return broad/current recommendation tickers with deterministic data-readiness gates.
+def recommendation_universe_tickers(
+    conn,
+    *,
+    signal_dt: date,
+    min_history_bars: int = 20,
+    explicit_tickers: Sequence[str] | None = None,
+) -> list[str]:
+    """Return members of the latest immutable pivot-policy snapshot.
 
-    This intentionally does not restrict by Wolfy tier. The user's first
-    recommendation engine may consider the whole active universe, but a ticker
-    must have current price/features rows and enough stored bars for the
-    strategy window before it can enter signal generation.
+    ``min_history_bars`` remains in the compatibility signature, but the
+    snapshot builder always enforces the canonical exact 20-session policy.
+    Explicit replay tickers are accepted only when every ticker is a member of
+    that same snapshot.
     """
-    ensure_signal_schema(conn)
+    del min_history_bars
+    from orchestration_config import MID_SMALL_PIVOT_POLICY
+
     rows = conn.execute(
         """
-        SELECT u.symbol
-        FROM universe u
-        JOIN prices p ON p.ticker=u.symbol AND p.dt=%s
-        JOIN features f ON f.ticker=u.symbol AND f.dt=%s
-        JOIN LATERAL (
-          SELECT count(*) AS bar_count
-          FROM prices ph
-          WHERE ph.ticker=u.symbol AND ph.dt <= %s
-        ) hist ON true
-        WHERE coalesce(u.active, true)=true
-          AND coalesce(u.enabled, true)=true
-          AND hist.bar_count >= %s
-          AND p.close IS NOT NULL
-          AND f.atr IS NOT NULL
-          AND f.vol_ratio IS NOT NULL
-        ORDER BY u.symbol
+        SELECT m.ticker
+        FROM recommendation_universe_snapshots s
+        JOIN recommendation_universe_members m ON m.snapshot_id=s.snapshot_id
+        WHERE s.snapshot_id = (
+          SELECT snapshot_id
+          FROM recommendation_universe_snapshots
+          WHERE signal_dt=%s AND policy_version=%s
+          ORDER BY decision_at DESC, source_fingerprint DESC
+          LIMIT 1
+        )
+          AND m.included
+        ORDER BY m.ticker
         """,
-        (signal_dt, signal_dt, signal_dt, min_history_bars),
+        (signal_dt, MID_SMALL_PIVOT_POLICY.version),
     ).fetchall()
-    return [str(row[0]).upper() for row in rows]
+    included = [str(row[0]).upper() for row in rows]
+    if explicit_tickers is None:
+        return included
+    requested = sorted({str(ticker).strip().upper() for ticker in explicit_tickers if str(ticker).strip()})
+    rejected = sorted(set(requested) - set(included))
+    if rejected:
+        raise ValueError(f"explicit ticker replay failed universe policy: {','.join(rejected)}")
+    return requested
 
 
 def _upsert_signal(conn, *, ticker: str, signal_dt: date, strategy_id: int, direction: str, raw: dict) -> None:
@@ -440,6 +531,12 @@ def _generate_liquid_rs_breakout(
     stop_rule: str = "prior_5_day_low",
     target_r: Decimal = Decimal("1.5"),
     require_options_volatility_setup: bool = False,
+    require_ticker_outperform_spy: bool = True,
+    require_positive_ticker_return: bool = False,
+    options_min_breadth: Decimal = Decimal("0.50"),
+    require_sector_confirmation: bool = True,
+    max_hold_days: int = 10,
+    signal_metadata: Mapping[str, Any] | None = None,
 ) -> int:
     strategy_id, status = strategies[strategy_name]
     spy_row = conn.execute(
@@ -511,6 +608,11 @@ def _generate_liquid_rs_breakout(
         prior_high_dec = Decimal(str(prior_high))
         prior_low_dec = Decimal(str(prior_low))
         vol_ratio_dec = Decimal(str(vol_ratio))
+        atr_dec = Decimal(str(atr))
+        finite_values = [close_dec, high_dec, prior_high_dec, prior_low_dec, vol_ratio_dec, atr_dec]
+        finite_values.extend(Decimal(str(value)) for value in (sma_fast, sma_slow) if value is not None)
+        if not all(value.is_finite() for value in finite_values):
+            continue
         ticker_return = (close_dec / Decimal(str(lookback_close))) - Decimal("1")
         rs_excess = ticker_return - spy_return
         recent_high = max(high_dec, prior_high_dec)
@@ -525,7 +627,9 @@ def _generate_liquid_rs_breakout(
             continue
         if close_dec <= prior_high_dec:
             continue
-        if ticker_return <= spy_return:
+        if require_positive_ticker_return and ticker_return <= 0:
+            continue
+        if require_ticker_outperform_spy and ticker_return <= spy_return:
             continue
         if rs_excess < min_rs_excess:
             continue
@@ -536,6 +640,49 @@ def _generate_liquid_rs_breakout(
             continue
         if not within_5pct_recent_high:
             continue
+
+        approved_adapter_result = None
+        if strategy_name == "liquid_rs_breakout_close_confirm_1r":
+            from orchestration_config import MID_SMALL_PIVOT_POLICY
+            from setup_evaluators import ApprovedBreakoutFacts, evaluate_approved_breakout
+
+            member = conn.execute(
+                """SELECT m.sector, m.facts_hash, m.snapshot_id
+                     FROM recommendation_universe_members AS m
+                     JOIN recommendation_universe_snapshots AS s ON s.snapshot_id=m.snapshot_id
+                    WHERE m.ticker=%s AND m.included AND s.signal_dt=%s
+                      AND s.policy_version=%s
+                    ORDER BY s.decision_at DESC, s.source_fingerprint DESC
+                    LIMIT 1""",
+                (ticker, signal_dt, MID_SMALL_PIVOT_POLICY.version),
+            ).fetchone()
+            if member is not None:
+                sector, member_facts_hash, snapshot_id = member
+                approved_adapter_result = evaluate_approved_breakout(
+                    ApprovedBreakoutFacts(
+                        ticker=ticker,
+                        sector=str(sector),
+                        evaluated_at=datetime.combine(signal_dt, datetime.max.time(), tzinfo=timezone.utc),
+                        universe_eligible=True,
+                        close=close_dec,
+                        high=high_dec,
+                        prior_five_high=prior_high_dec,
+                        prior_five_low=prior_low_dec,
+                        sma_fast=sma_fast,
+                        sma_slow=sma_slow,
+                        volume_ratio=vol_ratio_dec,
+                        atr=atr_dec,
+                        ticker_return_20d=ticker_return,
+                        spy_return_20d=spy_return,
+                        spy_close=spy_row[0],
+                        spy_sma_50=spy_sma,
+                        source_fingerprint=str(member_facts_hash),
+                        provenance={"universe_snapshot_id": str(snapshot_id)},
+                        benchmark_context={"IWM": {"role": "context_only"}, "MDY": {"role": "context_only"}},
+                    )
+                )
+                if not approved_adapter_result.evaluation.passed:
+                    continue
 
         options_volatility_facts: dict[str, Any] | None = None
         if require_options_volatility_setup:
@@ -595,6 +742,8 @@ def _generate_liquid_rs_breakout(
                 breadth=breadth,
                 sector_strength=sector_strength,
                 market_regime={"vix": latest_vix[0] if latest_vix else None},
+                min_breadth_pct_above_50dma=options_min_breadth,
+                require_sector_confirmation=require_sector_confirmation,
             )
             if not accepted:
                 continue
@@ -606,8 +755,8 @@ def _generate_liquid_rs_breakout(
             "prior_5d_low": prior_low_dec,
             "sma_fast": sma_fast,
             "sma_slow": sma_slow,
-            "atr": atr,
-            "atr_pct": Decimal(str(atr)) / close_dec if close_dec else None,
+            "atr": atr_dec,
+            "atr_pct": atr_dec / close_dec if close_dec else None,
             "ticker_return_20d": ticker_return,
             "spy_return_20d": spy_return,
             "rs_excess_20d": rs_excess,
@@ -618,10 +767,16 @@ def _generate_liquid_rs_breakout(
             "max_stop_risk_pct": max_stop_risk_pct,
             "spy_sma_days": require_spy_above_sma_days,
             "spy_sma": spy_sma,
+            "spy_above_sma_required": require_spy_above_sma_days is not None,
+            "requires_ticker_outperform_spy": require_ticker_outperform_spy,
+            "requires_positive_ticker_return_20d": require_positive_ticker_return,
+            "near_high_pct": near_high_pct,
+            "breakout_lookback_days": breakout_lookback_days,
+            "rs_window_days": rs_window_days,
             "within_5pct_recent_high": within_5pct_recent_high,
             "stop_rule": stop_rule,
             "invalidation": prior_low_dec if stop_rule == "prior_5_day_low" else prior_high_dec,
-            "max_hold_days": 10,
+            "max_hold_days": max_hold_days,
             "target_r": target_r,
             "profit_plan": f"take_partial_or_review_at_{target_r}R_then_trail_remainder",
             "preferred_instrument": "2-3wk slightly OTM call spread",
@@ -635,6 +790,22 @@ def _generate_liquid_rs_breakout(
             raw["options_volatility"] = options_volatility_facts
             raw["instrument_policy"] = "defined_risk_options_only"
             raw["option_liquidity_hard_gate"] = True
+        if signal_metadata:
+            raw.update(signal_metadata)
+        if approved_adapter_result is not None:
+            evaluation = approved_adapter_result.evaluation
+            raw["common_setup_evaluation"] = {
+                "facts_hash": approved_adapter_result.facts_hash,
+                "gate_facts": evaluation.gate_facts,
+                "reason_codes": evaluation.reason_codes,
+                "strategy_version": evaluation.strategy_version,
+            }
+            raw["common_setup_candidate_terms"] = {
+                "entry": approved_adapter_result.entry,
+                "stop": approved_adapter_result.stop,
+                "target": approved_adapter_result.target,
+                "score_components": evaluation.score_components,
+            }
         _upsert_signal(conn, ticker=ticker, signal_dt=signal_dt, strategy_id=strategy_id, direction="long", raw=raw)
         generated += 1
     return generated
@@ -651,7 +822,7 @@ def generate_eod_signals(
     universe_source = "explicit_tickers"
     if tickers is None:
         tickers = recommendation_universe_tickers(conn, signal_dt=signal_dt)
-        universe_source = "broad_current_with_data_gates"
+        universe_source = "immutable_mid_small_snapshot"
     if not tickers:
         raise ValueError("tickers are required")
     seed_default_strategies(conn)
@@ -705,6 +876,37 @@ def generate_eod_signals(
             target_r=Decimal("1.0"),
             require_options_volatility_setup=True,
         ),
+        "liquid_rs_breakout_aggressive_options_v2": _generate_liquid_rs_breakout(
+            conn,
+            tickers=tickers,
+            signal_dt=signal_dt,
+            strategies=strategies,
+            strategy_name="liquid_rs_breakout_aggressive_options_v2",
+            min_vol_ratio=Decimal("0.80"),
+            min_rs_excess=Decimal("-0.03"),
+            max_stop_risk_pct=Decimal("0.10"),
+            stop_rule="close_below_breakout_level",
+            target_r=Decimal("1.25"),
+            require_options_volatility_setup=True,
+            require_ticker_outperform_spy=False,
+            require_positive_ticker_return=True,
+            options_min_breadth=Decimal("0.35"),
+            require_sector_confirmation=False,
+            max_hold_days=7,
+            signal_metadata={
+                "instrument_policy": "defined_risk_options_only",
+                "equity_fallback": False,
+                "experimental_forward_test": True,
+                "experimental_forward_recommendations_allowed": True,
+                "strategy_validated": False,
+                "paper_only": True,
+                "no_live_execution": True,
+                "allowed_option_structures": ["long_call", "call_debit_spread"],
+                "option_dte_min": 7,
+                "option_dte_max": 28,
+                "selector_policy_version": "aggressive_options_v2",
+            },
+        ),
     }
     return {
         "signal_dt": signal_dt.isoformat(),
@@ -735,27 +937,44 @@ def _options_volatility_gate(
     breadth: Mapping[str, Any] | None,
     sector_strength: Mapping[str, Any] | None,
     market_regime: Mapping[str, Any] | None,
+    min_breadth_pct_above_50dma: Decimal = Decimal("0.50"),
+    require_sector_confirmation: bool = True,
 ) -> tuple[bool, dict[str, Any]]:
-    """Gate the research strategy on setup shape, breadth, and sector strength.
+    """Gate the research strategy on setup shape, breadth, and sector context.
 
     Realized volatility and VIX are preserved as context and deliberately have
     no maximum cap. Defined-risk option liquidity is enforced downstream before
-    any recommendation can become an options paper setup.
+    any recommendation can become an options paper setup. Defaults exactly
+    preserve the strict v1 breadth and sector requirements.
     """
     options_feature = options_feature or {}
     breadth = breadth or {}
     sector_strength = sector_strength or {}
     market_regime = market_regime or {}
     pct_above_50 = _as_decimal(breadth.get("pct_above_50dma"), Decimal("0"))
+    sector_ok = (
+        sector_strength.get("sector_confirmation") is True
+        if require_sector_confirmation
+        else True
+    )
     accepted = bool(
         options_feature.get("options_volatility_setup") is True
-        and pct_above_50 >= Decimal("0.50")
-        and sector_strength.get("sector_confirmation") is True
+        and breadth.get("pct_above_50dma") is not None
+        and pct_above_50 >= min_breadth_pct_above_50dma
+        and sector_ok
     )
     facts = {
         **dict(options_feature),
         "breadth_pct_above_50dma": pct_above_50,
+        "breadth_min_pct_above_50dma": min_breadth_pct_above_50dma,
         "sector_strength": dict(sector_strength),
+        "sector_confirmation_required": require_sector_confirmation,
+        "sector_context_available": bool(
+            sector_strength.get("sector")
+            and sector_strength.get("sector_etf")
+            and sector_strength.get("stock_vs_sector") is not None
+            and sector_strength.get("sector_vs_spy") is not None
+        ),
         "market_regime": dict(market_regime),
         "high_realized_volatility_allowed": True,
         "max_realized_volatility": None,
@@ -1044,6 +1263,150 @@ def _broker_notes_for_ticker(
     return normalized, warnings, equity_fallback
 
 
+def _recomputed_aggressive_v2_option_selection(
+    evaluation: Mapping[str, Any], selected: Mapping[str, Any], *, ticker: str,
+    underlying_price: Decimal, technical_target: Decimal, signal_dt: date,
+) -> dict[str, Any] | None:
+    """Fail closed unless canonical v2 recomputation exactly matches the submission."""
+    from options_structure_selector import aggressive_options_v2_policy, select_bullish_option_structure
+
+    policy = evaluation.get("policy")
+    contracts = evaluation.get("input_contracts")
+    if (
+        evaluation.get("status") != "selected"
+        or evaluation.get("paper_only") is not True
+        or evaluation.get("no_live_execution") is not True
+        or evaluation.get("broker_order_submitted") is not False
+        or not isinstance(policy, Mapping)
+        or policy.get("policy_version") != "aggressive_options_v2"
+        or not isinstance(contracts, list)
+        or not contracts
+        or not all(isinstance(contract, Mapping) for contract in contracts)
+    ):
+        return None
+    try:
+        decision_time = datetime.fromisoformat(str(policy.get("decision_time")).replace("Z", "+00:00"))
+        recomputed = select_bullish_option_structure(
+            ticker=ticker,
+            underlying_price=underlying_price,
+            technical_target=technical_target,
+            as_of=signal_dt,
+            contracts=contracts,
+            policy=aggressive_options_v2_policy(decision_time=decision_time),
+        )
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    canonical = recomputed.get("selected")
+    if not isinstance(canonical, Mapping):
+        return None
+    submitted_json = json.dumps(dict(selected), sort_keys=True, default=str, separators=(",", ":"))
+    canonical_json = json.dumps(dict(canonical), sort_keys=True, default=str, separators=(",", ":"))
+    return dict(canonical) if submitted_json == canonical_json else None
+
+
+def _authorized_aggressive_v2_signal(raw: Mapping[str, Any], params: Mapping[str, Any]) -> bool:
+    return bool(
+        params.get("experimental_forward_recommendations_allowed") is True
+        and params.get("strategy_validated") is False
+        and params.get("instrument_policy") == "defined_risk_options_only"
+        and params.get("equity_fallback") is False
+        and params.get("selector_policy_version") == "aggressive_options_v2"
+        and raw.get("experimental_forward_recommendations_allowed") is True
+        and raw.get("strategy_validated") is False
+        and raw.get("instrument_policy") == "defined_risk_options_only"
+        and raw.get("equity_fallback") is False
+        and raw.get("paper_only") is True
+        and raw.get("no_live_execution") is True
+        and raw.get("selector_policy_version") == "aggressive_options_v2"
+    )
+
+
+def _durable_option_selection(
+    conn,
+    evaluation: Mapping[str, Any],
+    *,
+    ticker: str,
+    strategy_name: str,
+    signal_dt: date,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Reload and recompute an option decision from its immutable chain snapshot."""
+    evaluation_id = evaluation.get("evaluation_id")
+    snapshot_id = evaluation.get("snapshot_id")
+    if type(evaluation_id) is not int or not isinstance(snapshot_id, str) or not snapshot_id:
+        return None
+    row = conn.execute(
+        """SELECT e.ticker,e.signal_dt,e.strategy_name,e.underlying_price,
+                  e.technical_target,e.decision_at,e.evaluation,e.snapshot_id,
+                  s.ticker,s.available_at,s.payload_sha256,s.chain
+           FROM option_structure_evaluations e
+           JOIN option_chain_snapshots s ON s.snapshot_id=e.snapshot_id
+           WHERE e.id=%s""",
+        (evaluation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    (stored_ticker, stored_dt, stored_strategy, underlying_price, technical_target,
+     decision_at, stored_evaluation, stored_snapshot_id, snapshot_ticker,
+     available_at, payload_sha256, chain) = row
+    stored_payload_hash = hashlib.sha256(
+        json.dumps(chain, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if (
+        str(stored_ticker).upper() != ticker.upper()
+        or stored_dt != signal_dt
+        or stored_strategy != strategy_name
+        or stored_snapshot_id != snapshot_id
+        or str(snapshot_ticker).upper() != ticker.upper()
+        or available_at > decision_at
+        or stored_payload_hash != payload_sha256
+        or evaluation.get("ticker") != ticker.upper()
+        or evaluation.get("strategy_name") != strategy_name
+        or evaluation.get("payload_sha256") != payload_sha256
+    ):
+        return None
+    from options_structure_selector import (
+        SelectorPolicy,
+        aggressive_options_v2_policy,
+        select_bullish_option_structure,
+    )
+
+    policy_data = stored_evaluation.get("policy") if isinstance(stored_evaluation, Mapping) else None
+    try:
+        policy = (
+            aggressive_options_v2_policy(decision_time=decision_at)
+            if isinstance(policy_data, Mapping)
+            and policy_data.get("policy_version") == "aggressive_options_v2"
+            else SelectorPolicy()
+        )
+        recomputed = select_bullish_option_structure(
+            ticker=ticker,
+            underlying_price=Decimal(str(underlying_price)),
+            technical_target=Decimal(str(technical_target)),
+            as_of=signal_dt,
+            contracts=chain,
+            policy=policy,
+        )
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    canonical = recomputed.get("selected")
+    stored_selected = stored_evaluation.get("selected") if isinstance(stored_evaluation, Mapping) else None
+    submitted_selected = evaluation.get("selected")
+    if not all(isinstance(item, Mapping) for item in (canonical, stored_selected, submitted_selected)):
+        return None
+    serialized = {
+        json.dumps(dict(item), sort_keys=True, default=str, separators=(",", ":"))
+        for item in (canonical, stored_selected, submitted_selected)
+    }
+    if len(serialized) != 1:
+        return None
+    return dict(canonical), {
+        "option_evaluation_id": evaluation_id,
+        "option_chain_snapshot_id": snapshot_id,
+        "option_chain_payload_sha256": payload_sha256,
+        "option_decision_at": decision_at.isoformat(),
+    }
+
+
 def write_experimental_options_recommendations(
     conn,
     *,
@@ -1053,6 +1416,7 @@ def write_experimental_options_recommendations(
     account_equity_usd: Decimal = Decimal("5000"),
     risk_fraction: Decimal = Decimal("0.05"),
     dry_run: bool = False,
+    strategy_name: str = "liquid_rs_breakout_options_volatility_v1",
 ) -> dict:
     """Write unvalidated, paper-only option expressions for qualifying signals.
 
@@ -1060,32 +1424,80 @@ def write_experimental_options_recommendations(
     strategy. A selected, defined-risk, exact option structure remains mandatory.
     """
     ensure_signal_schema(conn)
+    from recommendation_writer import RecommendationCandidate, write_ranked_recommendations
+
+    aggressive_v2 = strategy_name == "liquid_rs_breakout_aggressive_options_v2"
+    effective_max_recommendations = max_recommendations
+    effective_risk_fraction = min(risk_fraction, Decimal("0.05"))
+    risk_budget = account_equity_usd * effective_risk_fraction
     rows = conn.execute("""
-        SELECT s.ticker,s.raw,st.id,st.name,st.status
+        SELECT s.ticker,s.raw,st.id,st.name,st.status,st.params
         FROM signals s JOIN strategies st ON st.id=s.strategy_id
-        WHERE s.dt=%s AND st.name='liquid_rs_breakout_options_volatility_v1'
+        WHERE s.dt=%s AND st.name=%s
           AND lower(coalesce(s.direction,'')) IN ('long','buy')
         ORDER BY s.ticker
-    """, (signal_dt,)).fetchall()
+    """, (signal_dt, strategy_name)).fetchall()
     eligible: list[dict[str, Any]] = []
     blocked = 0
-    for ticker, raw, strategy_id, strategy_name, strategy_status in rows:
+    for ticker, raw, strategy_id, row_strategy_name, strategy_status, strategy_params in rows:
         evaluation = option_evaluations.get(str(ticker).upper()) or option_evaluations.get(str(ticker))
         selected = evaluation.get("selected") if isinstance(evaluation, Mapping) else None
+        raw_dict = raw if isinstance(raw, Mapping) else json.loads(raw or "{}")
+        params_dict = strategy_params if isinstance(strategy_params, Mapping) else {}
+        entry = _as_decimal(_raw_value(raw_dict, "close"), Decimal("0"))
+        stop = _as_decimal(_raw_value(raw_dict, "invalidation"), Decimal("0"))
+        target_r = _as_decimal(_raw_value(raw_dict, "target_r"), Decimal("1"))
+        target = entry + max(entry - stop, Decimal("0")) * target_r
+        max_hold_days = params_dict.get("max_hold_days", 10)
+        if type(max_hold_days) is not int or not 1 <= max_hold_days <= 60:
+            blocked += 1
+            continue
         if not isinstance(selected, Mapping) or selected.get("defined_risk") is not True:
             blocked += 1
             continue
-        debit = _as_decimal(selected.get("max_loss_per_contract"), Decimal("0"))
-        if debit <= 0:
+        durable = _durable_option_selection(
+            conn,
+            dict(evaluation),
+            ticker=str(ticker),
+            strategy_name=str(row_strategy_name),
+            signal_dt=signal_dt,
+        )
+        if durable is None:
             blocked += 1
             continue
-        raw_dict = raw if isinstance(raw, Mapping) else json.loads(raw or "{}")
-        eligible.append({"ticker": str(ticker), "raw": raw_dict, "strategy_id": int(strategy_id), "strategy_name": str(strategy_name), "strategy_status": str(strategy_status), "selected": dict(selected), "max_loss": debit})
+        selected, provenance = durable
+        if aggressive_v2:
+            canonical_selected = (
+                _recomputed_aggressive_v2_option_selection(
+                    evaluation, selected, ticker=str(ticker), underlying_price=entry,
+                    technical_target=target, signal_dt=signal_dt,
+                )
+                if isinstance(evaluation, Mapping)
+                else None
+            )
+            if (
+                strategy_status != "research_only"
+                or not _authorized_aggressive_v2_signal(raw_dict, params_dict)
+                or canonical_selected is None
+            ):
+                blocked += 1
+                continue
+            selected = canonical_selected
+        debit = _as_decimal(selected.get("max_loss_per_contract"), Decimal("0"))
+        if debit <= 0 or (aggressive_v2 and debit > risk_budget):
+            blocked += 1
+            continue
+        eligible.append({"ticker": str(ticker), "raw": raw_dict, "strategy_id": int(strategy_id), "strategy_name": str(row_strategy_name), "strategy_status": str(strategy_status), "selected": dict(selected), "provenance": provenance, "max_loss": debit, "max_hold_days": max_hold_days, "sector": str(_raw_value(raw_dict, "sector", "Unknown")) or "Unknown"})
     eligible.sort(key=lambda item: (-_recommendation_score(item["raw"]), item["ticker"]))
-    created = skipped = 0
+    skipped = 0
     serializable: list[dict[str, Any]] = []
-    risk_budget = account_equity_usd * risk_fraction
-    for item in eligible[:max(0, max_recommendations)]:
+    items_by_identity = {
+        (item["ticker"].upper(), item["strategy_name"]): item for item in eligible
+    }
+
+    def insert_candidate(candidate) -> bool:
+        nonlocal blocked, skipped
+        item = items_by_identity[(candidate.ticker, candidate.strategy_name)]
         ticker, raw, selected = item["ticker"], item["raw"], item["selected"]
         entry = _as_decimal(_raw_value(raw, "close"), Decimal("0"))
         stop = _as_decimal(_raw_value(raw, "invalidation"), Decimal("0"))
@@ -1094,46 +1506,108 @@ def write_experimental_options_recommendations(
         contracts = int(risk_budget // item["max_loss"])
         if contracts < 1:
             blocked += 1
-            continue
-        exists = conn.execute("""
-            SELECT id FROM recommendations WHERE ticker=%s AND notes->>'signal_dt'=%s
-              AND notes->>'strategy_name'=%s AND status IN ('paper_candidate','paper_logged') LIMIT 1
-        """, (ticker, signal_dt.isoformat(), item["strategy_name"])).fetchone()
-        if exists:
-            skipped += 1
-            serializable.append({"ticker": ticker, "status": "existing"})
-            continue
+            return False
         notes = {
             "experimental_forward_test": True, "strategy_validated": False,
             "historical_approval_gate_overridden_for_paper_research": True,
             "paper_only": True, "no_live_execution": True, "broker_order_submitted": False,
             "equity_fallback": False, "signal_dt": signal_dt.isoformat(),
             "strategy_id": item["strategy_id"], "strategy_name": item["strategy_name"],
-            "strategy_status_at_selection": item["strategy_status"],
+            "strategy_status_at_selection": item["strategy_status"], "sector": item["sector"],
             "source_signal": raw, "option_structure": selected,
-            "paper_account_usd": str(account_equity_usd), "risk_fraction": str(risk_fraction),
+            "paper_account_usd": str(account_equity_usd), "risk_fraction": str(effective_risk_fraction),
             "paper_risk_budget_usd": str(risk_budget), "paper_contracts": contracts,
+            "max_loss_per_contract_usd": str(item["max_loss"]),
+            "total_max_loss_usd": str(item["max_loss"] * contracts),
             "position_sizing_basis": "maximum_defined_option_loss",
+            **item["provenance"],
         }
-        if not dry_run:
-            conn.execute("""
-                INSERT INTO recommendations(ticker,action,recommendation_type,thesis,setup_type,entry_zone,entry_trigger,stop,target,risk_reward,confidence,position_size_suggestion,holding_period,status,notes)
-                VALUES (%s,'buy','experimental_defined_risk_option',%s,%s,%s,%s,%s,%s,%s,'experimental',%s,%s,'paper_candidate',%s::jsonb)
-            """, (
-                ticker, f"Experimental forward test of deterministic {item['strategy_name']}; not historically validated and no live execution.",
-                item["strategy_name"], f"Underlying EOD baseline {_money(entry)}",
-                f"Paper option expression using exact selected contracts; underlying baseline {_money(entry)}.",
-                f"Underlying close below {_money(stop)} invalidates thesis.", f"Underlying technical target {_money(target)}.", f"{target_r}R underlying thesis",
-                f"{contracts} paper contract(s), sized from ${item['max_loss']} maximum loss each.", "Up to 10 trading days", _json(notes),
-            ))
-        created += 1
+        if aggressive_v2:
+            notes.update(
+                {
+                    "experimental_forward_recommendations_allowed": True,
+                    "selector_policy_version": "aggressive_options_v2",
+                    "instrument_policy": "defined_risk_options_only",
+                }
+            )
+        inserted = conn.execute("""
+            INSERT INTO recommendations(ticker,action,recommendation_type,thesis,setup_type,entry_zone,entry_trigger,stop,target,risk_reward,confidence,position_size_suggestion,holding_period,status,notes)
+            VALUES (%s,'buy','experimental_defined_risk_option',%s,%s,%s,%s,%s,%s,%s,'experimental',%s,%s,'paper_candidate',%s::jsonb)
+            ON CONFLICT (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
+              WHERE status IN ('paper_candidate','paper_logged')
+                AND notes->>'signal_dt' IS NOT NULL
+                AND notes->>'strategy_name' IS NOT NULL
+            DO NOTHING
+            RETURNING id
+        """, (
+            ticker, f"Experimental forward test of deterministic {item['strategy_name']}; not historically validated and no live execution.",
+            item["strategy_name"], f"Underlying EOD baseline {_money(entry)}",
+            f"Paper option expression using exact selected contracts; underlying baseline {_money(entry)}.",
+            f"Underlying close below {_money(stop)} invalidates thesis.", f"Underlying technical target {_money(target)}.", f"{target_r}R underlying thesis",
+            f"{contracts} paper contract(s), sized from ${item['max_loss']} maximum loss each.", f"Up to {item['max_hold_days']} trading days", _json(notes),
+        )).fetchone()
+        if inserted is None:
+            skipped += 1
+            serializable.append({"ticker": ticker, "status": "existing"})
+            return False
         serializable.append({"ticker": ticker, "status": "paper_candidate", "structure": selected.get("structure"), "contracts": contracts})
+        return True
+
+    candidates = [
+        RecommendationCandidate(
+            ticker=item["ticker"], strategy_name=item["strategy_name"],
+            signal_dt=signal_dt, sector=item["sector"],
+            risk_fraction=effective_risk_fraction,
+        )
+        for item in eligible
+    ]
+    write_result = write_ranked_recommendations(
+        conn, candidates=candidates, insert_candidate=insert_candidate,
+        max_to_write=effective_max_recommendations, dry_run=dry_run,
+    )
+    skipped += sum(1 for _ticker, reason in write_result.blocked if reason in {"duplicate_ticker", "insert_conflict"})
+    blocked += sum(1 for _ticker, reason in write_result.blocked if reason not in {"duplicate_ticker", "insert_conflict"})
+    if dry_run:
+        for candidate in write_result.selected:
+            item = items_by_identity[(candidate.ticker, candidate.strategy_name)]
+            serializable.append({"ticker": candidate.ticker, "status": "paper_candidate", "structure": item["selected"].get("structure")})
     return {
         "signal_dt": signal_dt.isoformat(), "dry_run": dry_run,
-        "recommendations_created": 0 if dry_run else created,
-        "recommendations_ranked": min(len(eligible), max(0, max_recommendations)),
+        "recommendations_created": write_result.inserted,
+        "recommendations_ranked": len(write_result.selected),
         "skipped_existing": skipped, "blocked_by_option_quality": blocked,
         "broker_orders_created": 0, "recommendations": serializable,
+    }
+
+
+def write_pivot_paper_recommendations(
+    conn,
+    *,
+    recommendations: Sequence[Any],
+    signal_dt: date,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Write globally allocated exact instruments to the paper ledger only."""
+    from recommendation_writer import write_pivot_instrument_recommendations
+
+    result = write_pivot_instrument_recommendations(
+        conn,
+        recommendations=recommendations,
+        signal_dt=signal_dt,
+        dry_run=dry_run,
+    )
+    return {
+        "signal_dt": signal_dt.isoformat(),
+        "dry_run": dry_run,
+        "recommendations_created": result.inserted,
+        "paper_trades_created": result.paper_trades_inserted,
+        "recommendations_ranked": len(result.selected),
+        "writer_blocked": [
+            {"ticker": ticker, "reason": reason} for ticker, reason in result.blocked
+        ],
+        "paper_only": True,
+        "no_live_execution": True,
+        "broker_orders_created": result.broker_orders_created,
     }
 
 
@@ -1154,6 +1628,9 @@ def write_approved_paper_recommendations(
     strategies with status='approved'.
     """
     ensure_signal_schema(conn)
+    from recommendation_writer import RecommendationCandidate, write_ranked_recommendations
+
+    effective_risk_fraction = min(Decimal(str(risk_fraction)), Decimal("0.05"))
     params: list[object] = [signal_dt]
     ticker_clause = ""
     if tickers is not None:
@@ -1186,14 +1663,19 @@ def write_approved_paper_recommendations(
                 "strategy_id": int(strategy_id),
                 "strategy_name": str(strategy_name),
                 "score": _recommendation_score(raw_dict),
+                "sector": str(_raw_value(raw_dict, "sector", "Unknown")) or "Unknown",
             }
         )
     approved.sort(key=lambda item: (-item["score"], item["ticker"]))
-    selected = approved[: max(0, max_recommendations)]
-    created = 0
     skipped_existing = 0
     serializable: list[dict[str, Any]] = []
-    for item in selected:
+    items_by_identity = {
+        (item["ticker"].upper(), item["strategy_name"]): item for item in approved
+    }
+
+    def insert_candidate(candidate) -> bool:
+        nonlocal skipped_existing
+        item = items_by_identity[(candidate.ticker, candidate.strategy_name)]
         raw = item["raw"]
         ticker = item["ticker"]
         entry = _as_decimal(_raw_value(raw, "close"), Decimal("0"))
@@ -1214,6 +1696,8 @@ def write_approved_paper_recommendations(
             "signal_dt": signal_dt.isoformat(),
             "strategy_id": item["strategy_id"],
             "strategy_name": item["strategy_name"],
+            "sector": item["sector"],
+            "risk_fraction": str(effective_risk_fraction),
             "source_signal": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in raw.items()},
             "option_spread": (broker_notes.get("option_spread") if broker_notes and broker_notes.get("option_spread_available") else {
                 "structure": _raw_value(raw, "preferred_instrument", "2-3wk slightly OTM call spread"),
@@ -1226,57 +1710,80 @@ def write_approved_paper_recommendations(
         }
         if broker_notes is not None:
             notes["broker_enrichment"] = broker_notes
-        exists = conn.execute(
-            """
-            SELECT id FROM recommendations
-            WHERE ticker=%s
-              AND notes->>'signal_dt'=%s
-              AND notes->>'strategy_name'=%s
-              AND status IN ('paper_candidate','paper_logged')
-            LIMIT 1
-            """,
-            (ticker, signal_dt.isoformat(), item["strategy_name"]),
-        ).fetchone()
         payload = {
             "ticker": ticker,
             "strategy_name": item["strategy_name"],
             "entry": _money(entry),
             "stop": _money(invalidation),
             "target": _money(target),
-            "risk_fraction": str(risk_fraction),
+            "risk_fraction": str(effective_risk_fraction),
         }
-        if exists:
+        inserted = conn.execute(
+            """
+            INSERT INTO recommendations(ticker, action, recommendation_type, thesis, setup_type, entry_zone, entry_trigger, stop, target, risk_reward, confidence, position_size_suggestion, holding_period, status, notes)
+            VALUES (%s,'buy','equity_plus_option_spread_when_data_exists',%s,%s,%s,%s,%s,%s,%s,'medium-high',%s,%s,'paper_candidate',%s::jsonb)
+            ON CONFLICT (ticker, (notes->>'signal_dt'), (notes->>'strategy_name'))
+              WHERE status IN ('paper_candidate','paper_logged')
+                AND notes->>'signal_dt' IS NOT NULL
+                AND notes->>'strategy_name' IS NOT NULL
+            DO NOTHING
+            RETURNING id
+            """,
+            (
+                ticker,
+                f"{ticker} triggered approved deterministic {item['strategy_name']} paper setup; paper-only, no live execution.",
+                item["strategy_name"],
+                f"EOD close baseline near {_money(entry)}",
+                f"Use EOD close baseline {_money(entry)} from {signal_dt.isoformat()} for paper accounting.",
+                f"Close below breakout/invalidation level {_money(invalidation)}.",
+                f"Initial paper target near {_money(target)} ({target_r}R); max hold 10 trading days.",
+                f"{target_r}R",
+                f"Paper risk {effective_risk_fraction * Decimal('100'):.2f}% of account; globally capped paper portfolio.",
+                "Up to 10 trading days",
+                _json(notes),
+            ),
+        ).fetchone()
+        if inserted is None:
             skipped_existing += 1
             serializable.append({**payload, "status": "existing", "broker_enriched": broker_notes is not None})
-            continue
-        if not dry_run:
-            conn.execute(
-                """
-                INSERT INTO recommendations(ticker, action, recommendation_type, thesis, setup_type, entry_zone, entry_trigger, stop, target, risk_reward, confidence, position_size_suggestion, holding_period, status, notes)
-                VALUES (%s,'buy','equity_plus_option_spread_when_data_exists',%s,%s,%s,%s,%s,%s,%s,'medium-high',%s,%s,'paper_candidate',%s::jsonb)
-                """,
-                (
-                    ticker,
-                    f"{ticker} triggered approved deterministic {item['strategy_name']} paper setup; paper-only, no live execution.",
-                    item["strategy_name"],
-                    f"EOD close baseline near {_money(entry)}",
-                    f"Use EOD close baseline {_money(entry)} from {signal_dt.isoformat()} for paper accounting.",
-                    f"Close below breakout/invalidation level {_money(invalidation)}.",
-                    f"Initial paper target near {_money(target)} ({target_r}R); max hold 10 trading days.",
-                    f"{target_r}R",
-                    f"Paper risk {risk_fraction * Decimal('100'):.2f}% of account; no max-open cap for paper testing.",
-                    "Up to 10 trading days",
-                    _json(notes),
-                ),
-            )
-        created += 1
+            return False
         serializable.append({**payload, "status": "paper_candidate", "broker_enriched": broker_notes is not None})
+        return True
+
+    candidates = [
+        RecommendationCandidate(
+            ticker=item["ticker"], strategy_name=item["strategy_name"],
+            signal_dt=signal_dt, sector=item["sector"],
+            risk_fraction=effective_risk_fraction,
+        )
+        for item in approved
+    ]
+    write_result = write_ranked_recommendations(
+        conn, candidates=candidates, insert_candidate=insert_candidate,
+        max_to_write=max_recommendations, dry_run=dry_run,
+    )
+    skipped_existing += sum(1 for _ticker, reason in write_result.blocked if reason in {"duplicate_ticker", "insert_conflict"})
+    if dry_run:
+        for candidate in write_result.selected:
+            item = items_by_identity[(candidate.ticker, candidate.strategy_name)]
+            raw = item["raw"]
+            entry = _as_decimal(_raw_value(raw, "close"), Decimal("0"))
+            invalidation = _as_decimal(_raw_value(raw, "invalidation"), _as_decimal(_raw_value(raw, "prior_5d_high"), Decimal("0")))
+            target_r = _as_decimal(_raw_value(raw, "target_r"), Decimal("1.0"))
+            target = entry + max(entry - invalidation, Decimal("0.01")) * target_r
+            serializable.append({
+                "ticker": candidate.ticker, "strategy_name": candidate.strategy_name,
+                "entry": _money(entry), "stop": _money(invalidation), "target": _money(target),
+                "risk_fraction": str(effective_risk_fraction), "status": "paper_candidate",
+                "broker_enriched": False,
+            })
     return {
         "signal_dt": signal_dt.isoformat(),
         "dry_run": dry_run,
-        "recommendations_created": created if not dry_run else 0,
-        "recommendations_ranked": len(selected),
+        "recommendations_created": write_result.inserted,
+        "recommendations_ranked": len(write_result.selected),
         "skipped_existing": skipped_existing,
+        "blocked_by_global_cap": sum(1 for _ticker, reason in write_result.blocked if reason not in {"duplicate_ticker", "insert_conflict"}),
         "blocked_by_strategy_status": blocked_by_strategy_status,
         "paper_trades_created": 0,
         "broker_enriched": sum(1 for rec in serializable if rec.get("broker_enriched")),

@@ -38,3 +38,165 @@ def test_build_daily_summary_reports_recommendation_engine_status_concisely():
     assert "closed paper PnL: 250.00" in report
     assert "live execution: disabled" in report
     assert "next gate: daily EOD ingest/signals" in report
+
+
+def _pivot_data(status: str, **overrides):
+    pivot = {
+        "status": status,
+        "signal_dt": "2026-09-16",
+        "paper_only": True,
+        "no_live_execution": True,
+        "broker_orders_created": 0,
+        "recommendations": [],
+    }
+    pivot.update(overrides)
+    return {"postgres": {"mid_small_pivot": pivot}}
+
+
+def test_pivot_summary_distinguishes_incomplete_pipeline_from_no_trade():
+    report = build_daily_summary(
+        _pivot_data(
+            "pipeline_incomplete",
+            incomplete_reasons=["benchmark_mdy_missing", "universe_snapshot_stale"],
+        )
+    )
+
+    assert "PIPELINE INCOMPLETE" in report
+    assert "signal date: 2026-09-16" in report
+    assert "benchmark_mdy_missing, universe_snapshot_stale" in report
+    assert "NO TRADE" not in report
+    assert "paper-only; no live execution; broker orders: 0" in report
+
+
+def test_pivot_summary_calls_a_complete_empty_run_no_trade():
+    report = build_daily_summary(_pivot_data("no_candidates"))
+
+    assert "NO TRADE — no eligible setup passed" in report
+    assert "PIPELINE INCOMPLETE" not in report
+
+
+def test_pivot_summary_reports_allocation_blocked_and_cap_full():
+    blocked = build_daily_summary(
+        _pivot_data("allocation_blocked", allocation_blocked=3)
+    )
+    full = build_daily_summary(
+        _pivot_data(
+            "allocation_blocked",
+            allocation_blocked=2,
+            writer_blocked=[
+                {"ticker": "AAAA", "reason": "global_position_cap"},
+                {"ticker": "BBBB", "reason": "aggregate_risk_cap"},
+            ],
+        )
+    )
+
+    assert "ALLOCATION BLOCKED — 3 candidate(s)" in blocked
+    assert "CAP FULL" in full
+    assert "global_position_cap" in full
+
+
+def test_pivot_summary_formats_exact_option_and_stock_fallback_recommendations():
+    report = build_daily_summary(
+        _pivot_data(
+            "paper_recommendations",
+            recommendations=[
+                {
+                    "ticker": "ABCD",
+                    "strategy": "liquid_rs_breakout_close_confirm_1r",
+                    "global_rank": 1,
+                    "sector": "Industrials",
+                    "entry": "20.00",
+                    "stop": "19.00",
+                    "target": "22.00",
+                    "risk_fraction": "0.05",
+                    "expression": "call_debit_spread",
+                    "max_loss": "400",
+                    "long_leg": {"symbol": "ABCD261016C00020000"},
+                    "short_leg": {"symbol": "ABCD261016C00022000"},
+                },
+                {
+                    "ticker": "EFGH",
+                    "strategy": "liquid_rs_breakout_close_confirm_1r",
+                    "global_rank": 2,
+                    "sector": "Technology",
+                    "entry": "30.00",
+                    "stop": "28.50",
+                    "target": "33.00",
+                    "risk_fraction": "0.05",
+                    "expression": "underlying_stock_fallback",
+                    "max_loss": "500",
+                    "fallback_reasons": ["option_chain_unavailable"],
+                },
+            ],
+        )
+    )
+
+    assert "#1 ABCD | liquid_rs_breakout_close_confirm_1r | Industrials" in report
+    assert "entry 20.00 / stop 19.00 / target 22.00" in report
+    assert "risk 5% / max loss $400" in report
+    assert "call debit spread ABCD261016C00020000 / ABCD261016C00022000" in report
+    assert "#2 EFGH" in report
+    assert "underlying stock fallback (option_chain_unavailable)" in report
+
+
+def test_pivot_summary_rejects_false_safety_flags():
+    report = build_daily_summary(
+        _pivot_data("paper_recommendations", broker_orders_created=1)
+    )
+
+    assert "SAFETY BLOCKER" in report
+    assert "NO TRADE" not in report
+
+
+def test_pivot_summary_labels_bounded_canary_and_rollback_state():
+    report = build_daily_summary(
+        _pivot_data(
+            "paper_canary_complete",
+            canary=True,
+            recommendations=[
+                {
+                    "ticker": "ABCD",
+                    "strategy": "liquid_rs_breakout_close_confirm_1r",
+                    "global_rank": 1,
+                    "sector": "Industrials",
+                    "entry": "20",
+                    "stop": "19",
+                    "target": "22",
+                    "risk_fraction": "0.05",
+                    "expression": "underlying_stock_fallback",
+                    "max_loss": "500",
+                    "fallback_reasons": ["option_chain_unavailable"],
+                }
+            ],
+            rollback_ready=True,
+            production_schedule_authorized=False,
+        )
+    )
+
+    assert "BOUNDED PAPER-ONLY CANARY" in report
+    assert "rollback ready: yes" in report
+    assert "scheduled publisher: disabled" in report
+    assert "live" not in report.lower().replace("no live execution", "")
+
+
+def test_pivot_summary_blocks_unsafe_canary_release_state():
+    report = build_daily_summary(
+        _pivot_data(
+            "paper_canary_complete",
+            canary=True,
+            rollback_ready=False,
+            production_schedule_authorized=True,
+        )
+    )
+
+    assert "SAFETY BLOCKER" in report
+    assert "BOUNDED PAPER-ONLY CANARY" not in report
+
+    omitted_flag = build_daily_summary(
+        _pivot_data(
+            "paper_canary_complete",
+            rollback_ready=True,
+            production_schedule_authorized=False,
+        )
+    )
+    assert "SAFETY BLOCKER" in omitted_flag

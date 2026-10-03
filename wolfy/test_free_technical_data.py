@@ -1,5 +1,7 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+
+from test_db import future_fixture, test_connection
 
 
 class _FakeResponse:
@@ -159,33 +161,32 @@ def test_parse_nasdaq_short_interest_preserves_publication_availability():
 
 def test_historical_breadth_requires_a_membership_snapshot():
     import pytest
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from free_technical_data import compute_and_store_breadth, ensure_free_technical_schema
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    with psycopg.connect(dsn) as conn:
+    signal_dt = future_fixture("breadth").signal_dt
+    with test_connection() as conn:
         ensure_free_technical_schema(conn)
-        conn.execute("DELETE FROM universe_membership_snapshots WHERE dt=%s", (date(2098, 12, 31),))
+        conn.execute("DELETE FROM universe_membership_snapshots WHERE dt=%s", (signal_dt,))
         with pytest.raises(ValueError, match="historical breadth backfill is intentionally blocked"):
-            compute_and_store_breadth(conn, signal_dt=date(2098, 12, 31))
-        conn.rollback()
+            compute_and_store_breadth(conn, signal_dt=signal_dt)
 
 
 def test_free_source_schema_and_upserts_are_idempotent():
     import pytest
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from free_technical_data import ensure_free_technical_schema, store_market_series, store_short_volume
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    with psycopg.connect(dsn) as conn:
+    fixture = future_fixture("free")
+    observation_date = fixture.signal_dt
+    ticker = fixture.ticker
+    with test_connection() as conn:
         ensure_free_technical_schema(conn)
-        store_market_series(conn, [{"observation_date": date(2099, 1, 2), "series": "VIX", "open": Decimal("20"), "high": Decimal("21"), "low": Decimal("19"), "value": Decimal("20.5")}], source="unit-cboe", available_at=date(2099, 1, 2))
-        store_market_series(conn, [{"observation_date": date(2099, 1, 2), "series": "VIX", "open": Decimal("20"), "high": Decimal("21"), "low": Decimal("19"), "value": Decimal("20.7")}], source="unit-cboe", available_at=date(2099, 1, 2))
-        store_short_volume(conn, [{"observation_date": date(2099, 1, 2), "ticker": "ZZFREE", "short_volume": Decimal("600"), "short_exempt_volume": Decimal("10"), "total_volume": Decimal("1000"), "market": "B,Q,N", "finra_off_exchange_short_fraction": Decimal("0.6"), "short_exempt_fraction": Decimal("0.01"), "scope": "finra_reported_public_trades_not_consolidated_market"}], source="unit-finra", available_at=date(2099, 1, 3))
-        vix = conn.execute("SELECT value, source FROM technical_market_series WHERE series='VIX' AND observation_date=DATE '2099-01-02'").fetchone()
-        short = conn.execute("SELECT short_fraction, available_at FROM finra_short_volume WHERE ticker='ZZFREE' AND observation_date=DATE '2099-01-02'").fetchone()
-        conn.execute("DELETE FROM technical_market_series WHERE series='VIX' AND observation_date=DATE '2099-01-02'")
-        conn.execute("DELETE FROM finra_short_volume WHERE ticker='ZZFREE' AND observation_date=DATE '2099-01-02'")
+        store_market_series(conn, [{"observation_date": observation_date, "series": "VIX", "open": Decimal("20"), "high": Decimal("21"), "low": Decimal("19"), "value": Decimal("20.5")}], source="unit-cboe", available_at=observation_date)
+        store_market_series(conn, [{"observation_date": observation_date, "series": "VIX", "open": Decimal("20"), "high": Decimal("21"), "low": Decimal("19"), "value": Decimal("20.7")}], source="unit-cboe", available_at=observation_date)
+        store_short_volume(conn, [{"observation_date": observation_date, "ticker": ticker, "short_volume": Decimal("600"), "short_exempt_volume": Decimal("10"), "total_volume": Decimal("1000"), "market": "B,Q,N", "finra_off_exchange_short_fraction": Decimal("0.6"), "short_exempt_fraction": Decimal("0.01"), "scope": "finra_reported_public_trades_not_consolidated_market"}], source="unit-finra", available_at=observation_date + timedelta(days=1))
+        vix = conn.execute("SELECT value, source FROM technical_market_series WHERE series='VIX' AND observation_date=%s", (observation_date,)).fetchone()
+        short = conn.execute("SELECT short_fraction, available_at FROM finra_short_volume WHERE ticker=%s AND observation_date=%s", (ticker, observation_date)).fetchone()
     assert vix == (Decimal("20.7"), "unit-cboe")
     assert short[0] == Decimal("0.6")
-    assert short[1].date() == date(2099, 1, 3)
+    assert short[1].date() == observation_date + timedelta(days=1)

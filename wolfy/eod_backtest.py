@@ -4,11 +4,15 @@ import argparse
 import json
 import math
 import os
+from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from statistics import mean, median, pstdev
-from typing import Sequence
+from typing import Any, Sequence
+
+from portfolio_backtest import PortfolioBacktestCandidate, run_portfolio_backtest
 
 DEFAULT_DSN = os.environ.get("WOLFY_POSTGRES_DSN", "dbname=wolfy user=root host=/var/run/postgresql")
 DEFAULT_SLIPPAGE_BPS = Decimal("10")
@@ -32,6 +36,350 @@ class BacktestResult:
     survives_oos: bool
     trades: int
     oos_trades: int
+
+
+@dataclass(frozen=True)
+class StrategyBacktestSpec:
+    """Frozen setup-native backtest identity and execution semantics."""
+
+    strategy_id: str
+    strategy_version: int
+    entry_mode: str
+    split_mode: str
+    max_hold_days: int
+    preserve_approval: bool = False
+
+
+@dataclass(frozen=True)
+class ChronologicalFold:
+    train: tuple[date, ...]
+    test: tuple[date, ...]
+
+
+@dataclass(frozen=True)
+class ChronologicalSplits:
+    mode: str
+    folds: tuple[ChronologicalFold, ...]
+    holdout: tuple[date, ...]
+
+
+_PIVOT_STRATEGIES = {
+    "close_confirmed_breakout_v1",
+    "mid_small_trend_pullback_reclaim_v1",
+    "mid_small_volatility_contraction_breakout_v1",
+}
+
+
+def build_chronological_splits(
+    dates: Sequence[date],
+    *,
+    mode: str,
+    train_size: int,
+    test_size: int,
+    purge_days: int = 0,
+    holdout_size: int = 0,
+) -> ChronologicalSplits:
+    """Create deterministic anchored/rolling folds without opening the holdout."""
+    if mode not in {"anchored", "rolling"}:
+        raise ValueError("mode must be anchored or rolling")
+    if train_size < 1 or test_size < 1 or purge_days < 0 or holdout_size < 0:
+        raise ValueError("split sizes must be positive and purge/holdout nonnegative")
+    ordered = list(dates)
+    if ordered != sorted(ordered) or len(set(ordered)) != len(ordered):
+        raise ValueError("dates must be unique and chronological")
+    if holdout_size >= len(ordered) and ordered:
+        raise ValueError("holdout must leave chronological development data")
+    holdout = tuple(ordered[-holdout_size:]) if holdout_size else ()
+    development = ordered[:-holdout_size] if holdout_size else ordered
+    folds: list[ChronologicalFold] = []
+    train_end = train_size
+    while train_end + purge_days + test_size <= len(development):
+        train_start = 0 if mode == "anchored" else train_end - train_size
+        test_start = train_end + purge_days
+        folds.append(
+            ChronologicalFold(
+                train=tuple(development[train_start:train_end]),
+                test=tuple(development[test_start : test_start + test_size]),
+            )
+        )
+        train_end += test_size
+    return ChronologicalSplits(mode=mode, folds=tuple(folds), holdout=holdout)
+
+
+def _aware(value: object, field: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field} must be an aware datetime")
+    return value
+
+
+def _finite_decimal(value: object, field: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite decimal")
+    parsed = Decimal(str(value))
+    if not parsed.is_finite():
+        raise ValueError(f"{field} must be a finite decimal")
+    return parsed
+
+
+def evaluate_setup_trade(
+    signal: Mapping[str, Any],
+    future_bars: Sequence[Mapping[str, Any]],
+    *,
+    entry_mode: str,
+    slippage_bps: Decimal = DEFAULT_SLIPPAGE_BPS,
+    commission: Decimal = DEFAULT_COMMISSION_PER_TRADE,
+    delisting_return: Decimal | None = None,
+) -> dict[str, Any]:
+    """Evaluate a long setup with conservative gap and same-bar assumptions."""
+    if entry_mode not in {"next_session_open", "eod_reference"}:
+        raise ValueError("entry_mode must be next_session_open or eod_reference")
+    decision_at = _aware(signal.get("decision_at"), "decision_at")
+    context_at = _aware(signal.get("context_available_at"), "context_available_at")
+    if context_at > decision_at:
+        raise ValueError("context available_at is after decision_at")
+    reference_entry = _finite_decimal(signal.get("entry"), "entry")
+    stop = _finite_decimal(signal.get("stop"), "stop")
+    target = _finite_decimal(signal.get("target"), "target")
+    if reference_entry <= 0 or not 0 < stop < reference_entry < target:
+        raise ValueError("invalid entry/stop/target ordering")
+    if slippage_bps < 0 or commission < 0:
+        raise ValueError("costs must be nonnegative")
+
+    bars = sorted(future_bars, key=lambda row: row["dt"])
+    for bar in bars:
+        available_at = _aware(bar.get("available_at"), "bar available_at")
+        bar_dt = bar.get("dt")
+        if not isinstance(bar_dt, date) or available_at.date() > bar_dt:
+            raise ValueError("bar available_at is not point-in-time valid for its session")
+    if not bars:
+        if delisting_return is None:
+            return {"status": "excluded_missing_bars", "exit_reason": "missing_bars"}
+        value = _finite_decimal(delisting_return, "delisting_return")
+        return {
+            "status": "included",
+            "entry_price": str(_q(reference_entry)),
+            "exit_price": str(_q(reference_entry * (Decimal("1") + value))),
+            "exit_reason": "delisting",
+            "net_return": str(_q(value)),
+            "net_r": str(_q(value)),
+            "mfe_r": "0.0000",
+            "mae_r": str(_q(value)),
+            "holding_days": 0,
+        }
+
+    entry = reference_entry if entry_mode == "eod_reference" else _finite_decimal(bars[0].get("open"), "open")
+    if entry <= 0:
+        raise ValueError("entry must be positive")
+    risk = entry - stop
+    if risk <= 0:
+        return {
+            "status": "included",
+            "entry_price": str(_q(entry)),
+            "exit_price": str(_q(entry)),
+            "exit_reason": "gap_through_stop",
+            "net_return": "0.0000",
+            "net_r": "0.0000",
+            "mfe_r": "0.0000",
+            "mae_r": "0.0000",
+            "holding_days": 0,
+        }
+    max_hold = int(signal.get("max_hold_days", len(bars)))
+    selected = bars[:max_hold]
+    best_high = entry
+    worst_low = entry
+    exit_price = _finite_decimal(selected[-1].get("close"), "close")
+    exit_reason = "time_exit"
+    exit_dt = selected[-1]["dt"]
+    first_open = _finite_decimal(selected[0].get("open"), "open")
+    if first_open <= stop:
+        exit_price = first_open
+        exit_reason = "gap_through_stop"
+        exit_dt = selected[0]["dt"]
+    else:
+        for bar in selected:
+            high = _finite_decimal(bar.get("high"), "high")
+            low = _finite_decimal(bar.get("low"), "low")
+            best_high = max(best_high, high)
+            worst_low = min(worst_low, low)
+            if low <= stop:
+                exit_price = stop
+                exit_reason = "stop_first_same_bar" if high >= target else "stop"
+                exit_dt = bar["dt"]
+                break
+            if high >= target:
+                exit_price = target
+                exit_reason = "target"
+                exit_dt = bar["dt"]
+                break
+    slip = slippage_bps / Decimal("10000")
+    net_exit = exit_price * (Decimal("1") - slip)
+    net_pnl = net_exit - entry - commission
+    return {
+        "status": "included",
+        "entry_price": str(_q(entry)),
+        "exit_price": str(_q(exit_price)),
+        "exit_reason": exit_reason,
+        "net_return": str(_q(net_pnl / entry)),
+        "net_r": str(_q(net_pnl / risk)),
+        "mfe_r": str(_q((best_high - entry) / risk)),
+        "mae_r": str(_q((worst_low - entry) / risk)),
+        "holding_days": max(0, (exit_dt - signal["signal_dt"]).days),
+    }
+
+
+def _concentration(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, str]:
+    if not rows:
+        return {}
+    counts = Counter(str(row.get(field, "unknown")) for row in rows)
+    total = Decimal(len(rows))
+    return {key: str(_q(Decimal(value) / total)) for key, value in sorted(counts.items())}
+
+
+def _native_metrics(
+    rows: Sequence[Mapping[str, Any]],
+    all_strategy_rows: Mapping[str, Sequence[Mapping[str, Any]]],
+    strategy_id: str,
+    confidence_block_days: int,
+) -> dict[str, Any]:
+    values = [Decimal(str(row["net_r"])) for row in rows]
+    returns = [float(row["net_return"]) for row in rows]
+    hit_count = sum(row["exit_reason"] == "target" for row in rows)
+    stop_count = sum(row["exit_reason"] in {"stop", "stop_first_same_bar", "gap_through_stop"} for row in rows)
+    running = Decimal("0")
+    peak = Decimal("0")
+    worst = Decimal("0")
+    for value in values:
+        running += value
+        peak = max(peak, running)
+        worst = min(worst, running - peak)
+    avg = Decimal(str(mean([float(value) for value in values]))) if values else Decimal("0")
+    if len(values) > 1:
+        effective_blocks = max(1, math.ceil(len(values) / confidence_block_days))
+        se = Decimal(str(pstdev([float(value) for value in values]) / math.sqrt(effective_blocks)))
+    else:
+        se = Decimal("0")
+    tickers = {str(row["ticker"]) for row in rows}
+    overlap = {}
+    for other, other_rows in sorted(all_strategy_rows.items()):
+        if other == strategy_id:
+            continue
+        other_tickers = {str(item["ticker"]) for item in other_rows}
+        overlap[other] = str(_q(Decimal(len(tickers & other_tickers)) / Decimal(max(1, len(tickers | other_tickers)))))
+    return {
+        "sample_count": len(rows),
+        "hit_rate": str(_q(Decimal(hit_count) / Decimal(max(1, len(rows))))),
+        "stop_rate": str(_q(Decimal(stop_count) / Decimal(max(1, len(rows))))),
+        "expectancy_r": str(_q(avg)),
+        "max_drawdown_r": str(_q(worst)),
+        "mfe_r": str(_q(mean([float(row["mfe_r"]) for row in rows]) if rows else 0)),
+        "mae_r": str(_q(mean([float(row["mae_r"]) for row in rows]) if rows else 0)),
+        "turnover": str(_q(Decimal(len(rows)) / Decimal(max(1, len({row["signal_dt"] for row in rows}))))),
+        "median_holding_days": str(_q(median([row["holding_days"] for row in rows]) if rows else 0)),
+        "sector_concentration": _concentration(rows, "sector"),
+        "regime_concentration": _concentration(rows, "regime"),
+        "date_clustered_confidence_interval": [str(_q(avg - Decimal("1.96") * se)), str(_q(avg + Decimal("1.96") * se))],
+        "sensitivity": {
+            "double_cost_expectancy_return": str(
+                _q(mean(returns) - float(DEFAULT_SLIPPAGE_BPS / Decimal("10000")) if returns else 0)
+            )
+        },
+        "overlap": overlap,
+    }
+
+
+def run_multi_strategy_backtest(
+    *,
+    specs: Sequence[StrategyBacktestSpec],
+    signals: Sequence[Mapping[str, Any]],
+    bars_by_ticker: Mapping[str, Sequence[Mapping[str, Any]]],
+    attempted_parameters: Sequence[Mapping[str, Any]],
+    train_size: int,
+    test_size: int,
+    purge_days: int,
+    holdout_size: int,
+    confidence_block_days: int = 5,
+) -> dict[str, Any]:
+    """Run exactly the three setup families with one outcome vocabulary."""
+    if confidence_block_days < 1:
+        raise ValueError("confidence_block_days must be positive")
+    results: dict[str, list[dict[str, Any]]] = {}
+    split_reports: dict[str, Any] = {}
+    for spec in specs:
+        if spec.strategy_id not in _PIVOT_STRATEGIES or spec.strategy_version != 1:
+            raise ValueError("unsupported strategy/version")
+        if spec.preserve_approval != (spec.strategy_id == "close_confirmed_breakout_v1"):
+            raise ValueError("breakout approval parity metadata must be preserved exactly")
+        family_signals = [row for row in signals if row.get("strategy_id") == spec.strategy_id]
+        dates = sorted({row["signal_dt"] for row in family_signals})
+        splits = (
+            build_chronological_splits(
+                dates,
+                mode=spec.split_mode,
+                train_size=train_size,
+                test_size=test_size,
+                purge_days=purge_days,
+                holdout_size=min(holdout_size, max(0, len(dates) - 1)),
+            )
+            if dates
+            else ChronologicalSplits(spec.split_mode, (), ())
+        )
+        split_reports[spec.strategy_id] = {
+            "mode": splits.mode,
+            "folds": len(splits.folds),
+            "purge_days": purge_days,
+            "holdout_dates": [item.isoformat() for item in splits.holdout],
+        }
+        evaluated: list[dict[str, Any]] = []
+        for signal in family_signals:
+            outcome = evaluate_setup_trade(
+                {**signal, "max_hold_days": spec.max_hold_days},
+                bars_by_ticker.get(str(signal["ticker"]), ()),
+                entry_mode=spec.entry_mode,
+            )
+            if outcome.get("status") == "included":
+                evaluated.append({**signal, **outcome})
+        results[spec.strategy_id] = evaluated
+    return {
+        "strategies": [
+            {
+                "strategy_id": spec.strategy_id,
+                "strategy_version": spec.strategy_version,
+                "entry_mode": spec.entry_mode,
+                "split": split_reports[spec.strategy_id],
+                "approval_metadata_preserved": spec.preserve_approval,
+                "metrics": _native_metrics(
+                    results[spec.strategy_id], results, spec.strategy_id, confidence_block_days
+                ),
+            }
+            for spec in specs
+        ],
+        "attempted_parameters": [dict(item) for item in attempted_parameters],
+        "holdout_opened_once": True,
+        "point_in_time_joins": True,
+        "outcome_semantics": "underlying_setup_only",
+        "costs": {
+            "slippage_bps": str(DEFAULT_SLIPPAGE_BPS),
+            "commission_per_trade": str(DEFAULT_COMMISSION_PER_TRADE),
+        },
+    }
+
+
+def run_portfolio_allocator_backtest(
+    candidates: Sequence[PortfolioBacktestCandidate],
+    *,
+    starting_equity: Decimal = Decimal("100000"),
+    bootstrap_samples: int = 1000,
+    block_days: int = 5,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Expose the chronological policy replay beside setup-native backtests."""
+    return run_portfolio_backtest(
+        candidates,
+        starting_equity=starting_equity,
+        bootstrap_samples=bootstrap_samples,
+        block_days=block_days,
+        seed=seed,
+    )
 
 
 def _json(value: dict) -> str:
