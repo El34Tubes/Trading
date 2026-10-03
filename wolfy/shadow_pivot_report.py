@@ -59,18 +59,22 @@ _MIGRATIONS_DIR = Path(__file__).resolve().with_name("migrations")
 PIVOT_MIGRATIONS = tuple(
     _MIGRATIONS_DIR / name
     for name in (
+        "20260917_daily_evaluation_ledger.sql",
         "20260917_option_snapshot_provenance.sql",
         "20260917_recommendation_uniqueness.sql",
         "20260917_security_master.sql",
         "20260917_recommendation_universe.sql",
+        "20260917_setup_candidates.sql",
         "20260917_instrument_outcomes.sql",
     )
 )
 PIVOT_MIGRATION_SHA256 = (
+    "ee52a2ce1b081c173db1d28404c97ea4681bfbb6300d32239081df143e4f1945",
     "90e1e7f86177c0f0c6b72666629b9c42da2a01cd4e3afb6c8ed49cd4e6ffbaeb",
     "671f6081fc318567ca5c8dc684c903f5870dd2393abd876a79cc8eb4b50ad5aa",
     "1e22e29f888d2ed38b79bc9aaae8f88715dea49d93bd2760730273c5e52a24be",
     "9a74c191c477700212bfd41c8b5be404c7bf1330eeb1ac83feb569ef2bb59bb3",
+    "93464dc37423addd4711d41d8c082122149e44093d02f85a9608346333d50473",
     "dde5ab01ca844504a17fa2556f788f8ecc84413d9743b8f2e73485789a8802bd",
 )
 
