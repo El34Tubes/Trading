@@ -1,5 +1,26 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-10-05 daily optimizer plan-only run
+
+- Time: 2026-10-05 02:15 ET / 06:15 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block low_headroom_pct=4.89 threshold=15.00` (exit 1), so this run remained PLAN-ONLY: deterministic review plus task/run/KPI/ledger state only; no code/config/cron/migration/strategy-approval/trading implementation.
+- Guardian/probation: no probation marker exists; production-home guardian returned `GUARDIAN=ok`; optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remain enabled, YAML/cron parsing and `hermes cron list/status` pass, and the gateway is active.
+- Prior review: HEAD `f2bcd3b8072be01de42467eab45f74747526276d` matches completed task `4213`, has ledger-only scope, passes `git show --check`, retains 25/25 KPI rows with measured/carried-forward provenance, and five config-guardian tests pass. Blocked corrective task `4133` remains unclaimed because the budget stop prohibits implementation.
+- State/KPI: plan-only task `4229` / run `414108`; exactly 25 KPI keys recorded with measured/carried-forward provenance. Decision-time capture: 190218 tokens against the 200000 daily cap, limiting headroom 4.89%, 2 completed tokenized runs today, core freshness 34/34 at common date 2026-10-02, depth readiness 1320/1358 at 495 bars, and trailing Wolfy run success 9/12.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: provider/local daily headroom below the deterministic 15% threshold remains an absolute implementation stop; keep task `4133` blocked until the dedicated `wolfy_test` harness and option-ledger `snapshot_id` contract can be addressed in a budget-healthy bounded slice.
+- Next action: when deterministic headroom recovers, create a separately bounded Tier S task to reconcile the option-ledger `snapshot_id` test contract and move strategy-mutating integration tests onto the dedicated `wolfy_test` session harness; then rerun repeated full suites with complete governance hashes before reopening task `4133`.
+
+## 2026-10-04 daily optimizer DQ-TEST-2 blocked run
+
+- Time: 2026-10-04 02:16 ET / 06:16 UTC; outside all protected windows. Budget gate returned `BUDGET=ok tokens_today=0 cap=200000 headroom_pct=100.00`; guardian, gateway, cron, Postgres requirements, and probation checks passed.
+- Attempt: claimed task `4133` / run `413925`; backed up complete `strategies`, `backtests`, and `research_log` data at `wolfy/backups/20261004T062001Z-dq-test-2-pre-red/`; a new structural rollback guard failed RED against direct committing contexts in `test_eod_monitoring.py`, then passed GREEN after a one-file rollback-only conversion. The focused module passed 32/32 with all three governance hashes unchanged.
+- Full-suite gate failed: 197 passed / 2 failed because pre-existing option-ledger tests violate the live `option_structure_evaluations.snapshot_id NOT NULL` schema. The suite also changed approved strategy 4070 `notes`/`description`; a focused 2/2 passing repro isolated that separate commit leak to `test_experimental_options_recommendations.py` calling `seed_default_strategies()` in committing contexts.
+- Recovery: backed up post-failure strategy state, restored only strategy 4070 `notes`/`description` from the pre-test backup, and verified exact original hashes/counts: strategies 7 / `0e383f...42ca`, backtests 74 / `0e88a5...ab64`, research_log 73 / `495316...2af0`. Reverted the partial test-file edit; no source/config/cron/strategy-approval/trading change and no commit.
+- State: task `4133` blocked because its repeated full-suite zero-regression/byte-equivalence DoD cannot be met in the allowed two-file slice. Human-gated task `416` remains unchanged; exact ask remains confirmation that the historically exposed GitHub PAT was revoked or rotated.
+- Lesson: file-local rollback in revalidation tests is insufficient while other committing integration tests call shared strategy seeders, and full-suite closure also depends on resolving the option-ledger `snapshot_id` schema contract. Do not commit a partial isolation patch.
+- Next action: replace ad-hoc per-file live-DB cleanup with the already-developed dedicated `wolfy_test` session harness as a separately bounded migration, first reconciling the option-ledger `snapshot_id` contract; then rerun two full suites with complete governance hashes before reopening task `4133`.
+
 ## 2026-10-02 daily optimizer plan-only run
 
 - Time: 2026-10-02 02:15 ET / 06:15 UTC; outside all protected market/report windows.
