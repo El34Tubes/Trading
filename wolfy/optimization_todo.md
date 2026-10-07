@@ -1,5 +1,16 @@
 # Wolfy Daily Optimization TODO Ledger
 
+## 2026-10-07 daily optimizer plan-only run
+
+- Time: 2026-10-07 02:16 ET / 06:16 UTC; outside all protected market/report windows.
+- Budget gate: canonical `python3 wolfy/guardian/budget_gate.py --no-record` returned `BUDGET=block token_cap_exceeded tokens_today=258496 cap=200000` (exit 1), so this run remained PLAN-ONLY: deterministic review plus task/run/KPI/ledger state only; no code/config/cron/migration/strategy-approval/trading implementation.
+- Guardian/probation: no probation marker exists; production-home guardian returned `GUARDIAN=ok`; optimizer `92f31b95fccc` and guardian `e55c9cc39d8d` remain enabled, YAML/cron parsing and `hermes cron list/status` pass, and the gateway is active.
+- Prior review: HEAD `40cda4a478b2d0df6081a43f794095d837e90618` matches completed task `4231` / run `414346`, has ledger-only scope, passes `git show --check`, retains 25/25 KPI rows with measured/carried-forward provenance, and five config-guardian tests pass. Blocked corrective task `4133` remains non-active because the budget stop prohibits implementation.
+- State/KPI: plan-only task `4235` / run `414742`; exactly 25 KPI keys recorded with measured/carried-forward provenance. Decision-time capture: 258496 tokens against the 200000 daily cap, 3 completed tokenized cron runs today, core freshness 34/34 at common date 2026-10-05, depth readiness 1320/1358 at 495 bars, and trailing Wolfy run success 10/13.
+- Human gate: task `416` remains `blocked:needs-human-approval`; exact ask is confirmation in GitHub settings that the historically exposed PAT was revoked or rotated. No credential was printed or changed.
+- Lesson: daily token-cap exhaustion remains an absolute implementation stop; keep task `4133` non-active and do not rerun production-mutating suites until both the option-ledger `snapshot_id` contract and committing strategy seeder are isolated in the dedicated `wolfy_test` harness.
+- Next action: when deterministic headroom recovers, create a separately bounded Tier S task to reconcile the option-ledger `snapshot_id` test contract and move strategy-mutating integration tests onto the dedicated `wolfy_test` session harness; then rerun repeated full suites with complete governance hashes before reopening task `4133`.
+
 ## 2026-10-06 daily optimizer plan-only run
 
 - Time: 2026-10-06 02:18 ET / 06:18 UTC; outside all protected market/report windows.
