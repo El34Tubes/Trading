@@ -2,22 +2,25 @@
 """Smoke tests for Wolfy's Postgres-primary operational pipeline helpers."""
 from __future__ import annotations
 
-import json
-
 import pytest
 
 import wolfy_postgres_pipeline as pgpipe
 from recommendation_logger import log_recommendation
+from test_db import FutureFixture, future_fixture
 from wolfy_scanner import persist_scan
 
 
-def _sample_ranked():
+def _assert_test_database(conn):
+    assert conn.execute("select current_database()").fetchone()[0] == "wolfy_test"
+
+
+def _sample_ranked(fixture: FutureFixture):
     return [
         (
             12.5,
-            "MSFT",
+            fixture.ticker,
             {
-                "date": "2026-06-03",
+                "date": fixture.signal_dt.isoformat(),
                 "close": 425.0,
                 "r5": 1.0,
                 "r20": 4.2,
@@ -36,9 +39,10 @@ def _sample_ranked():
     ]
 
 
-def _complete_idea():
+def _complete_idea(fixture: FutureFixture | None = None):
+    fixture = fixture or future_fixture("pgrecommend")
     return {
-        "ticker": "MSFT",
+        "ticker": fixture.ticker,
         "action": "buy",
         "instrument_type": "equity",
         "robinhood_assumption": "Robinhood-listed U.S. large-cap common stock",
@@ -58,6 +62,7 @@ def _complete_idea():
 
 def test_postgres_operational_schema_has_scanner_recommendation_and_ledger_tables():
     with pgpipe.connect_postgres() as conn:
+        _assert_test_database(conn)
         pgpipe.ensure_operational_tables(conn)
         with conn.cursor() as cur:
             cur.execute(
@@ -78,43 +83,113 @@ def test_postgres_operational_schema_has_scanner_recommendation_and_ledger_table
             ]
 
 
-def test_scanner_persist_dual_writes_postgres_first_and_keeps_sqlite_compatibility(tmp_path):
+def test_scanner_persist_dual_writes_postgres_first_and_keeps_sqlite_compatibility(
+    tmp_path,
+):
+    fixture = future_fixture("pgscanner")
     sqlite_db = tmp_path / "wolfy.db"
     with pgpipe.connect_postgres() as conn:
+        _assert_test_database(conn)
         before = pgpipe.count_rows(conn, "scanner_runs")
 
-    sqlite_run_id = persist_scan(_sample_ranked(), sqlite_db, "ticker-list", notes="pytest-postgres-primary")
+    try:
+        sqlite_run_id = persist_scan(
+            _sample_ranked(fixture),
+            sqlite_db,
+            "ticker-list",
+            notes=fixture.strategy_name,
+        )
 
-    assert sqlite_run_id == 1
+        assert sqlite_run_id == 1
+        with pgpipe.connect_postgres() as conn:
+            _assert_test_database(conn)
+            assert pgpipe.count_rows(conn, "scanner_runs") == before + 1
+            pg_run_id = conn.execute(
+                "select id from scanner_runs where notes=%s",
+                (fixture.strategy_name,),
+            ).fetchone()[0]
+            assert conn.execute(
+                "select ticker, score, data_date from scanner_results where run_id=%s",
+                (pg_run_id,),
+            ).fetchone() == (
+                fixture.ticker,
+                pytest.approx(12.5),
+                fixture.signal_dt,
+            )
+    finally:
+        with pgpipe.connect_postgres() as conn:
+            _assert_test_database(conn)
+            conn.execute(
+                "delete from scanner_runs where notes=%s", (fixture.strategy_name,)
+            )
+            conn.commit()
+
     with pgpipe.connect_postgres() as conn:
-        after = pgpipe.count_rows(conn, "scanner_runs")
-        assert after == before + 1
-        with conn.cursor() as cur:
-            cur.execute("select id from scanner_runs where notes=%s order by id desc limit 1", ("pytest-postgres-primary",))
-            pg_run_id = cur.fetchone()[0]
-            cur.execute("select ticker, score, data_date from scanner_results where run_id=%s", (pg_run_id,))
-            assert cur.fetchone() == ("MSFT", pytest.approx(12.5), __import__('datetime').date(2026, 6, 3))
+        _assert_test_database(conn)
+        assert pgpipe.count_rows(conn, "scanner_runs") == before
+        assert conn.execute(
+            """
+            select count(*) from scanner_results
+            where ticker=%s and data_date=%s
+            """,
+            (fixture.ticker, fixture.signal_dt),
+        ).fetchone()[0] == 0
 
 
-def test_recommendation_logger_dual_writes_postgres_and_returns_fallback_free_metadata(tmp_path):
+def test_recommendation_logger_dual_writes_postgres_and_returns_fallback_free_metadata(
+    tmp_path,
+):
+    fixture = future_fixture("pgrecommend")
     sqlite_db = tmp_path / "wolfy.db"
     with pgpipe.connect_postgres() as conn:
+        _assert_test_database(conn)
         before = pgpipe.count_rows(conn, "recommendations")
 
-    result = log_recommendation(sqlite_db, _complete_idea())
+    try:
+        result = log_recommendation(sqlite_db, _complete_idea(fixture))
 
-    assert result["status"] == "pending_review"
-    assert result["postgres_primary"] is True
-    assert result["sqlite_compatibility"] is True
+        assert result["status"] == "pending_review"
+        assert result["postgres_primary"] is True
+        assert result["sqlite_compatibility"] is True
+        with pgpipe.connect_postgres() as conn:
+            _assert_test_database(conn)
+            assert pgpipe.count_rows(conn, "recommendations") == before + 1
+            assert conn.execute(
+                """
+                select ticker, status, notes->>'validator'
+                from recommendations where id=%s
+                """,
+                (result["postgres_recommendation_id"],),
+            ).fetchone() == (
+                fixture.ticker,
+                "pending_review",
+                "recommendation_logger.py",
+            )
+    finally:
+        with pgpipe.connect_postgres() as conn:
+            _assert_test_database(conn)
+            conn.execute(
+                "delete from recommendations where ticker=%s and thesis=%s",
+                (
+                    fixture.ticker,
+                    "Postgres-primary smoke idea; deterministic test data only.",
+                ),
+            )
+            conn.commit()
+
     with pgpipe.connect_postgres() as conn:
-        assert pgpipe.count_rows(conn, "recommendations") == before + 1
-        with conn.cursor() as cur:
-            cur.execute("select ticker, status, notes->>'validator' from recommendations where id=%s", (result["postgres_recommendation_id"],))
-            assert cur.fetchone() == ("MSFT", "pending_review", "recommendation_logger.py")
+        _assert_test_database(conn)
+        assert pgpipe.count_rows(conn, "recommendations") == before
+        assert conn.execute(
+            "select count(*) from recommendations where ticker=%s",
+            (fixture.ticker,),
+        ).fetchone()[0] == 0
 
 
 def test_report_context_status_warns_when_sqlite_fallback_is_used():
-    warning = pgpipe.fallback_warning("scanner_results", "Postgres unavailable during pytest")
+    warning = pgpipe.fallback_warning(
+        "scanner_results", "Postgres unavailable during pytest"
+    )
     assert "POSTGRES_PRIMARY_FALLBACK" in warning
     assert "scanner_results" in warning
     assert "stale SQLite compatibility" in warning

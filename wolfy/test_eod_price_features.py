@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from test_db import future_fixture, resolve_test_dsn, test_connection
+
 
 def test_default_massive_eod_end_dt_uses_previous_business_day(monkeypatch):
     from eod_price_features import _default_massive_eod_end_dt
@@ -71,7 +73,7 @@ def test_compute_eod_features_marks_insufficient_windows_and_liquidity_false():
 
 
 def test_prices_and_features_are_idempotently_upserted_into_postgres():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_price_features import (
         PriceBar,
         compute_and_store_features,
@@ -79,23 +81,24 @@ def test_prices_and_features_are_idempotently_upserted_into_postgres():
         ingest_price_bars,
     )
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    ticker = "ZZTESTEOD"
+    fixture = future_fixture("prices")
+    ticker = fixture.ticker
+    start_dt = fixture.signal_dt
     bars = [
-        PriceBar(ticker, date(2026, 2, 1), 10, 11, 9, 10, 1000),
-        PriceBar(ticker, date(2026, 2, 2), 11, 12, 10, 11, 2000),
-        PriceBar(ticker, date(2026, 2, 3), 12, 13, 11, 12, 3000),
+        PriceBar(ticker, start_dt, 10, 11, 9, 10, 1000),
+        PriceBar(ticker, start_dt + timedelta(days=1), 11, 12, 10, 11, 2000),
+        PriceBar(ticker, start_dt + timedelta(days=2), 12, 13, 11, 12, 3000),
     ]
 
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_eod_feature_schema(conn)
         ingest_run_1 = ingest_price_bars(conn, bars, source="unit-fixture")
         ingest_run_2 = ingest_price_bars(conn, bars, source="unit-fixture")
         feature_run = compute_and_store_features(
             conn,
             tickers=[ticker],
-            start_dt=date(2026, 2, 1),
-            end_dt=date(2026, 2, 3),
+            start_dt=start_dt,
+            end_dt=start_dt + timedelta(days=2),
             sma_fast_window=2,
             sma_slow_window=3,
             volume_window=3,
@@ -106,7 +109,7 @@ def test_prices_and_features_are_idempotently_upserted_into_postgres():
         price_count = conn.execute("SELECT count(*) FROM prices WHERE ticker=%s", (ticker,)).fetchone()[0]
         feature = conn.execute(
             "SELECT sma_fast, sma_slow, vol_ratio, dollar_vol, atr, liquidity, vol_regime FROM features WHERE ticker=%s AND dt=%s",
-            (ticker, date(2026, 2, 3)),
+            (ticker, start_dt + timedelta(days=2)),
         ).fetchone()
         runs = conn.execute(
             "SELECT job, status FROM runs WHERE id = ANY(%s) ORDER BY id",
@@ -170,14 +173,13 @@ def test_fetch_massive_eod_bars_maps_adjusted_aggregates(monkeypatch):
 
 
 def test_store_massive_reference_symbols_upserts_universe_in_postgres():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_price_features import ensure_eod_feature_schema, store_massive_reference_symbols
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    symbol = "ZZMASSIVEETF"
+    symbol = future_fixture("massiveetf").ticker
     records = [{"ticker": symbol, "name": "Massive Fixture ETF", "type": "ETF", "active": True}]
 
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_eod_feature_schema(conn)
         stored = store_massive_reference_symbols(conn, records)
         row = conn.execute("SELECT symbol, name, source, is_etf, active FROM universe_symbols WHERE symbol=%s", (symbol,)).fetchone()
@@ -188,15 +190,15 @@ def test_store_massive_reference_symbols_upserts_universe_in_postgres():
 
 
 def test_validate_price_data_quality_records_stale_blocker_without_corporate_action_fetch():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_price_features import PriceBar, ensure_eod_feature_schema, ingest_price_bars, validate_price_data_quality
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    ticker = "ZZSTALEMASSIVE"
-    as_of = date(2026, 2, 10)
-    bars = [PriceBar(ticker, date(2026, 1, 1), 10, 10, 10, 10, 1000)]
+    fixture = future_fixture("stale")
+    ticker = fixture.ticker
+    as_of = fixture.signal_dt
+    bars = [PriceBar(ticker, as_of - timedelta(days=40), 10, 10, 10, 10, 1000)]
 
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_eod_feature_schema(conn)
         run_id = ingest_price_bars(conn, bars, source="unit-fixture")
         result = validate_price_data_quality(
@@ -244,12 +246,12 @@ def test_fetch_eodhs_eod_bars_is_capped_and_uses_adjusted_close(monkeypatch):
 
 
 def test_incremental_massive_plan_skips_current_ticker_without_api_call(monkeypatch):
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_price_features import PriceBar, _fetch_incremental_massive_bars, ensure_eod_feature_schema, ingest_price_bars
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
-    ticker = "ZZCURRENTAPI"
-    latest_accessible_dt = date(2026, 7, 20)
+    fixture = future_fixture("currentapi")
+    ticker = fixture.ticker
+    latest_accessible_dt = fixture.signal_dt
     bars = [PriceBar(ticker, latest_accessible_dt, 10, 11, 9, 10, 1000)]
 
     def fail_fetch(*args, **kwargs):
@@ -258,7 +260,7 @@ def test_incremental_massive_plan_skips_current_ticker_without_api_call(monkeypa
     monkeypatch.setattr("eod_price_features.fetch_massive_eod_bars", fail_fetch)
     monkeypatch.setattr("eod_price_features.fetch_massive_corporate_actions", lambda *args, **kwargs: {ticker: []})
 
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_eod_feature_schema(conn)
         run_id = ingest_price_bars(conn, bars, source="unit-current-api")
         fetched, plan = _fetch_incremental_massive_bars(
@@ -281,7 +283,7 @@ def test_incremental_massive_plan_refetches_full_history_after_split(monkeypatch
     psycopg = pytest.importorskip("psycopg")
     from eod_price_features import PriceBar, _fetch_incremental_massive_bars, ensure_eod_feature_schema, ingest_price_bars, validate_price_data_quality
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    dsn = resolve_test_dsn()
     ticker = "ZZSPLITAPI"
     end_dt = date(2026, 7, 20)
     days = 730
@@ -382,7 +384,7 @@ def test_massive_ingest_records_completed_split_refetch(monkeypatch):
     psycopg = pytest.importorskip("psycopg")
     from eod_price_features import PriceBar, ensure_eod_feature_schema, massive_ingest
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
+    dsn = resolve_test_dsn()
     ticker = "ZZSPLITMARKER"
     end_dt = date(2026, 7, 20)
     split_dt = "2026-07-15"

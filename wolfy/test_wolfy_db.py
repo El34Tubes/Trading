@@ -2,6 +2,8 @@
 """Tests for Wolfy's shared Postgres-only DB adapter."""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 import wolfy_db
@@ -29,14 +31,14 @@ def test_postgres_dsn_prefers_new_name_but_accepts_legacy_name(monkeypatch):
     assert wolfy_db.get_database_config().postgres_dsn == "dbname=new"
 
 
-def test_connect_wolfy_db_connects_to_live_postgres_by_default():
+def test_connect_wolfy_db_connects_to_isolated_postgres_by_default():
     with wolfy_db.connect_wolfy_db() as handle:
         assert handle.backend == "postgres"
         with handle.connection.cursor() as cur:
             cur.execute("select current_database(), to_regclass('public.agent_runs') is not null")
             database_name, has_agent_runs = cur.fetchone()
 
-    assert database_name == "wolfy"
+    assert database_name == "wolfy_test"
     assert has_agent_runs is True
 
 
@@ -63,7 +65,7 @@ def test_agent_coordination_uses_shared_postgres_adapter(monkeypatch):
 
     monkeypatch.setattr(wolfy_agent_coordination, "connect_postgres", fake_connect_postgres)
 
-    assert wolfy_agent_coordination.DEFAULT_PG_DSN == wolfy_db.DEFAULT_POSTGRES_DSN
+    assert wolfy_agent_coordination.DEFAULT_PG_DSN == os.environ["WOLFY_POSTGRES_DSN"]
     assert wolfy_agent_coordination.connect("dbname=shared-adapter-test") == "postgres-connection"
     assert calls == ["dbname=shared-adapter-test"]
 

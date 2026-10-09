@@ -27,7 +27,7 @@ ss -ltnp | grep ':80\|:443\|:8080\|:4860\|:32768' || true
 ```
 
 ```bash
-for host in wolfy-dashboard.srv1718608.hstgr.cloud dunkindaffnutz.srv1718608.hstgr.cloud hermes-agent-zq7g.srv1718608.hstgr.cloud; do
+for host in dashboard.example.invalid app-one.example.invalid agent.example.invalid; do
   echo "### $host"
   curl -4 -skS -o /dev/null -w 'ipv4 https=%{http_code} ip=%{remote_ip}\n' "https://$host/" || true
   curl -6 -skS -o /dev/null -w 'ipv6 https=%{http_code} ip=%{remote_ip}\n' "https://$host/" || true
@@ -35,7 +35,7 @@ done
 ```
 
 ```bash
-for host in wolfy-dashboard.srv1718608.hstgr.cloud dunkindaffnutz.srv1718608.hstgr.cloud hermes-agent-zq7g.srv1718608.hstgr.cloud; do
+for host in dashboard.example.invalid app-one.example.invalid agent.example.invalid; do
   echo "### $host"
   echo | openssl s_client -connect "${host}:443" -servername "$host" 2>/dev/null | openssl x509 -noout -subject -issuer -dates || echo openssl_failed
 done
@@ -79,7 +79,7 @@ Then verify:
 ```bash
 docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
 ss -ltnp | grep ':80\|:443\|:8080' || true
-for host in dunkindaffnutz.srv1718608.hstgr.cloud hermes-agent-zq7g.srv1718608.hstgr.cloud wolfy-dashboard.srv1718608.hstgr.cloud; do
+for host in app-one.example.invalid agent.example.invalid dashboard.example.invalid; do
   curl -4 -skS -o /dev/null -w 'ipv4 https=%{http_code} err=%{errormsg}\n' "https://$host/" || true
   curl -6 -skS -o /dev/null -w 'ipv6 https=%{http_code} err=%{errormsg}\n' "https://$host/" || true
 done
@@ -94,8 +94,8 @@ If the user asks to remove any non-standard proxy/Traefik pieces created togethe
 Inventory first:
 
 ```bash
-docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | grep -Ei 'wolfy|dashboard|traefik|dunkindaffnutz|hermes' || true
-docker network ls --format '{{.Name}}\t{{.Driver}}' | grep -Ei 'wolfy|dashboard|traefik|dunkindaffnutz|hermes' || true
+docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | grep -Ei 'wolfy|dashboard|traefik|app-one|hermes' || true
+docker network ls --format '{{.Name}}\t{{.Driver}}' | grep -Ei 'wolfy|dashboard|traefik|app-one|hermes' || true
 docker volume ls --format '{{.Name}}' | grep -Ei 'wolfy|dashboard|traefik|caddy' || true
 grep -RIl --exclude-dir=.git --exclude='*.pyc' --exclude='*.log' -E 'wolfy-dashboard|Caddyfile|traefik\.http\.routers\.wolfy|dashboard\.srv' /docker /root/.hermes/wolfy /var/lib/docker/volumes/traefik_traefik-letsencrypt/_data 2>/dev/null | sort || true
 ```

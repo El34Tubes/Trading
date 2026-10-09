@@ -547,9 +547,9 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
         source=COALESCE(source, NULLIF(detail->>'source', '')),
         rows_written=COALESCE(
           rows_written,
-          NULLIF(detail->>'rows_written', '')::integer,
-          NULLIF(detail->>'rows_upserted', '')::integer,
-          NULLIF(detail->>'feature_rows_upserted', '')::integer
+          CASE WHEN (detail->>'rows_written') ~ '^[0-9]+$' THEN (detail->>'rows_written')::integer END,
+          CASE WHEN (detail->>'rows_upserted') ~ '^[0-9]+$' THEN (detail->>'rows_upserted')::integer END,
+          CASE WHEN (detail->>'feature_rows_upserted') ~ '^[0-9]+$' THEN (detail->>'feature_rows_upserted')::integer END
         )
     WHERE started_at IS NULL OR completed_at IS NULL OR ended_at IS NULL OR source IS NULL OR rows_written IS NULL;
 
@@ -570,9 +570,9 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       END IF;
       IF NEW.rows_written IS NULL THEN
         NEW.rows_written := COALESCE(
-          NULLIF(NEW.detail->>'rows_written', '')::integer,
-          NULLIF(NEW.detail->>'rows_upserted', '')::integer,
-          NULLIF(NEW.detail->>'feature_rows_upserted', '')::integer
+          CASE WHEN (NEW.detail->>'rows_written') ~ '^[0-9]+$' THEN (NEW.detail->>'rows_written')::integer END,
+          CASE WHEN (NEW.detail->>'rows_upserted') ~ '^[0-9]+$' THEN (NEW.detail->>'rows_upserted')::integer END,
+          CASE WHEN (NEW.detail->>'feature_rows_upserted') ~ '^[0-9]+$' THEN (NEW.detail->>'feature_rows_upserted')::integer END
         );
       END IF;
       RETURN NEW;
@@ -597,9 +597,9 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       source,
       rows_written,
       detail,
-      NULLIF(detail->>'bars_loaded', '')::integer AS bars_loaded,
-      NULLIF(detail->>'feature_rows_upserted', '')::integer AS feature_rows_upserted,
-      NULLIF(detail->>'tickers_processed', '')::integer AS tickers_processed
+      CASE WHEN (detail->>'bars_loaded') ~ '^[0-9]+$' THEN (detail->>'bars_loaded')::integer END AS bars_loaded,
+      CASE WHEN (detail->>'feature_rows_upserted') ~ '^[0-9]+$' THEN (detail->>'feature_rows_upserted')::integer END AS feature_rows_upserted,
+      CASE WHEN (detail->>'tickers_processed') ~ '^[0-9]+$' THEN (detail->>'tickers_processed')::integer END AS tickers_processed
     FROM runs
     WHERE job LIKE 'eod%' OR job LIKE 'feature%';
 

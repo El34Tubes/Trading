@@ -15,7 +15,7 @@ When the VPS already runs Hostinger's Hermes/Traefik stack:
    - Existing `.env` keys only by name; redact values except non-secret routing hostnames.
 2. If Traefik is already active and `TRAEFIK_HOST` is a Hostinger wildcard hostname, a service can often be launched at:
    - `<service>.<TRAEFIK_HOST>`
-   - In this session: `wolfy-dashboard.srv1718608.hstgr.cloud` resolved without custom DNS work.
+   - Example: `dashboard.example.invalid` may resolve without custom DNS work when the provider wildcard is configured.
 3. Create a dedicated compose directory such as `/docker/wolfy-dashboard/` with:
    - Generated `WOLFY_DASHBOARD_PIN` in `.env` with mode `0600`.
    - `COMPOSE_PROJECT_NAME=wolfy-dashboard`.
@@ -46,8 +46,8 @@ When the VPS already runs Hostinger's Hermes/Traefik stack:
 
 ## Verification from this session
 
-- Docker container: `wolfy-dashboard-wolfy-dashboard-1`.
-- Public URL: `https://wolfy-dashboard.srv1718608.hstgr.cloud/`.
+- Docker container: `dashboard-service-1`.
+- Public URL example: `https://dashboard.example.invalid/`.
 - Verified public HTTPS health and authenticated summary.
 - Summary returned 30 timeline days, auto-discovered agents, 2 polls, 60-second refresh, and recommendation-attention data.
 

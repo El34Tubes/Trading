@@ -31,6 +31,11 @@ def test_snapshot_success_stays_silent_and_persists_scan(monkeypatch, tmp_path, 
         return [(5.0, 'LEADER', {'date': '2026-06-03'})], {}
 
     monkeypatch.setattr(snapshot.wolfy_scanner, 'run_scan', fake_run_scan)
+    monkeypatch.setattr(
+        snapshot,
+        'load_universe_postgres',
+        lambda *_args, **_kwargs: pytest.fail('SQLite compatibility mode must not query live Postgres'),
+    )
 
     status = snapshot.run_snapshot(db_path=db, universe='core', max_workers=1, min_ranked=1, max_failure_rate=0.5)
 

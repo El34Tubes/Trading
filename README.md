@@ -111,7 +111,7 @@ Downloaded issuer reports and raw source payloads are not published in this publ
 ### Operations and coordination
 
 - `scripts/` — stable cron-facing wrappers. Most delegate to canonical modules in `wolfy/`.
-- `cron/jobs.json` — Hermes scheduler definitions and current operational state.
+- `cron/jobs.public.json` — sanitized, disabled, local-only scheduler inventory suitable for public recovery documentation. The exact live `cron/jobs.json`, including routing and current operational state, is private runtime data preserved only in the encrypted recovery archive.
 - `wolfy/guardian/` — configuration guardian and usage-budget gate.
 - `wolfy/mike_*` and `scripts/mike_*` — deterministic IT/admin diagnostics and safe repair.
 - `wolfy/wolfy_agent_coordination.py`, `wolfy/wolfy_agent_cli.py`, and `wolfy/visible_progress_ledger.py` — PostgreSQL-backed task/run coordination.
@@ -230,7 +230,7 @@ The set was rehearsed transactionally, applied to a clone of production, backed 
 
 ## Scheduler topology
 
-Hermes cron definitions live in `cron/jobs.json`. The major workflow is:
+A sanitized scheduler inventory lives in `cron/jobs.public.json`; every entry is intentionally disabled and local-only. The exact live definitions and routing live in `cron/jobs.json`, which is Git-ignored and must be restored from the encrypted private runtime archive. Review destinations and keep jobs disabled until validation. The major workflow is:
 
 1. five after-close Massive price-ingestion shards;
 2. deterministic feature and approved-signal generation;

@@ -3,6 +3,9 @@
 .env.*
 auth.json
 auth.lock
+# Exact live configuration contains platform routing and host-specific settings.
+# Restore it from the encrypted private runtime archive, never public Git.
+/config.yaml
 *credentials*
 *.token
 *.pem
@@ -61,6 +64,9 @@ memories/
 gateway/
 pairing/
 cron/output/
+# Live scheduler definitions contain routing identity and execution telemetry.
+# Commit only cron/jobs.public.json; preserve the exact live file privately.
+cron/jobs.json
 cron/*.bak
 .skills_prompt_snapshot.json
 processes.json

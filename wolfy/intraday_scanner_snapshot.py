@@ -24,8 +24,13 @@ class SnapshotAlert(RuntimeError):
 
 
 def _active_universe_count(universe: str, symbols: list[str] | None = None) -> int:
+    # The caller has already resolved the authoritative universe. Reuse it so
+    # SQLite compatibility tests and bounded smokes never reach into live
+    # Postgres merely to assemble status metadata.
+    if symbols is not None:
+        return len(symbols)
     if universe == 'ticker-list':
-        return len(symbols or [])
+        return 0
     return len(load_universe_postgres(universe))
 
 

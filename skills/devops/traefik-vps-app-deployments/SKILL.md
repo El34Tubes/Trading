@@ -67,7 +67,7 @@ done
 Test every known route over IPv4 and IPv6:
 
 ```bash
-for host in wolfy-dashboard.srv1718608.hstgr.cloud dunkindaffnutz.srv1718608.hstgr.cloud hermes-agent-zq7g.srv1718608.hstgr.cloud; do
+for host in dashboard.example.invalid app-one.example.invalid agent.example.invalid; do
   echo "### $host"
   curl -4 -skS -o /dev/null -w 'ipv4 https=%{http_code} ip=%{remote_ip}\n' "https://$host/" || true
   curl -6 -skS -o /dev/null -w 'ipv6 https=%{http_code} ip=%{remote_ip}\n' "https://$host/" || true
@@ -169,7 +169,7 @@ After verifying existing routes, delete the temporary backup if the user asked f
 ss -ltnp | grep ':80\\|:443\\|:8080' || true
 # Should show Traefik on 80/443 and no public 8080 unless intentionally exposed.
 
-for host in wolfy-dashboard.srv1718608.hstgr.cloud dunkindaffnutz.srv1718608.hstgr.cloud hermes-agent-zq7g.srv1718608.hstgr.cloud; do
+for host in dashboard.example.invalid app-one.example.invalid agent.example.invalid; do
   curl -4 -skS -o /dev/null -w "$host %{http_code}\\n" "https://$host/" || true
 done
 ```

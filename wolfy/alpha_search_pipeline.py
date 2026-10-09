@@ -158,6 +158,7 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         CREATE TABLE IF NOT EXISTS alpha_search_reports (
           id BIGSERIAL PRIMARY KEY,
           legacy_id BIGINT UNIQUE,
+          sqlite_id BIGINT UNIQUE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           source_job_id TEXT NOT NULL DEFAULT 'wolfy-alpha-search-report',
           agent_run_id TEXT,
@@ -174,6 +175,7 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         CREATE TABLE IF NOT EXISTS alpha_leads (
           id BIGSERIAL PRIMARY KEY,
           legacy_id BIGINT UNIQUE,
+          sqlite_id BIGINT UNIQUE,
           report_id BIGINT REFERENCES alpha_search_reports(id) ON DELETE SET NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -215,6 +217,7 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         CREATE TABLE IF NOT EXISTS alpha_lead_evidence (
           id BIGSERIAL PRIMARY KEY,
           legacy_id BIGINT UNIQUE,
+          sqlite_id BIGINT UNIQUE,
           lead_id BIGINT NOT NULL REFERENCES alpha_leads(id) ON DELETE CASCADE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           evidence_type TEXT NOT NULL,
@@ -233,6 +236,7 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         CREATE TABLE IF NOT EXISTS alpha_handoffs (
           id BIGSERIAL PRIMARY KEY,
           legacy_id BIGINT UNIQUE,
+          sqlite_id BIGINT UNIQUE,
           lead_id BIGINT REFERENCES alpha_leads(id) ON DELETE CASCADE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           target_agent TEXT NOT NULL,
@@ -246,6 +250,37 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         )
         """,
     ]
+    for table in ("alpha_search_reports", "alpha_leads", "alpha_lead_evidence", "alpha_handoffs"):
+        # Hard-coded allowlist: preserve both historical import identifiers on
+        # populated databases as well as clean bootstrap schemas.
+        statements.extend(
+            [
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS legacy_id BIGINT",
+                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS sqlite_id BIGINT",
+                f"UPDATE {table} SET legacy_id=COALESCE(legacy_id, sqlite_id), sqlite_id=COALESCE(sqlite_id, legacy_id) WHERE legacy_id IS NULL OR sqlite_id IS NULL",
+                f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{table}_legacy_id ON {table}(legacy_id) WHERE legacy_id IS NOT NULL",
+                f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{table}_sqlite_id ON {table}(sqlite_id) WHERE sqlite_id IS NOT NULL",
+            ]
+        )
+    statements.append(
+        """
+        CREATE OR REPLACE FUNCTION wolfy_sync_alpha_import_ids()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          NEW.legacy_id := COALESCE(NEW.legacy_id, NEW.sqlite_id);
+          NEW.sqlite_id := COALESCE(NEW.sqlite_id, NEW.legacy_id);
+          RETURN NEW;
+        END;
+        $$
+        """
+    )
+    for table in ("alpha_search_reports", "alpha_leads", "alpha_lead_evidence", "alpha_handoffs"):
+        statements.extend(
+            [
+                f"DROP TRIGGER IF EXISTS trg_{table}_import_ids ON {table}",
+                f"CREATE TRIGGER trg_{table}_import_ids BEFORE INSERT OR UPDATE OF legacy_id, sqlite_id ON {table} FOR EACH ROW EXECUTE FUNCTION wolfy_sync_alpha_import_ids()",
+            ]
+        )
     with psycopg.connect(pg_dsn) as conn, conn.cursor() as cur:
         for statement in statements:
             cur.execute(statement)

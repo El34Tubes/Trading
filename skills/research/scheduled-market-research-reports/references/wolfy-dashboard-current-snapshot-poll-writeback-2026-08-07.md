@@ -59,12 +59,12 @@ Live Hostinger verification used:
 cd /docker/wolfy-dashboard
 docker compose --env-file .env up -d --build
 curl -fsS -H "x-dashboard-pin: $WOLFY_DASHBOARD_PIN" \
-  https://wolfy-dashboard.srv1718608.hstgr.cloud/api/summary
+  https://dashboard.example.invalid/api/summary
 curl -fsS -X POST \
   -H "content-type: application/json" \
   -H "x-dashboard-pin: $WOLFY_DASHBOARD_PIN" \
   -d '{"choice":"paper logging","note":"live click-equivalent verification"}' \
-  https://wolfy-dashboard.srv1718608.hstgr.cloud/api/polls/next-build/answer
+  https://dashboard.example.invalid/api/polls/next-build/answer
 ```
 
 Expected verified result:

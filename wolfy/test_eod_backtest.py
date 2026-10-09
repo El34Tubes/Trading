@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 from eod_price_features import PriceBar, compute_and_store_features, ingest_price_bars
+from test_db import test_connection
 
 
 def _fixture_bars(ticker: str = "ZZBT", *, start: date = date(2026, 1, 1), n: int = 12) -> list[PriceBar]:
@@ -183,13 +184,12 @@ def test_evaluate_oos_gates_reports_threshold_failures():
 
 
 def test_run_backtest_records_insufficient_trade_count_failure_reason():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_backtest import ensure_backtest_schema, run_backtest
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZBTTHIN"
     strategy_name = "unit_walk_forward_thin_sample"
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_backtest_schema(conn)
         _cleanup(conn, ticker, strategy_name)
         strategy_id = conn.execute(
@@ -228,13 +228,12 @@ def test_run_backtest_records_insufficient_trade_count_failure_reason():
 
 
 def test_run_backtest_logs_walk_forward_result_and_promotes_only_to_candidate():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_backtest import ensure_backtest_schema, run_backtest
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZBT"
     strategy_name = "unit_walk_forward_candidate"
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_backtest_schema(conn)
         _cleanup(conn, ticker, strategy_name)
         strategy_id = conn.execute(
@@ -294,13 +293,12 @@ def test_run_backtest_logs_walk_forward_result_and_promotes_only_to_candidate():
 
 
 def test_run_backtest_rejects_reduced_costs_and_never_sets_approved():
-    psycopg = pytest.importorskip("psycopg")
+    pytest.importorskip("psycopg")
     from eod_backtest import ensure_backtest_schema, run_backtest
 
-    dsn = "dbname=wolfy user=root host=/var/run/postgresql"
     ticker = "ZZBTCOST"
     strategy_name = "unit_walk_forward_cost_guard"
-    with psycopg.connect(dsn) as conn:
+    with test_connection() as conn:
         ensure_backtest_schema(conn)
         _cleanup(conn, ticker, strategy_name)
         conn.execute(
