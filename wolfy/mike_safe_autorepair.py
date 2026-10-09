@@ -540,6 +540,21 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ;
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS source TEXT;
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS rows_written INTEGER;
+    CREATE OR REPLACE FUNCTION wolfy_jsonb_nonnegative_integer(document JSONB, field_name TEXT)
+    RETURNS INTEGER LANGUAGE plpgsql IMMUTABLE AS $$
+    DECLARE
+      raw_value TEXT;
+    BEGIN
+      raw_value := document->>field_name;
+      IF raw_value IS NULL OR raw_value !~ '^[0-9]+$' THEN
+        RETURN NULL;
+      END IF;
+      RETURN raw_value::INTEGER;
+    EXCEPTION
+      WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+        RETURN NULL;
+    END;
+    $$;
     UPDATE runs
     SET started_at=COALESCE(started_at, started),
         completed_at=COALESCE(completed_at, finished),
@@ -547,9 +562,9 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
         source=COALESCE(source, NULLIF(detail->>'source', '')),
         rows_written=COALESCE(
           rows_written,
-          CASE WHEN (detail->>'rows_written') ~ '^[0-9]+$' THEN (detail->>'rows_written')::integer END,
-          CASE WHEN (detail->>'rows_upserted') ~ '^[0-9]+$' THEN (detail->>'rows_upserted')::integer END,
-          CASE WHEN (detail->>'feature_rows_upserted') ~ '^[0-9]+$' THEN (detail->>'feature_rows_upserted')::integer END
+          wolfy_jsonb_nonnegative_integer(detail, 'rows_written'),
+          wolfy_jsonb_nonnegative_integer(detail, 'rows_upserted'),
+          wolfy_jsonb_nonnegative_integer(detail, 'feature_rows_upserted')
         )
     WHERE started_at IS NULL OR completed_at IS NULL OR ended_at IS NULL OR source IS NULL OR rows_written IS NULL;
 
@@ -570,9 +585,9 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       END IF;
       IF NEW.rows_written IS NULL THEN
         NEW.rows_written := COALESCE(
-          CASE WHEN (NEW.detail->>'rows_written') ~ '^[0-9]+$' THEN (NEW.detail->>'rows_written')::integer END,
-          CASE WHEN (NEW.detail->>'rows_upserted') ~ '^[0-9]+$' THEN (NEW.detail->>'rows_upserted')::integer END,
-          CASE WHEN (NEW.detail->>'feature_rows_upserted') ~ '^[0-9]+$' THEN (NEW.detail->>'feature_rows_upserted')::integer END
+          wolfy_jsonb_nonnegative_integer(NEW.detail, 'rows_written'),
+          wolfy_jsonb_nonnegative_integer(NEW.detail, 'rows_upserted'),
+          wolfy_jsonb_nonnegative_integer(NEW.detail, 'feature_rows_upserted')
         );
       END IF;
       RETURN NEW;
@@ -597,9 +612,9 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       source,
       rows_written,
       detail,
-      CASE WHEN (detail->>'bars_loaded') ~ '^[0-9]+$' THEN (detail->>'bars_loaded')::integer END AS bars_loaded,
-      CASE WHEN (detail->>'feature_rows_upserted') ~ '^[0-9]+$' THEN (detail->>'feature_rows_upserted')::integer END AS feature_rows_upserted,
-      CASE WHEN (detail->>'tickers_processed') ~ '^[0-9]+$' THEN (detail->>'tickers_processed')::integer END AS tickers_processed
+      wolfy_jsonb_nonnegative_integer(detail, 'bars_loaded') AS bars_loaded,
+      wolfy_jsonb_nonnegative_integer(detail, 'feature_rows_upserted') AS feature_rows_upserted,
+      wolfy_jsonb_nonnegative_integer(detail, 'tickers_processed') AS tickers_processed
     FROM runs
     WHERE job LIKE 'eod%' OR job LIKE 'feature%';
 

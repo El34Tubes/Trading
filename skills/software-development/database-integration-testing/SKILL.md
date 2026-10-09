@@ -141,7 +141,9 @@ Treat immutable rerun fields outside the identity hash as a separate contract. P
 
 When canonical fields live inside JSONB, test the nested document independently of scalar-column guards. A trigger that validates nested stage fields only during terminal publication still permits malformed authoritative preterminal rows, and a migration that checks only `jsonb_typeof(document) = 'object'` can preserve invalid populated metadata. Require direct SQL rejection in every lifecycle state and atomic migration failure for malformed but object-shaped legacy JSON. Treat each array invariant as independent: nonempty, canonical elements, uniqueness, and ordering each need a separate counterexample. In particular, send an unsorted-but-otherwise-valid array through the application writer, direct SQL, and a populated partial-schema migration; a green malformed-value suite can miss an absent ordering check. See `references/nested-json-ledger-canonicality.md`.
 
-See `references/exact-snapshot-release-review.md` for the complete release-review recipe and evidence checklist.
+See `references/exact-snapshot-release-review.md` for the complete database-isolation release-review recipe and evidence checklist.
+
+For exact source-publication reviews that also cover a default-disabled production adapter, public scheduler inventory, compatibility aliases, recovery documentation, and wipe-readiness, use `references/source-publication-disabled-activation-audit.md`. It adds separate publication-vs-activation verdicts, one-sided dual-ID UPDATE/conflict probes, numeric JSON overflow probes, post-canary recurring-mode verification, structural scheduler sanitization, writer quiescence before final snapshots, extension-aware restore drills, encrypted off-server round-trip verification, separate key custody, and late-audit commit/tag finality.
 
 For repeated ledger review failures, use a bounded snapshot-specific revision loop: convert every finding into adversarial RED coverage, review each new exact commit, and escalate for explicit user authorization after three failed quality revisions. A timed-out background implementer is an unknown outcome—not proof of failed work—so inspect the shared worktree and focused tests before retrying or discarding changes. See `references/bounded-ledger-review-loops.md`.
 
@@ -208,6 +210,11 @@ For repeated ledger review failures, use a bounded snapshot-specific revision lo
 - [ ] Production before/after counts, governance row, and authorization metadata match exactly
 - [ ] Changed files pass lint, compile, and diff checks
 - [ ] Staged file list is explicit and working tree is clean after commit
+- [ ] Every source/config/database writer is quiesced before the final multi-store backup; scheduler state is rechecked before and after
+- [ ] PostgreSQL and SQLite are restored from decrypted artifacts and validated, not merely dumped
+- [ ] Encrypted assets are downloaded back from private off-server storage and match local SHA-256 and byte sizes
+- [ ] Recovery key custody is separately confirmed before any wipe approval
+- [ ] Private recovery manifest, final source SHA/tag, clean-clone test result, and remote refs all agree
 
 ## References
 

@@ -430,6 +430,52 @@ def execute_canary_callbacks(
     }
 
 
+def execute_scheduled_callbacks(
+    release: ProductionRelease,
+    *,
+    publish: Callable[..., Mapping[str, object]],
+    readback: Callable[[], Mapping[str, object]],
+    canary_evidence: Mapping[str, object],
+) -> dict[str, object]:
+    """Validate an authorized recurring invocation for the exact canary scope."""
+    expected_ids_raw = canary_evidence.get("recommendation_ids")
+    if not isinstance(expected_ids_raw, list) or any(not isinstance(value, str) for value in expected_ids_raw):
+        raise ProductionReleaseError("canary evidence recommendation_ids are malformed")
+    expected_ids = tuple(expected_ids_raw)
+    published = publish(rerun=True)
+    published_ids = _validate_publication(release, published, phase="scheduled idempotent publish")
+    if published["recommendations_created"] != 0:
+        raise ProductionReleaseError("scheduled exact-snapshot invocation created recommendations after canary")
+    if published_ids != expected_ids:
+        raise ProductionReleaseError("scheduled publication differs from authorized canary scope")
+    durable = readback()
+    durable_ids = _validate_publication(release, durable, phase="scheduled durable readback")
+    if durable["recommendations_created"] != 0 or durable_ids != expected_ids:
+        raise ProductionReleaseError("scheduled durable readback differs from authorized canary scope")
+    return {
+        "schema_version": EVIDENCE_SCHEMA,
+        "passed": True,
+        "scheduled": True,
+        "snapshot_id": release.snapshot_id,
+        "snapshot_fingerprint": release.snapshot_fingerprint,
+        "config_version": release.config_version,
+        "recommendation_ids": list(durable_ids),
+        "recommendations_created": 0,
+        "decision": durable.get("decision", "actionable" if durable_ids else "no_trade"),
+        "positions_total": durable["positions_total"],
+        "maximum_sector_positions": durable["maximum_sector_positions"],
+        "risk_fractions": list(durable["risk_fractions"]),
+        "aggregate_risk": durable["aggregate_risk"],
+        "research_only_published": 0,
+        "exact_chain_or_stock_fallback": True,
+        "paper_only": True,
+        "no_live_execution": True,
+        "broker_orders_created": 0,
+        "external_deliveries": 0,
+        "idempotent_rerun": True,
+    }
+
+
 def persist_canary_evidence(
     release: ProductionRelease,
     artifact_path: str | Path,
@@ -1102,8 +1148,10 @@ def run_production_canary(
     """Run the real bounded production-paper adapter against exact DB ``wolfy``."""
     import psycopg
     release = load_release_artifact(artifact_path)
+    scheduled_evidence: Mapping[str, object] | None = None
     if scheduled:
         authorize_scheduled_production(release, artifact_path)
+        scheduled_evidence = _load_json_object(release.canary_evidence_path, "canary evidence")
     with psycopg.connect("dbname=wolfy user=root host=/var/run/postgresql") as conn:
         validate_production_connection(conn)
         verify_snapshot_preflight(conn, release)
@@ -1123,7 +1171,17 @@ def run_production_canary(
             payload = _production_readback(conn, release)
             conn.commit()
             return payload
-        evidence = execute_canary_callbacks(release, publish=publish, readback=readback)
+        if scheduled:
+            if scheduled_evidence is None:  # defensive; authorization above must populate it
+                raise ProductionReleaseError("scheduled canary evidence is unavailable")
+            evidence = execute_scheduled_callbacks(
+                release,
+                publish=publish,
+                readback=readback,
+                canary_evidence=scheduled_evidence,
+            )
+        else:
+            evidence = execute_canary_callbacks(release, publish=publish, readback=readback)
     if not scheduled:
         evidence = persist_canary_evidence(release, artifact_path, evidence)
     return evidence

@@ -262,17 +262,55 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
                 f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{table}_sqlite_id ON {table}(sqlite_id) WHERE sqlite_id IS NOT NULL",
             ]
         )
-    statements.append(
-        """
-        CREATE OR REPLACE FUNCTION wolfy_sync_alpha_import_ids()
-        RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN
-          NEW.legacy_id := COALESCE(NEW.legacy_id, NEW.sqlite_id);
-          NEW.sqlite_id := COALESCE(NEW.sqlite_id, NEW.legacy_id);
-          RETURN NEW;
-        END;
-        $$
-        """
+    statements.extend(
+        [
+            """
+            DO $$
+            DECLARE
+              relation_name TEXT;
+              has_conflict BOOLEAN;
+            BEGIN
+              FOREACH relation_name IN ARRAY ARRAY['alpha_search_reports', 'alpha_leads', 'alpha_lead_evidence', 'alpha_handoffs']
+              LOOP
+                EXECUTE format(
+                  'SELECT EXISTS (SELECT 1 FROM %I WHERE legacy_id IS NOT NULL AND sqlite_id IS NOT NULL AND legacy_id IS DISTINCT FROM sqlite_id)',
+                  relation_name
+                ) INTO has_conflict;
+                IF has_conflict THEN
+                  RAISE EXCEPTION 'conflicting legacy_id/sqlite_id values in %', relation_name;
+                END IF;
+              END LOOP;
+            END;
+            $$
+            """,
+            """
+            CREATE OR REPLACE FUNCTION wolfy_sync_alpha_import_ids()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+              IF TG_OP = 'INSERT' THEN
+                IF NEW.legacy_id IS NOT NULL AND NEW.sqlite_id IS NOT NULL
+                   AND NEW.legacy_id IS DISTINCT FROM NEW.sqlite_id THEN
+                  RAISE EXCEPTION 'conflicting alpha import identifiers: legacy_id %, sqlite_id %', NEW.legacy_id, NEW.sqlite_id;
+                END IF;
+                NEW.legacy_id := COALESCE(NEW.legacy_id, NEW.sqlite_id);
+                NEW.sqlite_id := COALESCE(NEW.sqlite_id, NEW.legacy_id);
+                RETURN NEW;
+              END IF;
+
+              IF NEW.legacy_id IS DISTINCT FROM OLD.legacy_id
+                 AND NEW.sqlite_id IS NOT DISTINCT FROM OLD.sqlite_id THEN
+                NEW.sqlite_id := NEW.legacy_id;
+              ELSIF NEW.sqlite_id IS DISTINCT FROM OLD.sqlite_id
+                    AND NEW.legacy_id IS NOT DISTINCT FROM OLD.legacy_id THEN
+                NEW.legacy_id := NEW.sqlite_id;
+              ELSIF NEW.legacy_id IS DISTINCT FROM NEW.sqlite_id THEN
+                RAISE EXCEPTION 'conflicting alpha import identifier update: legacy_id %, sqlite_id %', NEW.legacy_id, NEW.sqlite_id;
+              END IF;
+              RETURN NEW;
+            END;
+            $$
+            """,
+        ]
     )
     for table in ("alpha_search_reports", "alpha_leads", "alpha_lead_evidence", "alpha_handoffs"):
         statements.extend(

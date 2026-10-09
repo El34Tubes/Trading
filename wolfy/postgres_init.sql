@@ -507,11 +507,46 @@ WHERE legacy_id IS NULL OR sqlite_id IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_alpha_handoffs_legacy_id ON alpha_handoffs(legacy_id) WHERE legacy_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_alpha_handoffs_sqlite_id ON alpha_handoffs(sqlite_id) WHERE sqlite_id IS NOT NULL;
 
+DO $$
+DECLARE
+  relation_name TEXT;
+  has_conflict BOOLEAN;
+BEGIN
+  FOREACH relation_name IN ARRAY ARRAY['alpha_search_reports', 'alpha_leads', 'alpha_lead_evidence', 'alpha_handoffs']
+  LOOP
+    EXECUTE format(
+      'SELECT EXISTS (SELECT 1 FROM %I WHERE legacy_id IS NOT NULL AND sqlite_id IS NOT NULL AND legacy_id IS DISTINCT FROM sqlite_id)',
+      relation_name
+    ) INTO has_conflict;
+    IF has_conflict THEN
+      RAISE EXCEPTION 'conflicting legacy_id/sqlite_id values in %', relation_name;
+    END IF;
+  END LOOP;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION wolfy_sync_alpha_import_ids()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  NEW.legacy_id := COALESCE(NEW.legacy_id, NEW.sqlite_id);
-  NEW.sqlite_id := COALESCE(NEW.sqlite_id, NEW.legacy_id);
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.legacy_id IS NOT NULL AND NEW.sqlite_id IS NOT NULL
+       AND NEW.legacy_id IS DISTINCT FROM NEW.sqlite_id THEN
+      RAISE EXCEPTION 'conflicting alpha import identifiers: legacy_id %, sqlite_id %', NEW.legacy_id, NEW.sqlite_id;
+    END IF;
+    NEW.legacy_id := COALESCE(NEW.legacy_id, NEW.sqlite_id);
+    NEW.sqlite_id := COALESCE(NEW.sqlite_id, NEW.legacy_id);
+    RETURN NEW;
+  END IF;
+
+  IF NEW.legacy_id IS DISTINCT FROM OLD.legacy_id
+     AND NEW.sqlite_id IS NOT DISTINCT FROM OLD.sqlite_id THEN
+    NEW.sqlite_id := NEW.legacy_id;
+  ELSIF NEW.sqlite_id IS DISTINCT FROM OLD.sqlite_id
+        AND NEW.legacy_id IS NOT DISTINCT FROM OLD.legacy_id THEN
+    NEW.legacy_id := NEW.sqlite_id;
+  ELSIF NEW.legacy_id IS DISTINCT FROM NEW.sqlite_id THEN
+    RAISE EXCEPTION 'conflicting alpha import identifier update: legacy_id %, sqlite_id %', NEW.legacy_id, NEW.sqlite_id;
+  END IF;
   RETURN NEW;
 END;
 $$;
@@ -1196,6 +1231,21 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS source TEXT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS rows_written INTEGER;
+CREATE OR REPLACE FUNCTION wolfy_jsonb_nonnegative_integer(document JSONB, field_name TEXT)
+RETURNS INTEGER LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  raw_value TEXT;
+BEGIN
+  raw_value := document->>field_name;
+  IF raw_value IS NULL OR raw_value !~ '^[0-9]+$' THEN
+    RETURN NULL;
+  END IF;
+  RETURN raw_value::INTEGER;
+EXCEPTION
+  WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN NULL;
+END;
+$$;
 UPDATE runs
 SET started_at=COALESCE(started_at, started),
     completed_at=COALESCE(completed_at, finished),
@@ -1203,9 +1253,9 @@ SET started_at=COALESCE(started_at, started),
     source=COALESCE(source, NULLIF(detail->>'source', '')),
     rows_written=COALESCE(
       rows_written,
-      CASE WHEN (detail->>'rows_written') ~ '^[0-9]+$' THEN (detail->>'rows_written')::integer END,
-      CASE WHEN (detail->>'rows_upserted') ~ '^[0-9]+$' THEN (detail->>'rows_upserted')::integer END,
-      CASE WHEN (detail->>'feature_rows_upserted') ~ '^[0-9]+$' THEN (detail->>'feature_rows_upserted')::integer END
+      wolfy_jsonb_nonnegative_integer(detail, 'rows_written'),
+      wolfy_jsonb_nonnegative_integer(detail, 'rows_upserted'),
+      wolfy_jsonb_nonnegative_integer(detail, 'feature_rows_upserted')
     )
 WHERE started_at IS NULL OR completed_at IS NULL OR ended_at IS NULL OR source IS NULL OR rows_written IS NULL;
 
@@ -1226,9 +1276,9 @@ BEGIN
   END IF;
   IF NEW.rows_written IS NULL THEN
     NEW.rows_written := COALESCE(
-      CASE WHEN (NEW.detail->>'rows_written') ~ '^[0-9]+$' THEN (NEW.detail->>'rows_written')::integer END,
-      CASE WHEN (NEW.detail->>'rows_upserted') ~ '^[0-9]+$' THEN (NEW.detail->>'rows_upserted')::integer END,
-      CASE WHEN (NEW.detail->>'feature_rows_upserted') ~ '^[0-9]+$' THEN (NEW.detail->>'feature_rows_upserted')::integer END
+      wolfy_jsonb_nonnegative_integer(NEW.detail, 'rows_written'),
+      wolfy_jsonb_nonnegative_integer(NEW.detail, 'rows_upserted'),
+      wolfy_jsonb_nonnegative_integer(NEW.detail, 'feature_rows_upserted')
     );
   END IF;
   RETURN NEW;
@@ -1253,9 +1303,9 @@ SELECT
   source,
   rows_written,
   detail,
-  CASE WHEN (detail->>'bars_loaded') ~ '^[0-9]+$' THEN (detail->>'bars_loaded')::integer END AS bars_loaded,
-  CASE WHEN (detail->>'feature_rows_upserted') ~ '^[0-9]+$' THEN (detail->>'feature_rows_upserted')::integer END AS feature_rows_upserted,
-  CASE WHEN (detail->>'tickers_processed') ~ '^[0-9]+$' THEN (detail->>'tickers_processed')::integer END AS tickers_processed
+  wolfy_jsonb_nonnegative_integer(detail, 'bars_loaded') AS bars_loaded,
+  wolfy_jsonb_nonnegative_integer(detail, 'feature_rows_upserted') AS feature_rows_upserted,
+  wolfy_jsonb_nonnegative_integer(detail, 'tickers_processed') AS tickers_processed
 FROM runs
 WHERE job LIKE 'eod%' OR job LIKE 'feature%';
 

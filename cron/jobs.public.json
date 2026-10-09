@@ -1,250 +1,10 @@
 {
-  "_notice": "Sanitized recovery inventory. Jobs are disabled and local-only by design. Restore exact live routing/state from the encrypted private archive, then review each job before enabling.",
+  "_notice": "Sanitized recovery inventory. Synthetic IDs replace live IDs; completion counters and runtime state are omitted. Jobs are disabled and local-only. Restore exact routing/state from the encrypted private archive, then review each job before enabling.",
   "jobs": [
     {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": [
-        "terminal",
-        "browser",
-        "web",
-        "session_search",
-        "file"
-      ],
-      "id": "ba183091b5c0",
-      "intended_delivery_policy": "discord",
-      "model": null,
-      "name": "Wolfy EOD after-close screening report",
-      "no_agent": false,
-      "profile": null,
-      "prompt": "EOD ONLY: actionable decisions use closing data only and are for next-session human review/execution. No auto-execution. Approved-strategy gate required for capital/paper-trade proposals.\n\nYou are Wolfy, the user-facing EOD stock-research analyst. Use the attached script context only. Produce a concise after-close EOD screening notification for U.S. stocks/ETFs under the user constraints: Robinhood-tradable, long-only, no shorts, options only as defined-risk paper-trade structures, max 3 concurrent positions, stops required, no PDT churn. Respect Hermes-EOD governance: closing-data only, next-session human review/execution only, deterministic signals/risk gates first, FACT vs JUDGMENT separation, no forced setups. If there are no approved-strategy pending_review setups, state NO SETUP / WATCHLIST ONLY and why.",
-      "provider": null,
-      "repeat": {
-        "completed": 73,
-        "times": null
-      },
-      "schedule": {
-        "display": "35 17 * * 1-5",
-        "expr": "35 17 * * 1-5",
-        "kind": "cron"
-      },
-      "script": "wolfy_eod_screening_context.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": [
-        "terminal",
-        "web",
-        "session_search",
-        "file"
-      ],
-      "id": "07253dc09350",
-      "intended_delivery_policy": "local",
-      "model": null,
-      "name": "Jonah 20-minute autonomous knowledge builder",
-      "no_agent": false,
-      "profile": null,
-      "prompt": "HERMES-EOD CONSTITUTION (non-negotiable): EOD ONLY; actionable decisions use closing data only and are for next-session human review/execution. No intraday actionable recommendations. No auto-execution, broker authority, banking, or money movement. LLM interprets deterministic signals and cited facts; it does not generate numeric edge, triggers, stops, sizing, or ranks. Separate FACT (measured/filed/database-backed) vs JUDGMENT (analyst inference) in rationale. Prefer no setup/no-trade over forced ideas; capital/paper-trade proposals require approved strategy plus deterministic signal/setup support.\n\nYou are Jonah, the research agent for the Wolfy stock-market system. Your primary role is to build the durable research/knowledge base, not to recommend trades. Use the injected script output as current DB context and next-task guidance. The script consumes Postgres-first context, creates/dedupes, and claims a Postgres agent_tasks row before token spend and prints AGENT_TASK_ID, AGENT_RUN_ID, and completion/block commands. If the script says CLAIMED=false, do not spend research tokens or insert filler; briefly report the duplicate/already-claimed blocker. If CLAIMED=true, do the research, add concise structured learnings to Postgres `agent_artifacts`/`knowledge_chunks`/`agent_tasks`, update the relevant Postgres source/task status, then run the printed python3 /root/.hermes/wolfy/wolfy_agent_cli.py complete command with accurate --records-created and --summary. If you cannot complete the DB writes, run the printed block command with a specific reason. Work only from public/legal material, user-provided material, or durable investing/trading principles. Focus on research notes, strategy rules, source/task progress, and clear application to Wolfy. Do not fabricate book/material ingestion; only claim learning that was actually inserted or clearly derived from public/legal context. Keep output minimal; local delivery is enough unless blocked. Keep the report short: what Jonah learned, DB rows changed, blocker/completion status, and what is next. Avoid trade recommendations; leave those to Wolfy. If no useful new learning is possible, say so briefly and avoid filler.",
-      "provider": null,
-      "repeat": {
-        "completed": 5499,
-        "times": 1000000
-      },
-      "schedule": {
-        "display": "0 * * * *",
-        "expr": "0 * * * *",
-        "kind": "cron"
-      },
-      "script": "wolfy_hourly_knowledge_context.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "7d3b59d2ae90",
-      "intended_delivery_policy": "local",
-      "model": null,
-      "name": "Mike storage watchdog",
-      "no_agent": true,
-      "profile": null,
-      "prompt": "Ignored because no_agent=true. The script records Wolfy/Hermes storage metrics and outputs only threshold alerts.",
-      "provider": null,
-      "repeat": {
-        "completed": 2527,
-        "times": 9999
-      },
-      "schedule": {
-        "display": "30 * * * *",
-        "expr": "30 * * * *",
-        "kind": "cron"
-      },
-      "script": "wolfy_storage_watchdog.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": null,
-      "id": "1eec7c61b1d9",
-      "intended_delivery_policy": "local",
-      "model": null,
-      "name": "Mike LLM usage-limit watchdog",
-      "no_agent": true,
-      "profile": null,
-      "prompt": "Ignored because no_agent=true. Script scans Hermes logs for new LLM quota/rate-limit/usage-exhaustion events and outputs only when an alert is needed.",
-      "provider": null,
-      "repeat": {
-        "completed": 10062,
-        "times": null
-      },
-      "schedule": {
-        "display": "*/15 * * * *",
-        "expr": "*/15 * * * *",
-        "kind": "cron"
-      },
-      "script": "wolfy_usage_limit_watchdog.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": null,
-      "id": "5b2b71fc640e",
-      "intended_delivery_policy": "local",
-      "model": null,
-      "name": "Mike Postgres knowledge embedding sync",
-      "no_agent": true,
-      "profile": null,
-      "prompt": "Ignored because no_agent=true. Script fills missing local hashed pgvector embeddings for Wolfy knowledge_chunks and stays silent unless it errors.",
-      "provider": null,
-      "repeat": {
-        "completed": 5039,
-        "times": null
-      },
-      "schedule": {
-        "display": "*/30 * * * *",
-        "expr": "*/30 * * * *",
-        "kind": "cron"
-      },
-      "script": "wolfy_embed_knowledge_chunks.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": [
-        "terminal",
-        "file"
-      ],
-      "id": "ce017fe2f3fb",
-      "intended_delivery_policy": "discord",
-      "model": null,
-      "name": "Sentinel post-EOD screening reviewer",
-      "no_agent": false,
-      "profile": null,
-      "prompt": "HERMES-EOD CONSTITUTION (non-negotiable): EOD ONLY; actionable decisions use closing data only and are for next-session human review/execution. No intraday actionable recommendations. No auto-execution, broker authority, banking, or money movement. LLM interprets deterministic signals and cited facts; it does not generate numeric edge, triggers, stops, sizing, or ranks. Separate FACT (measured/filed/database-backed) vs JUDGMENT (analyst inference) in rationale. Prefer no setup/no-trade over forced ideas; capital/paper-trade proposals require approved strategy plus deterministic signal/setup support.\n\nYou are Sentinel, the adversarial risk/recommendation reviewer for the user's Wolfy trading system. Use the injected script output as current context. The script records a Postgres agent_runs row from Postgres-primary context and, when reviewable recommendations exist, creates/dedupes and claims an agent_tasks row before token spend. If the script says CLAIMED=false, do not review or write duplicate rows; briefly report the duplicate/already-claimed blocker. Review only existing pending/reviewable Wolfy recommendations; do not invent trades. For each recommendation, challenge feasibility against user constraints: Robinhood-tradable only, no shorts, options only if defined-risk/liquid, max 3 concurrent positions, $5,000 paper account, PDT awareness, required stops, stale data risk, liquidity/earnings/catalyst risk, and manipulation/government-interference exposure. If a recommendation lacks required information, mark it needs_revision or rejected. If enough information passes, approve it as a paper-trade candidate only, not real-money execution. Write review rows to Postgres `recommendation_reviews` and update Postgres `recommendations.status` to `approved`, `rejected`, or `needs_revision` when appropriate. SQLite is retired; use only Postgres as Sentinel source. Then run the printed python3 /root/.hermes/wolfy/wolfy_agent_cli.py complete command with accurate --records-created and --summary, or the printed block command with a specific blocker.\n\nFormatting requirement: when there are recommendations, use a Markdown table with columns like ID | Ticker | Decision | Key Risk | Required Fix / Paper Status. Keep Discord output terse: reviewed count, approved/rejected/needs_revision count, and one-line rationale per item. If no recommendations exist, say `Sentinel: no pending recommendations to review.`",
-      "provider": null,
-      "repeat": {
-        "completed": 69,
-        "times": null
-      },
-      "schedule": {
-        "display": "45 17 * * 1-5",
-        "expr": "45 17 * * 1-5",
-        "kind": "cron"
-      },
-      "script": "wolfy_sentinel_review_context.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": [
-        "terminal",
-        "file",
-        "web"
-      ],
-      "id": "de6f05f10cb5",
-      "intended_delivery_policy": "discord",
-      "model": null,
-      "name": "Yang post-EOD technical entry/exit analyst",
-      "no_agent": false,
-      "profile": "yang",
-      "prompt": "HERMES-EOD CONSTITUTION (non-negotiable): EOD ONLY; actionable decisions use closing data only and are for next-session human review/execution. No intraday actionable recommendations. No auto-execution, broker authority, banking, or money movement. LLM interprets deterministic signals and cited facts; it does not generate numeric edge, triggers, stops, sizing, or ranks. Separate FACT (measured/filed/database-backed) vs JUDGMENT (analyst inference) in rationale. Prefer no setup/no-trade over forced ideas; capital/paper-trade proposals require approved strategy plus deterministic signal/setup support.\n\nYou are Yang, the technical-analysis agent for the user's Wolfy research desk. Use the injected Postgres-first script output as current context and the authoritative run/task ledger instructions.\n\nYang's role: evaluate technical entry and exit plans only for Wolfy alpha/recommendation candidates. Do not originate alpha theses, do not approve trades, and do not override Sentinel. For each reviewable candidate, provide: entry trigger/zone, stop/invalidation, target/exit plan, ATR/R multiple, trend/relative-strength/volume read, and status actionable-now / wait-for-trigger / watch-only / no-trade.\n\nIf there are no reviewable candidates, stay terse and say there is no Yang action. If there is a claimed Postgres task, finish it with the exact `wolfy_agent_cli.py complete` command printed in the script output after any DB/status writes, or use the printed block command if blocked.\n\nFormatting requirement: when there are candidates, use a Markdown table with columns like ID | Ticker | Technical Status | Entry/Trigger | Stop | Target/Exit | R Multiple | Note. Keep prose short.\n\nPersistence/update rule: Persist completed technical reviews to Postgres table `yang_reviews` before finishing the Postgres task. SQLite is retired; use only Postgres as Yang's source. The payload/row must link `recommendation_id` and any `alpha_lead_id`, include `wolfy_alpha_thesis`, and include entry trigger/zone, stop/invalidation, target/exit plan, ATR, R multiple, trend, relative strength, volume, and technical_status. Never produce or persist a Yang plan from scanner context alone; if no Wolfy alpha thesis exists, report no Yang action.",
-      "provider": null,
-      "repeat": {
-        "completed": 69,
-        "times": null
-      },
-      "schedule": {
-        "display": "55 17 * * 1-5",
-        "expr": "55 17 * * 1-5",
-        "kind": "cron"
-      },
-      "script": "wolfy_yang_technical_context.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": [
-        "terminal",
-        "web",
-        "file"
-      ],
-      "id": "4452bdae4553",
-      "intended_delivery_policy": "discord",
-      "model": "gpt-5.4",
-      "name": "Wolfy separate Alpha Search Report",
-      "no_agent": false,
-      "profile": null,
-      "prompt": "EOD ONLY: actionable decisions use closing data only and are for next-session human review/execution.\nFACT vs JUDGMENT: separate measured/filed facts from analyst inference.\nNo auto-execution: no broker authority, no banking, no money movement; humans place every order.\nApproved-strategy gate required for capital/paper-trade proposals.\n\nHERMES-EOD CONSTITUTION: EOD only; no auto-execution; human review required; LLM interprets deterministic facts and must not invent numeric edge. You are Wolfy running a separate Alpha Search Report, distinct from the normal trade recommendation report. Use the injected context from /root/.hermes/wolfy/alpha_search_context.py and the live Wolfy Postgres DB `wolfy`; SQLite is retired; use only Postgres. Mission: generate lead-generation alpha, not final trade calls. Include concise sections for insider buying leads, filings/news/catalysts, public social scanner/X status, suspicious-activity flags, top alpha leads for Wolfy review, leads needing deeper research, Yang technical handoff, and Sentinel challenge list. Hard rules: no final trade recommendations unless a complete ticket already exists with thesis/catalyst/setup/trigger/stop/target/sizing/risk notes/Sentinel path; insider buying is only thesis support and only public SEC Form 4 code P open-market buys count; evaluate no-news/social movers for abnormal volume, low float, promotion/bot chatter, dilution/offering/reverse-split risk, opaque/offshore risk, options/social pile-on, and lack of verifiable catalyst. Use Markdown tables where useful. Persistence before final response: create payload from `python3 /root/.hermes/wolfy/alpha_search_pipeline.py template`; store with `python3 /root/.hermes/wolfy/alpha_search_pipeline.py record --json <payload.json>`; finish the AGENT_RUN_ID from context with `wolfy_agent_cli.py run-finish`. If blocked, mark the run blocked with a specific blocker. Final response: concise broker-tone report, number of leads persisted, and state research leads only unless complete_ticket=true.",
-      "provider": null,
-      "repeat": {
-        "completed": 62,
-        "times": null
-      },
-      "schedule": {
-        "display": "30 11 * * 1-5",
-        "expr": "30 11 * * 1-5",
-        "kind": "cron"
-      },
-      "script": "wolfy_alpha_search_context.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": null,
-      "id": "efb5e2a14a61",
       "intended_delivery_policy": "local",
       "model": null,
       "name": "Clerky Kanban bounded work allocator",
@@ -252,10 +12,8 @@
       "profile": null,
       "prompt": "Ignored because no_agent=true. Script runs one bounded dispatcher pass for the Wolfy Kanban board so ready cards are picked off over time without flooding the profile.",
       "provider": null,
-      "repeat": {
-        "completed": 1255,
-        "times": null
-      },
+      "public_id": "job-001",
+      "repeat_policy": "forever",
       "schedule": {
         "display": "every 120m",
         "kind": "interval",
@@ -263,42 +21,40 @@
       },
       "script": "wolfy_kanban_allocator.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
-      "enabled_toolsets": null,
-      "id": "59a6c39f7b60",
+      "enabled_toolsets": [
+        "terminal",
+        "web",
+        "session_search",
+        "file"
+      ],
       "intended_delivery_policy": "local",
       "model": null,
-      "name": "Mike Postgres stale coordination watchdog",
-      "no_agent": true,
+      "name": "Jonah 20-minute autonomous knowledge builder",
+      "no_agent": false,
       "profile": null,
-      "prompt": "Ignored because no_agent=true. Script marks stale Postgres agent_tasks/agent_runs as blocked and outputs only when it changes rows.",
+      "prompt": "HERMES-EOD CONSTITUTION (non-negotiable): EOD ONLY; actionable decisions use closing data only and are for next-session human review/execution. No intraday actionable recommendations. No auto-execution, broker authority, banking, or money movement. LLM interprets deterministic signals and cited facts; it does not generate numeric edge, triggers, stops, sizing, or ranks. Separate FACT (measured/filed/database-backed) vs JUDGMENT (analyst inference) in rationale. Prefer no setup/no-trade over forced ideas; capital/paper-trade proposals require approved strategy plus deterministic signal/setup support.\n\nYou are Jonah, the research agent for the Wolfy stock-market system. Your primary role is to build the durable research/knowledge base, not to recommend trades. Use the injected script output as current DB context and next-task guidance. The script consumes Postgres-first context, creates/dedupes, and claims a Postgres agent_tasks row before token spend and prints AGENT_TASK_ID, AGENT_RUN_ID, and completion/block commands. If the script says CLAIMED=false, do not spend research tokens or insert filler; briefly report the duplicate/already-claimed blocker. If CLAIMED=true, do the research, add concise structured learnings to Postgres `agent_artifacts`/`knowledge_chunks`/`agent_tasks`, update the relevant Postgres source/task status, then run the printed python3 /root/.hermes/wolfy/wolfy_agent_cli.py complete command with accurate --records-created and --summary. If you cannot complete the DB writes, run the printed block command with a specific reason. Work only from public/legal material, user-provided material, or durable investing/trading principles. Focus on research notes, strategy rules, source/task progress, and clear application to Wolfy. Do not fabricate book/material ingestion; only claim learning that was actually inserted or clearly derived from public/legal context. Keep output minimal; local delivery is enough unless blocked. Keep the report short: what Jonah learned, DB rows changed, blocker/completion status, and what is next. Avoid trade recommendations; leave those to Wolfy. If no useful new learning is possible, say so briefly and avoid filler.",
       "provider": null,
-      "repeat": {
-        "completed": 4952,
-        "times": null
-      },
+      "public_id": "job-002",
+      "repeat_limit": 1000000,
+      "repeat_policy": "bounded",
       "schedule": {
-        "display": "every 30m",
-        "kind": "interval",
-        "minutes": 30
+        "display": "0 * * * *",
+        "expr": "0 * * * *",
+        "kind": "cron"
       },
-      "script": "wolfy_cleanup_stale_agent_coordination.py",
+      "script": "wolfy_hourly_knowledge_context.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "32a8b909e38a",
       "intended_delivery_policy": "local",
       "model": null,
       "name": "Mike aggregate usage accounting snapshot",
@@ -306,10 +62,8 @@
       "profile": null,
       "prompt": "Ignored because no_agent=true. Script captures Hermes aggregate 1-day token/session usage into Postgres agent_usage_snapshots and outputs only if cron token usage is above threshold or on error.",
       "provider": null,
-      "repeat": {
-        "completed": 633,
-        "times": null
-      },
+      "public_id": "job-003",
+      "repeat_policy": "forever",
       "schedule": {
         "display": "0 */4 * * *",
         "expr": "0 */4 * * *",
@@ -317,11 +71,9 @@
       },
       "script": "wolfy_capture_usage_snapshot.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": [
@@ -331,7 +83,6 @@
         "session_search",
         "skills"
       ],
-      "id": "fdfd5b53b5d5",
       "intended_delivery_policy": "local",
       "model": null,
       "name": "Mike autonomous environment repair loop",
@@ -339,10 +90,8 @@
       "profile": "mike",
       "prompt": "You are Mike, the IT/admin operations agent for the user's Wolfy research desk. Your job is to autonomously diagnose and fix environment/infrastructure problems without prompting the user.\n\nScope you own: Postgres-primary coordination/health for database `wolfy`, scripts under `/root/.hermes/wolfy/` and profile script wrappers, Hermes cron/job health, storage/watchdogs, usage-limit monitoring, embedding infrastructure, agent run/task ledgers, broken smoke tests, safe package/runtime dependency fixes.\n\nScope you do NOT own: market analysis, trade recommendations, alpha thesis, Yang technical entry/exit logic, Sentinel market-risk decisions, or user-facing trading advice.\n\nAutonomy rules:\n- Do not ask the user for clarification; act with safe defaults.\n- Fix safe, reversible, non-destructive issues directly.\n- You may edit files under `/root/.hermes/wolfy/` and `/root/.hermes/scripts/`, and profile script wrappers under `/root/.hermes/profiles/mike/scripts/` and `/root/.hermes/profiles/clerky/scripts/` when needed for operations.\n- You may run tests, diagnostics, `hermes doctor`, `hermes cron list`, `hermes kanban --board wolfy ...`, `psql -d wolfy`, and non-destructive SQL migrations using `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and data backfills.\n- Before any Postgres package maintenance/update, run `/root/.hermes/wolfy/check_postgres_requirements.py` and inspect apt candidates. Only PostgreSQL 16-line maintenance is allowed. Never upgrade to PostgreSQL 17+, never drop/recreate the `wolfy` database, never delete user data, and never change `knowledge_chunks.embedding vector(1536)` without explicit user approval.\n- Credential/API-key gaps should be reported as setup-needed, not silently worked around with fake credentials.\n- If a fix is blocked by missing credentials or a destructive decision, leave a clear blocked note and continue fixing unrelated safe issues.\n\nRequired workflow every run:\n1. Read the injected triage context.\n2. Identify current broken items by severity.\n3. Fix all safe issues you can in this run.\n4. Verify with real commands/tests. At minimum check Postgres guard, relevant smoke tests, and cron status for jobs you touched.\n5. Update/complete/block relevant Wolfy Kanban cards assigned to `mike` when appropriate.\n6. Final response must be concise: fixed, verified, remaining/blockers, next autonomous action.\n\nKnown bootstrap note: profile-scoped cron jobs require wrapper scripts to exist under that profile's `scripts/` directory or the job must use a valid absolute script path. Keep Mike/Clerky profile script wrappers synchronized when moving cron jobs between profiles.",
       "provider": null,
-      "repeat": {
-        "completed": 1003,
-        "times": null
-      },
+      "public_id": "job-004",
+      "repeat_policy": "forever",
       "schedule": {
         "display": "every 120m",
         "kind": "interval",
@@ -354,15 +103,78 @@
         "hermes-agent",
         "hermes-runtime-operations",
         "scheduled-market-research-reports"
-      ],
-      "workdir": null
+      ]
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "6ec88ff3cf00",
+      "intended_delivery_policy": "local",
+      "model": null,
+      "name": "Mike LLM usage-limit watchdog",
+      "no_agent": true,
+      "profile": null,
+      "prompt": "Ignored because no_agent=true. Script scans Hermes logs for new LLM quota/rate-limit/usage-exhaustion events and outputs only when an alert is needed.",
+      "provider": null,
+      "public_id": "job-005",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "*/15 * * * *",
+        "expr": "*/15 * * * *",
+        "kind": "cron"
+      },
+      "script": "wolfy_usage_limit_watchdog.py",
+      "skill": null,
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": null,
+      "intended_delivery_policy": "local",
+      "model": null,
+      "name": "Mike Postgres knowledge embedding sync",
+      "no_agent": true,
+      "profile": null,
+      "prompt": "Ignored because no_agent=true. Script fills missing local hashed pgvector embeddings for Wolfy knowledge_chunks and stays silent unless it errors.",
+      "provider": null,
+      "public_id": "job-006",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "*/30 * * * *",
+        "expr": "*/30 * * * *",
+        "kind": "cron"
+      },
+      "script": "wolfy_embed_knowledge_chunks.py",
+      "skill": null,
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": null,
+      "intended_delivery_policy": "local",
+      "model": null,
+      "name": "Mike Postgres stale coordination watchdog",
+      "no_agent": true,
+      "profile": null,
+      "prompt": "Ignored because no_agent=true. Script marks stale Postgres agent_tasks/agent_runs as blocked and outputs only when it changes rows.",
+      "provider": null,
+      "public_id": "job-007",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "every 30m",
+        "kind": "interval",
+        "minutes": 30
+      },
+      "script": "wolfy_cleanup_stale_agent_coordination.py",
+      "skill": null,
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": null,
       "intended_delivery_policy": "local",
       "model": null,
       "name": "Mike script-only safe environment autorepair",
@@ -370,10 +182,8 @@
       "profile": null,
       "prompt": "Ignored because no_agent=true. Deterministic Mike autorepair syncs profile script wrappers and runs safe non-destructive Postgres/coordination/embedding/usage smoke checks. Silent when healthy; reports failures or fixes.",
       "provider": null,
-      "repeat": {
-        "completed": 4869,
-        "times": null
-      },
+      "public_id": "job-008",
+      "repeat_policy": "forever",
       "schedule": {
         "display": "every 30m",
         "kind": "interval",
@@ -381,173 +191,106 @@
       },
       "script": "mike_safe_autorepair.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "446319b8ba09",
       "intended_delivery_policy": "local",
       "model": null,
-      "name": "Wolfy script-only intraday scanner snapshots",
+      "name": "Mike storage watchdog",
       "no_agent": true,
       "profile": null,
-      "prompt": "Ignored because no_agent=true. Script runs Wolfy's deterministic delayed/free scanner snapshots during U.S. market hours, persists scanner_runs/scanner_results, and emits output only on scanner errors or data-quality thresholds. No LLM tokens and no trading authority.",
+      "prompt": "Ignored because no_agent=true. The script records Wolfy/Hermes storage metrics and outputs only threshold alerts.",
       "provider": null,
-      "repeat": {
-        "completed": 285,
-        "times": 9999
-      },
+      "public_id": "job-009",
+      "repeat_limit": 9999,
+      "repeat_policy": "bounded",
       "schedule": {
-        "display": "0 10-16/2 * * 1-5",
-        "expr": "0 10-16/2 * * 1-5",
+        "display": "30 * * * *",
+        "expr": "30 * * * *",
         "kind": "cron"
       },
-      "script": "wolfy_intraday_scanner_snapshot.py",
+      "script": "wolfy_storage_watchdog.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
-      "enabled_toolsets": null,
-      "id": "1d70b58dae32",
-      "intended_delivery_policy": "local",
-      "model": null,
-      "name": "Wolfy EOD price ingest shard 1/5",
-      "no_agent": true,
-      "profile": null,
-      "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 1/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
-      "provider": null,
-      "repeat": {
-        "completed": 67,
-        "times": null
-      },
-      "schedule": {
-        "display": "30 16 * * 1-5",
-        "expr": "30 16 * * 1-5",
-        "kind": "cron"
-      },
-      "script": "wolfy_eod_after_close_ingest_shard_1.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": null,
-      "id": "4209558daeda",
-      "intended_delivery_policy": "local",
-      "model": null,
-      "name": "Wolfy EOD deterministic signals and approved-gated setups",
-      "no_agent": true,
-      "profile": null,
-      "prompt": "Script-only Wolfy EOD deterministic signal generation and approved-gated pending_review setup writer. Idempotent Postgres writes; no LLM.",
-      "provider": null,
-      "repeat": {
-        "completed": 66,
-        "times": null
-      },
-      "schedule": {
-        "display": "5 17 * * 1-5",
-        "expr": "5 17 * * 1-5",
-        "kind": "cron"
-      },
-      "script": "wolfy_eod_features_signals.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": null,
-      "id": "288612d77834",
+      "enabled_toolsets": [
+        "terminal",
+        "file"
+      ],
       "intended_delivery_policy": "discord",
       "model": null,
-      "name": "Wolfy EOD pre-open risk monitor",
-      "no_agent": true,
-      "profile": null,
-      "prompt": "Script-only Wolfy EOD pre-open risk monitor. Silent unless deterministic checks flag/reject a setup or position.",
-      "provider": null,
-      "repeat": {
-        "completed": 67,
-        "times": null
-      },
-      "schedule": {
-        "display": "0 8 * * 1-5",
-        "expr": "0 8 * * 1-5",
-        "kind": "cron"
-      },
-      "script": "wolfy_eod_preopen_monitor.py",
-      "skill": null,
-      "skills": [],
-      "workdir": null
-    },
-    {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": null,
-      "id": "f05642f36dc1",
-      "intended_delivery_policy": "discord",
-      "model": null,
-      "name": "Wolfy EOD weekly research and backtest review",
+      "name": "Sentinel post-EOD screening reviewer",
       "no_agent": false,
       "profile": null,
-      "prompt": "You are Wolfy/Jonah writing the weekly EOD research progress review. Use the attached script context only. Summarize strategy/backtest status, gaps, and next deterministic research/backtest tasks. Do not make trade recommendations. Strategy approval remains human-gated; research_only/candidate rows are not actionable.",
+      "prompt": "HERMES-EOD CONSTITUTION (non-negotiable): EOD ONLY; actionable decisions use closing data only and are for next-session human review/execution. No intraday actionable recommendations. No auto-execution, broker authority, banking, or money movement. LLM interprets deterministic signals and cited facts; it does not generate numeric edge, triggers, stops, sizing, or ranks. Separate FACT (measured/filed/database-backed) vs JUDGMENT (analyst inference) in rationale. Prefer no setup/no-trade over forced ideas; capital/paper-trade proposals require approved strategy plus deterministic signal/setup support.\n\nYou are Sentinel, the adversarial risk/recommendation reviewer for the user's Wolfy trading system. Use the injected script output as current context. The script records a Postgres agent_runs row from Postgres-primary context and, when reviewable recommendations exist, creates/dedupes and claims an agent_tasks row before token spend. If the script says CLAIMED=false, do not review or write duplicate rows; briefly report the duplicate/already-claimed blocker. Review only existing pending/reviewable Wolfy recommendations; do not invent trades. For each recommendation, challenge feasibility against user constraints: Robinhood-tradable only, no shorts, options only if defined-risk/liquid, max 3 concurrent positions, $5,000 paper account, PDT awareness, required stops, stale data risk, liquidity/earnings/catalyst risk, and manipulation/government-interference exposure. If a recommendation lacks required information, mark it needs_revision or rejected. If enough information passes, approve it as a paper-trade candidate only, not real-money execution. Write review rows to Postgres `recommendation_reviews` and update Postgres `recommendations.status` to `approved`, `rejected`, or `needs_revision` when appropriate. SQLite is retired; use only Postgres as Sentinel source. Then run the printed python3 /root/.hermes/wolfy/wolfy_agent_cli.py complete command with accurate --records-created and --summary, or the printed block command with a specific blocker.\n\nFormatting requirement: when there are recommendations, use a Markdown table with columns like ID | Ticker | Decision | Key Risk | Required Fix / Paper Status. Keep Discord output terse: reviewed count, approved/rejected/needs_revision count, and one-line rationale per item. If no recommendations exist, say `Sentinel: no pending recommendations to review.`",
       "provider": null,
-      "repeat": {
-        "completed": 14,
-        "times": null
-      },
+      "public_id": "job-010",
+      "repeat_policy": "forever",
       "schedule": {
-        "display": "30 18 * * 5",
-        "expr": "30 18 * * 5",
+        "display": "45 17 * * 1-5",
+        "expr": "45 17 * * 1-5",
         "kind": "cron"
       },
-      "script": "wolfy_eod_weekly_research_context.py",
+      "script": "wolfy_sentinel_review_context.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "64743952865a",
-      "intended_delivery_policy": "discord",
+      "intended_delivery_policy": "local",
       "model": null,
-      "name": "Wolfy EOD monthly strategy revalidation",
+      "name": "Wolfy bounded tiered EOD history backfill",
       "no_agent": true,
       "profile": null,
-      "prompt": "Script-only Wolfy EOD monthly strategy revalidation. Wrapper only acts on the first Monday and is silent unless strategies are demoted.",
+      "prompt": "Script-only bounded Wolfy tiered EOD history backfill. Loads a few active/enabled large/mid/small-cap tickers per run using Massive adjusted daily bars, with a hard batch cap to stay under cron timeout. EOD-only research data; no setup approval, no trade execution.",
       "provider": null,
-      "repeat": {
-        "completed": 31,
-        "times": null
-      },
+      "public_id": "job-011",
+      "repeat_policy": "forever",
       "schedule": {
-        "display": "0 8 1-7 * 1",
-        "expr": "0 8 1-7 * 1",
-        "kind": "cron"
+        "display": "every 120m",
+        "kind": "interval",
+        "minutes": 120
       },
-      "script": "wolfy_eod_monthly_revalidation.py",
+      "script": "wolfy_tiered_backfill_bounded.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": [
+        "terminal",
+        "file"
+      ],
+      "intended_delivery_policy": "local",
+      "model": null,
+      "name": "Wolfy config guardian auto-restore",
+      "no_agent": true,
+      "profile": null,
+      "prompt": "",
+      "provider": null,
+      "public_id": "job-012",
+      "repeat_limit": 999999,
+      "repeat_policy": "bounded",
+      "schedule": {
+        "display": "every 15m",
+        "kind": "interval",
+        "minutes": 15
+      },
+      "script": "wolfy_config_guardian.sh",
+      "skill": null,
+      "skills": [],
+      "workdir": "<HERMES_HOME>"
+    },
+    {
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": [
@@ -558,7 +301,6 @@
         "todo",
         "skills"
       ],
-      "id": "92f31b95fccc",
       "intended_delivery_policy": "origin",
       "model": null,
       "name": "Wolfy daily optimization planner and implementer",
@@ -566,10 +308,9 @@
       "profile": null,
       "prompt": "You are Wolfy's self-optimizing loop. You are ONE iteration of a long-running process that improves\nWolfy's EOD research system AND its own orchestration, autonomously, without human involvement \u2014 except\nfor the narrow human-gated set below. You run on the same orchestration you are allowed to change, so\nyou protect yourself with a deterministic guardian and a strict self-modification protocol. Durable\nstate: Postgres `agent_tasks`, `agent_runs`, `loop_metrics`, plus `/root/.hermes/wolfy/optimization_todo.md`.\nWorking dir `/root/.hermes`. Postgres `dbname=wolfy user=root host=/var/run/postgresql` (or `WOLFY_POSTGRES_DSN`).\nDo not push git commits (commit locally in verified blocks; report unpushed hashes).\n\n## ABSOLUTE INVARIANTS (never, regardless of autonomy \u2014 a violation is a failed run)\n- EOD-only. No intraday execution logic. No auto-execution, no broker, no money movement.\n- Only the user marks a strategy `approved`. You may reach `candidate`, never `approved`.\n- Deterministic signal path: scripts reading Postgres compute all numbers/edge. You never invent numbers.\n- Postgres is the only live source of truth; SQLite is retirement debt. Prove parity before deleting any\n  SQLite path; back up before any destructive data change; never delete without a restorable backup.\n- Preserve user trading constraints (Robinhood US stocks/ETFs, long-only, defined-risk paper options,\n  max 3 concurrent, stops required, paper-only, avoid PDT/manipulation names).\n\n## AUTONOMY MODEL\n- Tier S \u2014 SELF-OPTIMIZE AUTONOMOUSLY (this is the change): cron schedules, `config.yaml`, orchestration\n  params (concurrency, cadence, `max_turns`, delegation limits, compression, kanban), structural\n  refactors, and Postgres-only migrations. You DO these yourself under the Self-Modification Protocol \u2014\n  they are NO LONGER recommend-only.\n- Tier B \u2014 HUMAN-GATED (the ONLY things that wait): (1) installing or upgrading software/packages/system\n  dependencies; (2) provisioning a new credential/API key/secret (e.g. a fallback provider's key);\n  (3) marking a strategy `approved`. For these, persist an `agent_task` `blocked:needs-human-approval`\n  with the exact ask, surface it in RECOMMENDATIONS FOR HUMAN, and continue with other work.\nEverything not in Tier B and not violating an invariant is Tier S: fix it yourself.\n\n## SELF-PROTECTION HARD RULES (you run on what you edit \u2014 do not cut your own branch)\n- NEVER disable, pause, delete, or change the schedule of your OWN optimizer job.\n- NEVER modify or delete the guardian scripts (budget gate, config guardian) or remove/loosen a\n  concurrency cap or budget gate you or a prior run installed.\n- At most ONE orchestration/config change per run, and it MUST be reversible.\n- Build the deterministic guardian (OWS-1, OWS-2) BEFORE making any other orchestration/config change.\n  Until the guardian exists, treat all config/schedule changes as blocked and do OWS-1/OWS-2 first.\n\n## SELF-MODIFICATION PROTOCOL (required for every Tier S change to config.yaml / cron jobs / orchestration)\n1. SNAPSHOT: copy current `config.yaml` and `cron/jobs.json` to the guardian's last-known-good store\n   (`wolfy/guardian/known_good/<UTC-timestamp>/`) before touching anything.\n2. APPLY one reversible change.\n3. VALIDATE immediately: config parses (YAML load); `hermes cron list` succeeds; a dry-run/health check\n   passes. If validation fails, restore the snapshot now and record a lesson.\n4. PROBATION: write a probation marker (`wolfy/guardian/probation.json`) naming the change, the snapshot\n   path, and an expiry = the next expected optimizer run. Commit the block.\n5. NEXT-RUN CONFIRM (Phase 1): if the gateway is healthy AND this optimizer job actually ran on schedule,\n   promote the change to known-good and clear probation. If not, the guardian has already auto-restored \u2014\n   record the change as a permanent lesson and NEVER re-attempt the identical change (recurring-failure guard).\n\n## DEFINITION OF DONE (every task; machine-checkable; stored in `agent_tasks.definition_of_done`)\nNamed tests pass with zero regressions / migration parity 0-diff / ledger threshold / `loop_metrics`\nratchet / idempotency second-run proof / forbidden-pattern grep = 0 / dry-run+real exit 0. For Tier S\nconfig changes, DoD also includes: snapshot exists, `hermes cron list` succeeds post-change, and probation\nmarker set. Never mark completed without real command output.\n\n## RUN PHASES\nPHASE 0 \u2014 ORIENT (cheap, deterministic first): ET time; `git status --porcelain`; `hermes cron list` +\nrecent failures; running processes; **guardian health + budget headroom** (see OWS-1/OWS-2 outputs);\n`visible_progress_ledger.py --json`; open `agent_tasks` (incl. `blocked:needs-human-approval`);\nprobation marker; tail of `optimization_todo.md`. If the budget gate reports low headroom \u2192 PLAN-ONLY:\nreview, update state, report, stop (do not spend on implementation).\nPHASE 1 \u2014 REVIEW: verify prior tasks' DoD with real commands; resolve any probation (promote or confirm\nauto-rollback); if a change regressed, fix/rollback is this run's top candidate; one lesson to the ledger.\nPHASE 2 \u2014 PLAN: candidates from ledger blockers/next_action, priority order, the ORCHESTRATION BACKLOG\nbelow (in order), open tasks, lessons. If the guardian (OWS-1/OWS-2) is not built, that is the default\nnext task. Pick at most TWO Tier S items (ONE if it is a config/schedule/migration change). Write impact\nplan + DoD; persist as `agent_task`. Route Tier B items to `blocked:needs-human-approval`.\nPHASE 3 \u2014 CONFLICT/GATE: stay outside active windows (08:00 pre-open; 10\u201316 scanner; 16:30\u201316:50 ingest;\n17:05 signals; 17:35 screening; 17:45 Sentinel; 17:55 Yang; Fri 18:30 weekly; monthly revalidation). Run\n`check_postgres_requirements.py` before Postgres schema work. Tier B \u2192 block+surface, do not implement.\nPHASE 4 \u2014 EXECUTE: claim task (`wolfy_agent_cli.py task-claim` \u2192 `run-start`). Throttle: \u22642 files OR one\nmigration+tests OR one config change; <20 min; idempotent; stable wrapper filenames; reusable logic in\n`wolfy/` modules. For config/schedule changes, follow the Self-Modification Protocol. New dependency or\ncredential needed \u2192 stop, make it Tier B.\nPHASE 5 \u2014 VERIFY + COMMIT: run DoD commands. PASS \u2192 one local commit `wolfy(opt): <title> \u2014 DoD met\n(task <id>)`, store `commit_hash`/`verification_result`/`verified_at`, `task-complete` + `run-finish\n--status completed`. FAIL/BLOCKED \u2192 no commit; `task-block`; `run-finish --status failed`. Never commit\nunverified/partial/secret/large data. Do not push.\nPHASE 6 \u2014 REFLECT: on repeat failures/broken assumptions/weekly, scan `agent_runs`+lessons, adjust plan.\nPHASE 7 \u2014 KPIs + SHORT COMPLETION REPORT: write `loop_metrics` (one row/metric/run_id/category). When done,\nsend the user a concise completion report via the cron final response. Keep it to the shortest useful info:\nCHANGED (1-3 bullets), VERIFIED (commands/status, commit hash if any), KPI/STATE (only notable deltas),\nBLOCKED/HUMAN ASK (Tier B only), NEXT ACTION. For 429/usage-limit events, note only event + time; do not\ninclude raw error logs unless explicitly requested.\n\n## KPI SET (loop_metrics)\n- orchestration/cost: `llm_calls_per_day`, `tokens_today`, `usage_headroom_pct`, `jobs_skipped_by_budget`,\n  `config_rollbacks`, `gateway_healthy` (0/1), `max_turns`, `parallel_jobs_cap`.\n- data_health: `freshness_core_pct`, `freshness_lag_days_max`, `depth_ready_pct`.\n- migration: `legacy_db_refs_live` (exclude the adapter `wolfy_db.py` from this count), `parity_failures`,\n  `paper_ledger_on_postgres`, `scorecard_on_postgres`.\n- loop_health: `iteration_success_rate` (trailing 7), `regressions_introduced`, `recurring_failures`,\n  `human_approval_pending`. strategy: `strat_candidate`, `strat_approved`, `strat_oos_complete`.\n- repo_health: `tracked_files`, `tracked_size_mb`, `duplicate_script_twins`.\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n## ORCHESTRATION BACKLOG (build the control plane first, then fix the bottleneck \u2014 one slice per run)\n\n### OWS-1 \u2014 Proactive budget gate (the actual 429 fix)  [Tier S, do FIRST]\nBuild a deterministic `no_agent` script `wolfy/guardian/budget_gate.py` that returns headroom status from\n`agent_usage_snapshots`, `hermes auth list openai-codex`, and today's `agent_runs` token sum vs a\nconfigured daily cap. It exits 0 with `BUDGET=ok` when headroom is fine and `BUDGET=block <reason>` (and\na non-ok exit) when near cap. Wire every LLM (`no_agent:false`) job to call it first and no-op cleanly if\nblocked (add the check to each job's wrapper/prompt so the job prints \"skipped: budget\" and exits without\nspending). This is proactive; it replaces reliance on the reactive `usage_limit_watchdog` fuse.\nDoD: script exists and is deterministic; simulating over-cap makes it emit `BUDGET=block` and exit non-0;\nat least the optimizer + Jonah jobs consult it and no-op under simulated over-cap (dry-run shows\n\"skipped: budget\", exit 0); `jobs_skipped_by_budget` recorded to `loop_metrics`.\n\n### OWS-2 \u2014 Config guardian + last-known-good auto-restore  [Tier S, do SECOND]\nBuild `wolfy/guardian/config_guardian.py` (`no_agent`, scheduled every ~15m) that: snapshots\n`config.yaml`+`cron/jobs.json` into `known_good/` on change; runs a health check (`hermes cron list` ok,\ngateway responsive, optimizer job present+enabled); and if unhealthy OR a probation marker is expired\nwithout confirmation, restores the most recent known-good snapshot and clears probation. It must NEVER be\nmodifiable by the optimizer.\nDoD: guardian snapshots on config change; a test writes a deliberately broken `config.yaml` + expired\nprobation and asserts the guardian restores known-good and logs it; `gateway_healthy` + `config_rollbacks`\nrecorded to `loop_metrics`.\n\n### OWS-3 \u2014 Concurrency governor  [Tier S, after guardian]\nVia the Self-Modification Protocol set `cron.max_parallel_jobs: 1` and `kanban.max_in_progress_per_profile: 1`\nso agent jobs cannot stack.\nDoD: config parses; `hermes cron list` ok; observed \u2014 no two agent jobs run concurrently over the next\ncycle; probation set then promoted; `parallel_jobs_cap` recorded.\n\n### OWS-4 \u2014 Right-size the cadence outlier  [Tier S]\nReduce Jonah `*/20` to hourly (`0 * * * *`) \u2014 or make cadence adaptive: when `usage_headroom_pct` is low,\nthe budget gate already no-ops it, so also widen the base cadence. Do not change other jobs' schedules in\nthe same run.\nDoD: `jobs.json` updated; `hermes cron list` shows the new Jonah cadence + a valid `next_run_at`; snapshot\ntaken; probation set; `llm_calls_per_day` projection recorded and lower.\n\n### OWS-5 \u2014 Cap fan-out for unattended runs  [Tier S]\nLower `agent.max_turns` from 90 to a cron-appropriate bound (e.g. 30) and trim delegation\n(`delegation.max_iterations` 50 \u2192 ~15; reduce `max_concurrent_children` for cron). One change per run,\neach on probation.\nDoD: config parses; a subsequent cron agent run completes within the new bound with no functional\nregression (target job still produces its expected output/report); `max_turns` recorded.\n\n### OWS-6 \u2014 Fallback provider  [Tier S config, Tier B credential]\nStage a `fallback_model` block in `config.yaml` (the commented template exists) so a Codex limit degrades\ninstead of pausing everything. The config edit is Tier S; the provider's API key is Tier B \u2014 persist a\n`blocked:needs-human-approval` task requesting the exact credential and leave the fallback inactive until\nit is provided.\nDoD: config block present and parses; fallback inactive pending credential; human recommendation posted;\nonce the credential is provided (later run), a simulated primary-limit path selects the fallback.\n\n### OWS-7+ \u2014 Structural effectiveness (ongoing Tier S refactors)\nMake `agent_tasks` the single authoritative task store (kanban board + `optimization_todo.md` become\ngenerated views, parity DoD). Enforce the thin-wrapper convention (logic in `wolfy/`, `scripts/` are \u226415-\nline shims; delete exact-duplicate twins). Maintain WS-5 Postgres-only state (use `wolfy_db`/Postgres adapters everywhere;\nguard excludes the adapter). Each as a bounded, verified, reversible slice.",
       "provider": null,
-      "repeat": {
-        "completed": 86,
-        "times": 9999
-      },
+      "public_id": "job-013",
+      "repeat_limit": 9999,
+      "repeat_policy": "bounded",
       "schedule": {
         "display": "15 2 * * *",
         "expr": "15 2 * * *",
@@ -580,14 +321,128 @@
       "skills": [
         "hermes-agent"
       ],
-      "workdir": "/root/.hermes"
+      "workdir": "<HERMES_HOME>"
     },
     {
-      "context_from": null,
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": [
+        "terminal",
+        "browser",
+        "web",
+        "session_search",
+        "file"
+      ],
+      "intended_delivery_policy": "discord",
+      "model": null,
+      "name": "Wolfy EOD after-close screening report",
+      "no_agent": false,
+      "profile": null,
+      "prompt": "EOD ONLY: actionable decisions use closing data only and are for next-session human review/execution. No auto-execution. Approved-strategy gate required for capital/paper-trade proposals.\n\nYou are Wolfy, the user-facing EOD stock-research analyst. Use the attached script context only. Produce a concise after-close EOD screening notification for U.S. stocks/ETFs under the user constraints: Robinhood-tradable, long-only, no shorts, options only as defined-risk paper-trade structures, max 3 concurrent positions, stops required, no PDT churn. Respect Hermes-EOD governance: closing-data only, next-session human review/execution only, deterministic signals/risk gates first, FACT vs JUDGMENT separation, no forced setups. If there are no approved-strategy pending_review setups, state NO SETUP / WATCHLIST ONLY and why.",
+      "provider": null,
+      "public_id": "job-014",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "35 17 * * 1-5",
+        "expr": "35 17 * * 1-5",
+        "kind": "cron"
+      },
+      "script": "wolfy_eod_screening_context.py",
+      "skill": null,
+      "skills": []
+    },
+    {
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "886554b9a87e",
+      "intended_delivery_policy": "local",
+      "model": null,
+      "name": "Wolfy EOD deterministic signals and approved-gated setups",
+      "no_agent": true,
+      "profile": null,
+      "prompt": "Script-only Wolfy EOD deterministic signal generation and approved-gated pending_review setup writer. Idempotent Postgres writes; no LLM.",
+      "provider": null,
+      "public_id": "job-015",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "5 17 * * 1-5",
+        "expr": "5 17 * * 1-5",
+        "kind": "cron"
+      },
+      "script": "wolfy_eod_features_signals.py",
+      "skill": null,
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": null,
+      "intended_delivery_policy": "discord",
+      "model": null,
+      "name": "Wolfy EOD monthly strategy revalidation",
+      "no_agent": true,
+      "profile": null,
+      "prompt": "Script-only Wolfy EOD monthly strategy revalidation. Wrapper only acts on the first Monday and is silent unless strategies are demoted.",
+      "provider": null,
+      "public_id": "job-016",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "0 8 1-7 * 1",
+        "expr": "0 8 1-7 * 1",
+        "kind": "cron"
+      },
+      "script": "wolfy_eod_monthly_revalidation.py",
+      "skill": null,
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": null,
+      "intended_delivery_policy": "discord",
+      "model": null,
+      "name": "Wolfy EOD pre-open risk monitor",
+      "no_agent": true,
+      "profile": null,
+      "prompt": "Script-only Wolfy EOD pre-open risk monitor. Silent unless deterministic checks flag/reject a setup or position.",
+      "provider": null,
+      "public_id": "job-017",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "0 8 * * 1-5",
+        "expr": "0 8 * * 1-5",
+        "kind": "cron"
+      },
+      "script": "wolfy_eod_preopen_monitor.py",
+      "skill": null,
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": null,
+      "intended_delivery_policy": "local",
+      "model": null,
+      "name": "Wolfy EOD price ingest shard 1/5",
+      "no_agent": true,
+      "profile": null,
+      "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 1/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
+      "provider": null,
+      "public_id": "job-018",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "30 16 * * 1-5",
+        "expr": "30 16 * * 1-5",
+        "kind": "cron"
+      },
+      "script": "wolfy_eod_after_close_ingest_shard_1.py",
+      "skill": null,
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": null,
       "intended_delivery_policy": "local",
       "model": null,
       "name": "Wolfy EOD price ingest shard 2/5",
@@ -595,10 +450,8 @@
       "profile": null,
       "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 2/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
       "provider": null,
-      "repeat": {
-        "completed": 55,
-        "times": null
-      },
+      "public_id": "job-019",
+      "repeat_policy": "forever",
       "schedule": {
         "display": "35 16 * * 1-5",
         "expr": "35 16 * * 1-5",
@@ -606,15 +459,12 @@
       },
       "script": "wolfy_eod_after_close_ingest_shard_2.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "0b1ae54fe4b5",
       "intended_delivery_policy": "local",
       "model": null,
       "name": "Wolfy EOD price ingest shard 3/5",
@@ -622,10 +472,8 @@
       "profile": null,
       "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 3/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
       "provider": null,
-      "repeat": {
-        "completed": 55,
-        "times": null
-      },
+      "public_id": "job-020",
+      "repeat_policy": "forever",
       "schedule": {
         "display": "40 16 * * 1-5",
         "expr": "40 16 * * 1-5",
@@ -633,15 +481,12 @@
       },
       "script": "wolfy_eod_after_close_ingest_shard_3.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "aafdff5d2f32",
       "intended_delivery_policy": "local",
       "model": null,
       "name": "Wolfy EOD price ingest shard 4/5",
@@ -649,10 +494,8 @@
       "profile": null,
       "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 4/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
       "provider": null,
-      "repeat": {
-        "completed": 55,
-        "times": null
-      },
+      "public_id": "job-021",
+      "repeat_policy": "forever",
       "schedule": {
         "display": "45 16 * * 1-5",
         "expr": "45 16 * * 1-5",
@@ -660,15 +503,12 @@
       },
       "script": "wolfy_eod_after_close_ingest_shard_4.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "9b4c89ba4b54",
       "intended_delivery_policy": "local",
       "model": null,
       "name": "Wolfy EOD price ingest shard 5/5",
@@ -676,10 +516,8 @@
       "profile": null,
       "prompt": "Script-only Wolfy EOD after-close Massive adjusted daily price ingest shard 5/5 and deterministic feature computation. Silent/local unless the script errors. EOD-only: closing data only; no trade execution.",
       "provider": null,
-      "repeat": {
-        "completed": 55,
-        "times": null
-      },
+      "public_id": "job-022",
+      "repeat_policy": "forever",
       "schedule": {
         "display": "50 16 * * 1-5",
         "expr": "50 16 * * 1-5",
@@ -687,82 +525,42 @@
       },
       "script": "wolfy_eod_after_close_ingest_shard_5.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "2bd5812cf748",
-      "intended_delivery_policy": "local",
+      "intended_delivery_policy": "discord",
       "model": null,
-      "name": "Wolfy bounded tiered EOD history backfill",
-      "no_agent": true,
+      "name": "Wolfy EOD weekly research and backtest review",
+      "no_agent": false,
       "profile": null,
-      "prompt": "Script-only bounded Wolfy tiered EOD history backfill. Loads a few active/enabled large/mid/small-cap tickers per run using Massive adjusted daily bars, with a hard batch cap to stay under cron timeout. EOD-only research data; no setup approval, no trade execution.",
+      "prompt": "You are Wolfy/Jonah writing the weekly EOD research progress review. Use the attached script context only. Summarize strategy/backtest status, gaps, and next deterministic research/backtest tasks. Do not make trade recommendations. Strategy approval remains human-gated; research_only/candidate rows are not actionable.",
       "provider": null,
-      "repeat": {
-        "completed": 896,
-        "times": null
-      },
+      "public_id": "job-023",
+      "repeat_policy": "forever",
       "schedule": {
-        "display": "every 120m",
-        "kind": "interval",
-        "minutes": 120
+        "display": "30 18 * * 5",
+        "expr": "30 18 * * 5",
+        "kind": "cron"
       },
-      "script": "wolfy_tiered_backfill_bounded.py",
+      "script": "wolfy_eod_weekly_research_context.py",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
     },
     {
-      "context_from": null,
-      "deliver": "local",
-      "enabled": false,
-      "enabled_toolsets": [
-        "terminal",
-        "file"
-      ],
-      "id": "e55c9cc39d8d",
-      "intended_delivery_policy": "local",
-      "model": null,
-      "name": "Wolfy config guardian auto-restore",
-      "no_agent": true,
-      "profile": null,
-      "prompt": "",
-      "provider": null,
-      "repeat": {
-        "completed": 6688,
-        "times": 999999
-      },
-      "schedule": {
-        "display": "every 15m",
-        "kind": "interval",
-        "minutes": 15
-      },
-      "script": "wolfy_config_guardian.sh",
-      "skill": null,
-      "skills": [],
-      "workdir": "/root/.hermes"
-    },
-    {
-      "context_from": null,
       "deliver": "local",
       "enabled": false,
       "enabled_toolsets": null,
-      "id": "2d6d9773c752",
       "intended_delivery_policy": "origin",
       "model": null,
       "name": "Wolfy recommendation-engine daily summary",
       "no_agent": true,
       "prompt": "Run the Wolfy recommendation-engine daily summary script and deliver its stdout verbatim. Paper-only status summary; no broker orders or live execution.",
       "provider": null,
-      "repeat": {
-        "completed": 25,
-        "times": null
-      },
+      "public_id": "job-024",
+      "repeat_policy": "forever",
       "schedule": {
         "display": "15 22 * * 1-5",
         "expr": "15 22 * * 1-5",
@@ -770,8 +568,82 @@
       },
       "script": "wolfy_recommendation_engine_daily_summary.sh",
       "skill": null,
-      "skills": [],
-      "workdir": null
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": null,
+      "intended_delivery_policy": "local",
+      "model": null,
+      "name": "Wolfy script-only intraday scanner snapshots",
+      "no_agent": true,
+      "profile": null,
+      "prompt": "Ignored because no_agent=true. Script runs Wolfy's deterministic delayed/free scanner snapshots during U.S. market hours, persists scanner_runs/scanner_results, and emits output only on scanner errors or data-quality thresholds. No LLM tokens and no trading authority.",
+      "provider": null,
+      "public_id": "job-025",
+      "repeat_limit": 9999,
+      "repeat_policy": "bounded",
+      "schedule": {
+        "display": "0 10-16/2 * * 1-5",
+        "expr": "0 10-16/2 * * 1-5",
+        "kind": "cron"
+      },
+      "script": "wolfy_intraday_scanner_snapshot.py",
+      "skill": null,
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": [
+        "terminal",
+        "web",
+        "file"
+      ],
+      "intended_delivery_policy": "discord",
+      "model": "gpt-5.4",
+      "name": "Wolfy separate Alpha Search Report",
+      "no_agent": false,
+      "profile": null,
+      "prompt": "EOD ONLY: actionable decisions use closing data only and are for next-session human review/execution.\nFACT vs JUDGMENT: separate measured/filed facts from analyst inference.\nNo auto-execution: no broker authority, no banking, no money movement; humans place every order.\nApproved-strategy gate required for capital/paper-trade proposals.\n\nHERMES-EOD CONSTITUTION: EOD only; no auto-execution; human review required; LLM interprets deterministic facts and must not invent numeric edge. You are Wolfy running a separate Alpha Search Report, distinct from the normal trade recommendation report. Use the injected context from /root/.hermes/wolfy/alpha_search_context.py and the live Wolfy Postgres DB `wolfy`; SQLite is retired; use only Postgres. Mission: generate lead-generation alpha, not final trade calls. Include concise sections for insider buying leads, filings/news/catalysts, public social scanner/X status, suspicious-activity flags, top alpha leads for Wolfy review, leads needing deeper research, Yang technical handoff, and Sentinel challenge list. Hard rules: no final trade recommendations unless a complete ticket already exists with thesis/catalyst/setup/trigger/stop/target/sizing/risk notes/Sentinel path; insider buying is only thesis support and only public SEC Form 4 code P open-market buys count; evaluate no-news/social movers for abnormal volume, low float, promotion/bot chatter, dilution/offering/reverse-split risk, opaque/offshore risk, options/social pile-on, and lack of verifiable catalyst. Use Markdown tables where useful. Persistence before final response: create payload from `python3 /root/.hermes/wolfy/alpha_search_pipeline.py template`; store with `python3 /root/.hermes/wolfy/alpha_search_pipeline.py record --json <payload.json>`; finish the AGENT_RUN_ID from context with `wolfy_agent_cli.py run-finish`. If blocked, mark the run blocked with a specific blocker. Final response: concise broker-tone report, number of leads persisted, and state research leads only unless complete_ticket=true.",
+      "provider": null,
+      "public_id": "job-026",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "30 11 * * 1-5",
+        "expr": "30 11 * * 1-5",
+        "kind": "cron"
+      },
+      "script": "wolfy_alpha_search_context.py",
+      "skill": null,
+      "skills": []
+    },
+    {
+      "deliver": "local",
+      "enabled": false,
+      "enabled_toolsets": [
+        "terminal",
+        "file",
+        "web"
+      ],
+      "intended_delivery_policy": "discord",
+      "model": null,
+      "name": "Yang post-EOD technical entry/exit analyst",
+      "no_agent": false,
+      "profile": "yang",
+      "prompt": "HERMES-EOD CONSTITUTION (non-negotiable): EOD ONLY; actionable decisions use closing data only and are for next-session human review/execution. No intraday actionable recommendations. No auto-execution, broker authority, banking, or money movement. LLM interprets deterministic signals and cited facts; it does not generate numeric edge, triggers, stops, sizing, or ranks. Separate FACT (measured/filed/database-backed) vs JUDGMENT (analyst inference) in rationale. Prefer no setup/no-trade over forced ideas; capital/paper-trade proposals require approved strategy plus deterministic signal/setup support.\n\nYou are Yang, the technical-analysis agent for the user's Wolfy research desk. Use the injected Postgres-first script output as current context and the authoritative run/task ledger instructions.\n\nYang's role: evaluate technical entry and exit plans only for Wolfy alpha/recommendation candidates. Do not originate alpha theses, do not approve trades, and do not override Sentinel. For each reviewable candidate, provide: entry trigger/zone, stop/invalidation, target/exit plan, ATR/R multiple, trend/relative-strength/volume read, and status actionable-now / wait-for-trigger / watch-only / no-trade.\n\nIf there are no reviewable candidates, stay terse and say there is no Yang action. If there is a claimed Postgres task, finish it with the exact `wolfy_agent_cli.py complete` command printed in the script output after any DB/status writes, or use the printed block command if blocked.\n\nFormatting requirement: when there are candidates, use a Markdown table with columns like ID | Ticker | Technical Status | Entry/Trigger | Stop | Target/Exit | R Multiple | Note. Keep prose short.\n\nPersistence/update rule: Persist completed technical reviews to Postgres table `yang_reviews` before finishing the Postgres task. SQLite is retired; use only Postgres as Yang's source. The payload/row must link `recommendation_id` and any `alpha_lead_id`, include `wolfy_alpha_thesis`, and include entry trigger/zone, stop/invalidation, target/exit plan, ATR, R multiple, trend, relative strength, volume, and technical_status. Never produce or persist a Yang plan from scanner context alone; if no Wolfy alpha thesis exists, report no Yang action.",
+      "provider": null,
+      "public_id": "job-027",
+      "repeat_policy": "forever",
+      "schedule": {
+        "display": "55 17 * * 1-5",
+        "expr": "55 17 * * 1-5",
+        "kind": "cron"
+      },
+      "script": "wolfy_yang_technical_context.py",
+      "skill": null,
+      "skills": []
     }
   ]
 }

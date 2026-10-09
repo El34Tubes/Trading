@@ -198,6 +198,44 @@ def test_canary_accepts_fully_evaluated_deterministic_no_trade(tmp_path):
     assert result["recommendation_ids"] == []
 
 
+def test_scheduled_callbacks_accept_authorized_zero_create_rerun(tmp_path):
+    from production_release import execute_scheduled_callbacks, load_release_artifact
+
+    release = load_release_artifact(_artifact(tmp_path))
+    ids = ["00000000-0000-4000-8000-000000000001"]
+    calls = []
+
+    def publish(*, rerun):
+        calls.append(rerun)
+        return _publication(ids, created=0)
+
+    result = execute_scheduled_callbacks(
+        release,
+        publish=publish,
+        readback=lambda: _publication(ids, created=0),
+        canary_evidence={"recommendation_ids": ids},
+    )
+    assert calls == [True]
+    assert result["passed"] is True
+    assert result["scheduled"] is True
+    assert result["recommendations_created"] == 0
+    assert result["recommendation_ids"] == ids
+
+
+def test_scheduled_callbacks_reject_post_canary_creation(tmp_path):
+    from production_release import ProductionReleaseError, execute_scheduled_callbacks, load_release_artifact
+
+    release = load_release_artifact(_artifact(tmp_path))
+    ids = ["00000000-0000-4000-8000-000000000001"]
+    with pytest.raises(ProductionReleaseError, match="created recommendations after canary"):
+        execute_scheduled_callbacks(
+            release,
+            publish=lambda **_kwargs: _publication(ids, created=1),
+            readback=lambda: _publication(ids, created=0),
+            canary_evidence={"recommendation_ids": ids},
+        )
+
+
 def test_source_cache_is_strictly_validated_without_absolute_path_dependency(tmp_path):
     from production_release import ProductionReleaseError, load_source_cache
 

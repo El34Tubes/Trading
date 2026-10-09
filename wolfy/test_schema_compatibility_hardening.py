@@ -46,6 +46,25 @@ def test_alpha_import_identifier_aliases_exist_and_sync_both_directions():
             (9_106_100_801,),
         ).fetchone()
         assert report == (9_106_100_801, 9_106_100_801)
+        report = conn.execute(
+            "UPDATE alpha_search_reports SET legacy_id=%s WHERE legacy_id=%s RETURNING legacy_id, sqlite_id",
+            (9_106_100_803, 9_106_100_801),
+        ).fetchone()
+        assert report == (9_106_100_803, 9_106_100_803)
+        report = conn.execute(
+            "UPDATE alpha_search_reports SET sqlite_id=%s WHERE legacy_id=%s RETURNING legacy_id, sqlite_id",
+            (9_106_100_804, 9_106_100_803),
+        ).fetchone()
+        assert report == (9_106_100_804, 9_106_100_804)
+        with pytest.raises(Exception), conn.transaction():
+            conn.execute(
+                "UPDATE alpha_search_reports SET legacy_id=%s, sqlite_id=%s WHERE legacy_id=%s",
+                (9_106_100_805, 9_106_100_806, 9_106_100_804),
+            )
+        assert conn.execute(
+            "SELECT legacy_id, sqlite_id FROM alpha_search_reports WHERE legacy_id=%s",
+            (9_106_100_804,),
+        ).fetchone() == (9_106_100_804, 9_106_100_804)
 
         lead = conn.execute(
             """
@@ -64,10 +83,10 @@ def test_run_ledger_malformed_numeric_json_fails_closed_to_null():
     detail = {
         "source": "schema-compat-test",
         "rows_written": "not-a-number",
-        "rows_upserted": "12.5",
+        "rows_upserted": "9" * 100,
         "feature_rows_upserted": "unknown",
         "bars_loaded": "NaN",
-        "tickers_processed": "?",
+        "tickers_processed": "8" * 100,
     }
     with test_connection() as conn:
         row = conn.execute(
