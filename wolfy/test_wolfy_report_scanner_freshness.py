@@ -1,5 +1,6 @@
 import datetime as dt
 import sqlite3
+import types
 
 import pytest
 
@@ -188,3 +189,62 @@ def test_recommendation_buckets_separate_pending_approved_and_watch_only():
     assert 'Pending_review candidates awaiting Sentinel:' in format_recommendation_bucket('pending_review', buckets['pending_review'])[0]
     assert 'Sentinel-approved paper candidates:' in format_recommendation_bucket('sentinel_approved', buckets['sentinel_approved'])[0]
     assert 'Watch-only ideas:' in format_recommendation_bucket('watch_only', buckets['watch_only'])[0]
+
+
+def test_smoke_mode_skips_scanner_refresh_and_agent_run(monkeypatch, capsys):
+    import wolfy_report_context as ctx
+
+    class FakeCursor:
+        description = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, sql, params=()):
+            self.sql = sql
+
+        def fetchone(self):
+            if 'alpha_leads' in getattr(self, 'sql', ''):
+                return (0, 0)
+            return (0,)
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def rollback(self):
+            pass
+
+    def fail_write_path(*args, **kwargs):
+        pytest.fail('smoke mode must not run scanner or open agent_runs')
+
+    monkeypatch.setenv('WOLFY_CONTEXT_SMOKE', '1')
+    monkeypatch.setattr(ctx, 'run_scanner_before_report', fail_write_path)
+    monkeypatch.setattr(ctx, 'start_run', fail_write_path)
+    monkeypatch.setattr(ctx, '_pg_fetch_dicts', lambda *args, **kwargs: [])
+    monkeypatch.setattr(ctx, 'psycopg', types.SimpleNamespace(connect=lambda dsn: FakeConnection()))
+    monkeypatch.setattr(ctx, 'latest_scanner_freshness', lambda: {'backend': 'postgres', 'status': 'smoke'})
+    monkeypatch.setattr(ctx, 'print_eod_governance', lambda: print('EOD governance smoke line'))
+
+    ctx.main([])
+
+    out = capsys.readouterr().out
+    assert 'Wolfy twice-daily report context' in out
+    assert 'SMOKE_MODE=true' in out
+    assert 'scanner refresh skipped' in out
+    assert 'no agent_runs row opened' in out
+    assert 'Required output:' in out
+    assert 'EOD-only' in out
+    assert 'create no actionable recommendations' in out

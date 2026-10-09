@@ -14,7 +14,6 @@ from pathlib import Path
 
 ROOT = Path('/root/.hermes')
 KANBAN_DB = ROOT / 'kanban' / 'boards' / 'wolfy' / 'kanban.db'
-WOLFY_DB = ROOT / 'wolfy' / 'wolfy.db'
 STATE_DB = ROOT / 'state.db'
 CRON_OUTPUT = ROOT / 'cron' / 'output'
 CLERKY_JOB = 'a739dac0d264'
@@ -107,17 +106,23 @@ def main() -> int:
     else:
         print(f'MISSING {KANBAN_DB}')
 
-    heading('sqlite_wolfy_counts')
-    for table in ['knowledge_notes','knowledge_sources','strategy_rules','reports','recommendations','paper_trades','recommendation_outcomes','scanner_runs','scanner_results','alpha_search_reports','alpha_leads','alpha_handoffs','insider_leads','suspicious_activity_flags','yang_reviews','system_metrics']:
-        print(f'{table}\t{scalar(WOLFY_DB, f"SELECT count(*) FROM {table}")}')
-
-    heading('postgres_coordination_counts')
+    heading('postgres_wolfy_counts')
     psql = run(['psql', '-d', 'wolfy', '-Atc', """
         SELECT 'agent_runs:' || status || '=' || count(*) FROM agent_runs GROUP BY status
         UNION ALL SELECT 'agent_tasks:' || status || '=' || count(*) FROM agent_tasks GROUP BY status
         UNION ALL SELECT 'knowledge_chunks_total=' || count(*) FROM knowledge_chunks
         UNION ALL SELECT 'knowledge_chunks_embedded=' || count(embedding) FROM knowledge_chunks
         UNION ALL SELECT 'recommendation_reviews=' || count(*) FROM recommendation_reviews
+        UNION ALL SELECT 'recommendations=' || count(*) FROM recommendations
+        UNION ALL SELECT 'paper_trades=' || count(*) FROM paper_trades
+        UNION ALL SELECT 'scanner_runs=' || count(*) FROM scanner_runs
+        UNION ALL SELECT 'scanner_results=' || count(*) FROM scanner_results
+        UNION ALL SELECT 'alpha_search_reports=' || count(*) FROM alpha_search_reports
+        UNION ALL SELECT 'alpha_leads=' || count(*) FROM alpha_leads
+        UNION ALL SELECT 'alpha_handoffs=' || count(*) FROM alpha_handoffs
+        UNION ALL SELECT 'yang_reviews=' || count(*) FROM yang_reviews
+        UNION ALL SELECT 'system_metrics=' || count(*) FROM system_metrics
+        UNION ALL SELECT 'retired_legacy_rows=' || count(*) FROM wolfy_retired_legacy_rows
         ORDER BY 1;
     """], timeout=60)
     print(psql)

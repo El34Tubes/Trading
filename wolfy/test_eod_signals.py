@@ -267,7 +267,7 @@ def test_generate_eod_signals_seeds_research_only_strategies_and_writes_determin
     assert all(row[4]["gate_status"] in {"research_only", "candidate", "approved"} for row in rows)
 
 
-def test_write_approved_paper_recommendations_only_uses_approved_signals_and_caps_daily_rows():
+def test_write_approved_paper_recommendations_adds_robinhood_broker_enrichment_without_live_orders():
     psycopg = pytest.importorskip("psycopg")
     from eod_signals import seed_default_strategies, write_approved_paper_recommendations
 
@@ -307,20 +307,50 @@ def test_write_approved_paper_recommendations_only_uses_approved_signals_and_cap
                     (ticker, signal_dt, approved_id if ticker != "ZZBLOCK" else blocked_id, __import__("json").dumps(raw)),
                 )
 
-            result = write_approved_paper_recommendations(conn, signal_dt=signal_dt, tickers=tickers, max_recommendations=3, dry_run=False)
+            broker_enrichment = {
+                "ZZREC1": {
+                    "source": "robinhood_mcp",
+                    "fetched_at": "2099-02-05T00:00:00Z",
+                    "tradability": {"tradable": True, "halted": False},
+                    "quote": {"last_price": "61.20", "bid_price": "61.15", "ask_price": "61.25", "previous_close": "61.00"},
+                    "price_book": {"bid_price": "61.15", "ask_price": "61.25"},
+                    "fundamentals": {"average_volume": 3000000, "market_cap": "10000000000"},
+                    "earnings": {"next_earnings_date": "2099-03-01", "within_hold_window": False},
+                    "account_exposure": {"existing_equity_position": False, "existing_option_position": False, "open_order_warning": False},
+                    "option_spread": {"available": True, "liquidity_score": 0.82, "long_leg": {"symbol": "ZZREC1_CALL_62"}, "short_leg": {"symbol": "ZZREC1_CALL_65"}},
+                },
+                "ZZREC2": {"source": "robinhood_mcp", "tradability": {"tradable": False, "halted": True}, "quote": {"last_price": "62"}},
+                "ZZREC3": {"source": "robinhood_mcp", "quote": {"last_price": "70", "bid_price": "69", "ask_price": "71"}, "account_exposure": {"existing_equity_position": True}},
+            }
+            result = write_approved_paper_recommendations(conn, signal_dt=signal_dt, tickers=tickers, max_recommendations=3, dry_run=False, broker_enrichment=broker_enrichment)
             rows = conn.execute("SELECT ticker, status, recommendation_type, entry_trigger, stop, target, position_size_suggestion, notes FROM recommendations WHERE ticker = ANY(%s) ORDER BY ticker", (tickers,)).fetchall()
         finally:
             _cleanup(conn, tickers)
 
     assert result["recommendations_created"] == 3
     assert result["blocked_by_strategy_status"] == 1
+    assert result["broker_enriched"] == 3
+    assert result["broker_orders_created"] == 0
     assert [row[0] for row in rows] == ["ZZREC1", "ZZREC2", "ZZREC3"]
     assert all(row[1] == "paper_candidate" for row in rows)
     assert all(row[2] == "equity_plus_option_spread_when_data_exists" for row in rows)
     assert all("EOD close" in row[3] for row in rows)
     assert all("5.00%" in row[6] for row in rows)
-    assert rows[0][7]["paper_entry_baseline"] == "eod_close"
-    assert rows[0][7]["review_gate_required"] is False
+    zzrec1_notes = rows[0][7]
+    assert zzrec1_notes["paper_entry_baseline"] == "eod_close"
+    assert zzrec1_notes["review_gate_required"] is False
+    assert zzrec1_notes["robinhood_read_only"] is True
+    assert zzrec1_notes["broker_order_submitted"] is False
+    assert zzrec1_notes["broker_enrichment"]["source"] == "robinhood_mcp"
+    assert zzrec1_notes["broker_enrichment"]["tradability_block"] is False
+    assert zzrec1_notes["broker_enrichment"]["option_spread_available"] is True
+    assert zzrec1_notes["equity_fallback"] is False
+    zzrec2_notes = rows[1][7]
+    assert zzrec2_notes["broker_enrichment"]["tradability_block"] is True
+    assert "halted_or_not_tradable" in zzrec2_notes["broker_warnings"]
+    zzrec3_notes = rows[2][7]
+    assert zzrec3_notes["broker_enrichment"]["existing_equity_position"] is True
+    assert any("price_drift" in warning for warning in zzrec3_notes["broker_warnings"])
 
 
 def test_log_approved_paper_recommendation_trades_creates_open_paper_rows_idempotently():
@@ -385,6 +415,8 @@ def test_log_approved_paper_recommendation_trades_creates_open_paper_rows_idempo
     assert rows[0][10]["paper_only"] is True
     assert rows[0][10]["no_live_execution"] is True
     assert rows[0][10]["risk_fraction"] == "0.05"
+    assert rows[0][10]["broker_order_submitted"] is False
+    assert rows[0][10]["robinhood_read_only"] is True
     assert all(row[11] == "paper_logged" for row in rows)
 
 

@@ -8,13 +8,11 @@ remain explicit compatibility sinks while cron/report code can warn on fallback.
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
-import json
 from typing import Any, Mapping
 
 from psycopg.types.json import Jsonb
 
-from wolfy_db import DEFAULT_POSTGRES_DSN, connect_postgres as _connect_postgres
+from wolfy_db import connect_postgres as _connect_postgres
 
 
 def connect_postgres(dsn: str | None = None):
@@ -45,18 +43,24 @@ def ensure_operational_tables(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS scanner_runs (
           id BIGSERIAL PRIMARY KEY,
-          sqlite_id BIGINT UNIQUE,
+          legacy_id BIGINT UNIQUE,
           run_time TIMESTAMPTZ NOT NULL DEFAULT now(),
           data_source TEXT NOT NULL,
           universe TEXT,
-          notes TEXT
+          notes TEXT,
+          started_at TIMESTAMPTZ,
+          completed_at TIMESTAMPTZ,
+          finished_at TIMESTAMPTZ,
+          status TEXT,
+          symbols_scanned INTEGER,
+          mode TEXT
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_pg_scanner_runs_time ON scanner_runs(run_time DESC)",
         """
         CREATE TABLE IF NOT EXISTS scanner_results (
           id BIGSERIAL PRIMARY KEY,
-          sqlite_id BIGINT UNIQUE,
+          legacy_id BIGINT UNIQUE,
           run_id BIGINT NOT NULL REFERENCES scanner_runs(id) ON DELETE CASCADE,
           ticker TEXT NOT NULL,
           score DOUBLE PRECISION,
@@ -101,7 +105,7 @@ def ensure_operational_tables(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS recommendations (
           id BIGSERIAL PRIMARY KEY,
-          sqlite_id BIGINT UNIQUE,
+          legacy_id BIGINT UNIQUE,
           report_id TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           ticker TEXT NOT NULL,
@@ -126,7 +130,7 @@ def ensure_operational_tables(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS paper_trades (
           id BIGSERIAL PRIMARY KEY,
-          sqlite_id BIGINT UNIQUE,
+          legacy_id BIGINT UNIQUE,
           recommendation_id TEXT,
           ticker TEXT NOT NULL,
           entry_date DATE,
@@ -152,7 +156,7 @@ def ensure_operational_tables(conn) -> None:
         """
         CREATE TABLE IF NOT EXISTS recommendation_outcomes (
           id BIGSERIAL PRIMARY KEY,
-          sqlite_id BIGINT UNIQUE,
+          legacy_id BIGINT UNIQUE,
           recommendation_id TEXT NOT NULL,
           paper_trade_id TEXT,
           entry_triggered BOOLEAN DEFAULT false,
@@ -197,14 +201,25 @@ def count_rows(conn, table: str) -> int:
         return int(cur.fetchone()[0])
 
 
-def persist_scanner_run(ranked: list[tuple[float, str, dict]], *, universe: str, notes: str, dsn: str | None = None) -> int:
+def persist_scanner_run(
+    ranked: list[tuple[float, str, dict]],
+    *,
+    universe: str,
+    notes: str,
+    symbols_scanned: int | None = None,
+    dsn: str | None = None,
+) -> int:
     """Persist a scanner run and ranked rows to Postgres first."""
     with connect_postgres(dsn) as conn:
         ensure_operational_tables(conn)
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO scanner_runs(data_source, universe, notes) VALUES(%s,%s,%s) RETURNING id",
-                ("Yahoo chart endpoint", universe, notes),
+                """INSERT INTO scanner_runs(
+                       data_source, universe, notes, started_at, completed_at,
+                       finished_at, status, symbols_scanned, mode
+                   ) VALUES(%s,%s,%s,now(),now(),now(),'completed',%s,'deterministic')
+                   RETURNING id""",
+                ("Yahoo chart endpoint", universe, notes, symbols_scanned if symbols_scanned is not None else len(ranked)),
             )
             row = cur.fetchone()
             if row is None:
@@ -224,11 +239,31 @@ def persist_scanner_run(ranked: list[tuple[float, str, dict]], *, universe: str,
                     """
                     INSERT INTO scanner_results(
                       run_id,ticker,score,data_date,close,r5,r20,r60,vs20,vs50,atr,avg_volume,
-                      high20,low20,extension_penalty,liquidity_pass,notes
-                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                      high20,low20,extension_penalty,liquidity_pass,
+                      rs_spy_20,rs_qqq_20,breakout_20d_pct,
+                      volume_surge_1d_20,volume_surge_5d_20,volume_surge_1d_50,volume_surge_5d_50,
+                      atr_pct,squeeze_ratio,squeeze_flag,liquidity_spread_proxy,
+                      trend_regime,rank_reasons,gap_reversal_flag,notes
+                    ) VALUES(
+                      %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                      %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+                    )
                     ON CONFLICT(run_id, ticker) DO UPDATE SET
                       score=excluded.score, data_date=excluded.data_date, close=excluded.close,
-                      r5=excluded.r5, r20=excluded.r20, r60=excluded.r60, notes=excluded.notes
+                      r5=excluded.r5, r20=excluded.r20, r60=excluded.r60,
+                      rs_spy_20=excluded.rs_spy_20, rs_qqq_20=excluded.rs_qqq_20,
+                      breakout_20d_pct=excluded.breakout_20d_pct,
+                      volume_surge_1d_20=excluded.volume_surge_1d_20,
+                      volume_surge_5d_20=excluded.volume_surge_5d_20,
+                      volume_surge_1d_50=excluded.volume_surge_1d_50,
+                      volume_surge_5d_50=excluded.volume_surge_5d_50,
+                      atr_pct=excluded.atr_pct, squeeze_ratio=excluded.squeeze_ratio,
+                      squeeze_flag=excluded.squeeze_flag,
+                      liquidity_spread_proxy=excluded.liquidity_spread_proxy,
+                      trend_regime=excluded.trend_regime,
+                      rank_reasons=excluded.rank_reasons,
+                      gap_reversal_flag=excluded.gap_reversal_flag,
+                      notes=excluded.notes
                     """,
                     (
                         run_id,
@@ -247,6 +282,20 @@ def persist_scanner_run(ranked: list[tuple[float, str, dict]], *, universe: str,
                         values.get("lo20"),
                         values.get("extension_penalty"),
                         bool(values.get("liquidity_pass", True)),
+                        values.get("rs_spy_20"),
+                        values.get("rs_qqq_20"),
+                        values.get("breakout_20d_pct"),
+                        values.get("volume_surge_1d_20"),
+                        values.get("volume_surge_5d_20"),
+                        values.get("volume_surge_1d_50"),
+                        values.get("volume_surge_5d_50"),
+                        values.get("atr_pct"),
+                        values.get("squeeze_ratio"),
+                        values.get("squeeze_flag"),
+                        values.get("liquidity_spread_proxy"),
+                        values.get("trend_regime"),
+                        values.get("rank_reasons"),
+                        values.get("gap_reversal_flag"),
                         _jsonb(factor_payload),
                     ),
                 )

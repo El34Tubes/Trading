@@ -9,7 +9,6 @@ import psycopg
 BASE = Path('/root/.hermes/wolfy')
 HERMES = Path('/root/.hermes')
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
-LEGACY_DB = BASE / 'wolfy.db'
 
 
 def size(path: Path) -> int:
@@ -36,7 +35,7 @@ def human(n: int) -> str:
     return f'{value:.1f}PB'
 
 
-def record_metric(hermes: int, wolfy: int, legacy_db: int, used_pct: float, free_bytes: int) -> None:
+def record_metric(hermes: int, wolfy: int, used_pct: float, free_bytes: int) -> None:
     with psycopg.connect(PG_DSN) as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -45,7 +44,7 @@ def record_metric(hermes: int, wolfy: int, legacy_db: int, used_pct: float, free
               captured_at TIMESTAMPTZ NOT NULL DEFAULT now(),
               hermes_bytes BIGINT,
               wolfy_bytes BIGINT,
-              legacy_sqlite_bytes BIGINT,
+              retired_db_bytes BIGINT,
               root_used_pct DOUBLE PRECISION,
               root_avail_bytes BIGINT,
               cron_job_count INTEGER,
@@ -55,10 +54,10 @@ def record_metric(hermes: int, wolfy: int, legacy_db: int, used_pct: float, free
         )
         cur.execute(
             """
-            INSERT INTO system_metrics(hermes_bytes,wolfy_bytes,legacy_sqlite_bytes,root_used_pct,root_avail_bytes,cron_job_count,notes)
+            INSERT INTO system_metrics(hermes_bytes,wolfy_bytes,retired_db_bytes,root_used_pct,root_avail_bytes,cron_job_count,notes)
             VALUES(%s,%s,%s,%s,%s,%s,%s)
             """,
-            (hermes, wolfy, legacy_db, used_pct, free_bytes, None, 'silent Postgres watchdog'),
+            (hermes, wolfy, None, used_pct, free_bytes, None, 'silent Postgres-only watchdog'),
         )
         conn.commit()
 
@@ -68,9 +67,8 @@ def main() -> None:
     usage = shutil.disk_usage('/')
     hermes = size(HERMES)
     wolfy = size(BASE)
-    legacy_db = size(LEGACY_DB)
     used = (usage.used / usage.total) * 100
-    record_metric(hermes, wolfy, legacy_db, used, usage.free)
+    record_metric(hermes, wolfy, used, usage.free)
     alerts = []
     if used > 70:
         alerts.append(f'Root disk high: {used:.1f}% used, {human(usage.free)} free')

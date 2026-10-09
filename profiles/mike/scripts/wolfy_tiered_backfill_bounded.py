@@ -10,8 +10,18 @@ from __future__ import annotations
 import subprocess
 import sys
 
+
+def python_cmd() -> list[str]:
+    """Return an interpreter with psycopg available for the Postgres backfill."""
+    try:
+        import psycopg  # noqa: F401
+    except ModuleNotFoundError:
+        return ["uvx", "--with", "psycopg[binary]", "python"]
+    return [sys.executable]
+
+
 CMD = [
-    sys.executable,
+    *python_cmd(),
     "/root/.hermes/wolfy/backfill_tiered_remaining.py",
     "--tiers", "large_cap", "mid_cap", "small_cap",
     "--batch-size", "2",

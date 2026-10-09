@@ -1,7 +1,7 @@
 ---
 name: subagent-driven-development
 description: "Execute plans via delegate_task subagents (2-stage review)."
-version: 1.1.0
+version: 1.2.0
 author: Hermes Agent (adapted from obra/superpowers)
 license: MIT
 platforms: [linux, macos, windows]
@@ -191,6 +191,8 @@ git add -A && git commit -m "feat: complete [feature name] implementation"
 
 **Each task = 2-5 minutes of focused work.**
 
+Treat implementation and exhaustive release verification as separate bounded stages when database migrations, hundreds of tests, static scans, and immutable-state checks could approach the delegation runtime limit. The implementation agent should reach focused GREEN; the orchestrator or a fresh release agent should then run the full suite and commit. Do not repeatedly redispatch the same broad task after timeouts.
+
 **Too big:**
 - "Implement user authentication system"
 
@@ -231,10 +233,18 @@ git add -A && git commit -m "feat: complete [feature name] implementation"
 - Repeat until approved
 - Don't skip the re-review
 
-### If Subagent Fails a Task
+### If Subagent Fails or Times Out
 
-- Dispatch a new fix subagent with specific instructions about what went wrong
-- Don't try to fix manually in the controller session (context pollution)
+A timed-out delegation may have left valuable partial work in the shared worktree. Treat its self-report as unavailable, not the work as failed:
+
+1. Verify the exact branch/worktree and run `git status --short`, `git diff --stat`, and `git diff --check`.
+2. Inspect only the intended files and run the narrowest focused test. This distinguishes an implementation timeout from a verification/reporting timeout.
+3. Preserve coherent partial work. Re-dispatch a fresh agent with the exact remaining RED failures, current file state, and a smaller bounded goal.
+4. Never infer that a commit exists; verify `HEAD`, the index, and worktree explicitly.
+5. If two agents time out on the same task, split the task further (for example: finish one missing API first, then run release verification separately) rather than repeating the same broad prompt.
+6. Run release checks and commit only after focused GREEN is independently observed.
+
+Do not discard partial changes or restart from scratch unless inspection proves they are unusable. Do not let the controller make a large speculative implementation merely because the delegate timed out; small mechanical verification/commit steps are acceptable after GREEN is established.
 
 ## Efficiency Notes
 
@@ -348,5 +358,7 @@ When the orchestration involves significant context usage, long review loops, or
 
 - **`references/context-budget-discipline.md`** — Four-tier context degradation model (PEAK / GOOD / DEGRADING / POOR), read-depth rules that scale with context window size, and early warning signs of silent degradation. Load when a run will clearly consume significant context (multi-phase plans, many subagents, large artifacts).
 - **`references/gates-taxonomy.md`** — The four canonical gate types (Pre-flight, Revision, Escalation, Abort) with behavior, recovery, and examples. Load when designing or reviewing any workflow that has validation checkpoints — use the vocabulary explicitly so each gate has defined entry, failure behavior, and resumption rules.
+- **`references/database-test-isolation.md`** — Adversarial pre-flight and verification checklist for delegated work against stateful databases: strict endpoint/ambient-variable guards, import ordering for cached DSNs, indirect dual-write isolation, fixture cleanup, production invariants, and review probes. Load before dispatching any database-backed integration-test task.
+- **`references/long-running-task-checkpointing.md`** — Split implementation from exhaustive release verification, recover useful work from timed-out delegations, and preserve exact checkpoint/review evidence. Load when a task combines substantial coding, migrations, full suites, scans, and commits or after the first timeout.
 
-Both references adapted from gsd-build/get-shit-done (MIT © 2025 Lex Christopherson).
+The context-budget and gate references are adapted from gsd-build/get-shit-done (MIT © 2025 Lex Christopherson).

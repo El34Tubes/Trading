@@ -1,5 +1,5 @@
-import io
 import sqlite3
+import sys
 
 import pytest
 
@@ -27,7 +27,7 @@ def test_snapshot_success_stays_silent_and_persists_scan(monkeypatch, tmp_path, 
         assert persist is True
         assert universe == 'core'
         print('csv output that must not leak')
-        print('# db_run_id=99', file=snapshot.sys.stderr)
+        print('# db_run_id=99', file=sys.stderr)
         return [(5.0, 'LEADER', {'date': '2026-06-03'})], {}
 
     monkeypatch.setattr(snapshot.wolfy_scanner, 'run_scan', fake_run_scan)
@@ -96,6 +96,47 @@ def test_snapshot_alerts_when_ranked_rows_below_threshold(monkeypatch, tmp_path)
     assert 'ranked_count=0 below min_ranked=1' in str(excinfo.value)
 
 
+def test_snapshot_allows_zero_ranked_smoke_when_threshold_is_zero(monkeypatch, tmp_path):
+    db = tmp_path / 'wolfy.db'
+    con = sqlite3.connect(db)
+    snapshot.wolfy_scanner.ensure_universe_tables(con)
+    snapshot.wolfy_scanner.refresh_universe_cache(
+        con,
+        source_records={'core': [
+            {'symbol': 'SPY', 'name': 'SPY', 'source': 'core_etf', 'sector': 'ETF', 'is_etf': 1},
+        ]},
+        now='2026-06-04T14:30:00+00:00',
+    )
+    con.close()
+    monkeypatch.setattr(snapshot.wolfy_scanner, 'run_scan', lambda *args, **kwargs: ([], {}))
+
+    status = snapshot.run_snapshot(db_path=db, universe='core', min_ranked=0)
+
+    assert status['ranked_count'] == 0
+    assert status['latest_data_date'] is None
+
+
+def test_bounded_symbols_always_include_benchmarks(monkeypatch):
+    class FixedDateTime:
+        @classmethod
+        def now(cls):
+            class Stamp:
+                hour = 9
+
+                @staticmethod
+                def timetuple():
+                    class TimeTuple:
+                        tm_yday = 100
+                    return TimeTuple()
+            return Stamp()
+
+    monkeypatch.setattr(snapshot, 'datetime', FixedDateTime)
+    selected = snapshot._bounded_symbols(['AAA', 'BBB', 'CCC', 'DDD', 'QQQ', 'SPY'], 4)
+
+    assert len(selected) == 4
+    assert {'SPY', 'QQQ'} <= set(selected)
+
+
 def test_cli_prints_single_alert_and_returns_nonzero_on_threshold(monkeypatch, tmp_path, capsys):
     db = tmp_path / 'wolfy.db'
     con = sqlite3.connect(db)
@@ -116,4 +157,4 @@ def test_cli_prints_single_alert_and_returns_nonzero_on_threshold(monkeypatch, t
     assert rc == 1
     assert captured.err == ''
     assert captured.out.startswith('Wolfy intraday scanner snapshot alert:')
-    assert 'failure_rate=1.00 above max_failure_rate=0.00' in captured.out
+    assert 'failure_rate=0.50 above max_failure_rate=0.00' in captured.out

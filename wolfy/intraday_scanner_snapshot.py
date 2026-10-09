@@ -2,7 +2,7 @@
 """Silent script-only Wolfy scanner snapshot helper.
 
 Runs the deterministic delayed/free scanner and persists scanner_runs/scanner_results
-without spending LLM tokens. Designed for Hermes no_agent cron jobs: successful runs
+to Postgres only. Designed for Hermes no_agent cron jobs: successful runs
 emit nothing; only threshold failures print a compact alert.
 """
 from __future__ import annotations
@@ -11,47 +11,66 @@ import argparse
 import contextlib
 import io
 import sqlite3
-import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import wolfy_scanner
-
-DEFAULT_DB = Path('/root/.hermes/wolfy/wolfy.db')
+from wolfy_postgres_pipeline import load_universe_postgres, refresh_universe_cache_postgres
 
 
 class SnapshotAlert(RuntimeError):
     """Raised when a scanner snapshot should alert the no_agent cron."""
 
 
-def _active_universe_count(db_path: Path) -> int:
-    con = sqlite3.connect(db_path)
-    try:
-        wolfy_scanner.ensure_universe_tables(con)
-        return int(con.execute('SELECT COUNT(*) FROM universe_symbols WHERE active=1').fetchone()[0])
-    finally:
-        con.close()
+def _active_universe_count(universe: str, symbols: list[str] | None = None) -> int:
+    if universe == 'ticker-list':
+        return len(symbols or [])
+    return len(load_universe_postgres(universe))
 
 
-def _resolve_symbols(db_path: Path, universe: str, ticker_list: str | None, refresh_universe: bool) -> list[str]:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db_path)
-    try:
-        wolfy_scanner.ensure_universe_tables(con)
-        if refresh_universe or con.execute('SELECT COUNT(*) FROM universe_symbols WHERE active=1').fetchone()[0] == 0:
-            # Suppress transient source warnings on successful runs; threshold checks below
-            # decide whether no_agent should notify the user.
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                wolfy_scanner.refresh_universe_cache(con)
-        return wolfy_scanner.resolve_symbols(con, universe, ticker_list)
-    finally:
-        con.close()
+def _resolve_symbols(universe: str, ticker_list: str | None, refresh_universe: bool, db_path: Path | None = None) -> list[str]:
+    if universe == 'ticker-list':
+        if not ticker_list:
+            raise SnapshotAlert('ticker-list universe requires --ticker-list')
+        return wolfy_scanner.resolve_symbols(None, universe, ticker_list)  # type: ignore[arg-type]
+    if db_path is not None:
+        con = sqlite3.connect(db_path)
+        try:
+            return wolfy_scanner.resolve_symbols(con, universe, ticker_list)
+        finally:
+            con.close()
+    if refresh_universe:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            refresh_universe_cache_postgres({'core': wolfy_scanner.core_records(), 'major_etf': wolfy_scanner.etf_records()})
+    symbols = load_universe_postgres(universe)
+    if not symbols:
+        source_records = {'core': wolfy_scanner.core_records(), 'major_etf': wolfy_scanner.etf_records()}
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            refresh_universe_cache_postgres(source_records)
+        symbols = load_universe_postgres(universe)
+    return symbols
+
+
+def _bounded_symbols(symbols: list[str], max_symbols: int | None) -> list[str]:
+    """Return a rotating subset that always carries the RS benchmarks."""
+    benchmarks = ['QQQ', 'SPY']
+    candidates = sorted(set(symbols) - set(benchmarks))
+    if not max_symbols or max_symbols <= 0:
+        return sorted(candidates + benchmarks)
+    max_symbols = max(max_symbols, len(benchmarks))
+    candidate_slots = max_symbols - len(benchmarks)
+    if len(candidates) <= candidate_slots:
+        return sorted(candidates + benchmarks)
+    now = datetime.now()
+    start = (now.timetuple().tm_yday * 24 + now.hour) * max(candidate_slots, 1)
+    start %= len(candidates)
+    rotated = candidates[start:] + candidates[:start]
+    return sorted(rotated[:candidate_slots] + benchmarks)
 
 
 def run_snapshot(
     *,
-    db_path: Path | str = DEFAULT_DB,
     universe: str = 'expanded',
     ticker_list: str | None = None,
     max_workers: int = 8,
@@ -60,15 +79,12 @@ def run_snapshot(
     as_of_date: str | None = None,
     max_data_lag_days: int = 3,
     refresh_universe: bool = False,
+    max_symbols: int | None = 32,
+    db_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Run and persist one scanner snapshot, returning compact status.
-
-    This function intentionally captures scanner stdout/stderr so normal no_agent
-    cron ticks remain silent. It raises SnapshotAlert for material data-quality
-    problems that should be delivered to the user/operator.
-    """
-    db_path = Path(db_path)
-    symbols = _resolve_symbols(db_path, universe, ticker_list, refresh_universe)
+    """Run and persist one scanner snapshot, returning compact status."""
+    all_symbols = _resolve_symbols(universe, ticker_list, refresh_universe, db_path=db_path)
+    symbols = _bounded_symbols(all_symbols, max_symbols)
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()
     with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
@@ -85,10 +101,12 @@ def run_snapshot(
     status = {
         'universe': universe,
         'symbol_count': symbol_count,
+        'total_universe_symbols': len(all_symbols),
+        'max_symbols': max_symbols,
         'ranked_count': len(ranked),
         'failure_count': failure_count,
         'failure_rate': failure_rate,
-        'active_universe_count': _active_universe_count(db_path),
+        'active_universe_count': _active_universe_count(universe, all_symbols),
         'latest_data_date': max((str(row.get('date')) for _score, _ticker, row in ranked if row.get('date')), default=None),
     }
     alerts = []
@@ -98,44 +116,44 @@ def run_snapshot(
         alerts.append(f"failure_rate={failure_rate:.2f} above max_failure_rate={max_failure_rate:.2f}")
     if not symbols:
         alerts.append('symbol_count=0; scanner universe is empty')
-    if as_of_date and status['latest_data_date']:
-        lag_days = (date.fromisoformat(as_of_date) - date.fromisoformat(status['latest_data_date'])).days
-        status['data_lag_days'] = lag_days
-        if lag_days > max_data_lag_days:
-            alerts.append(
-                f"latest_data_date={status['latest_data_date']} is stale versus as_of_date={as_of_date} "
-                f"lag_days={lag_days} max_data_lag_days={max_data_lag_days}"
-            )
-    elif as_of_date and ranked:
-        alerts.append('ranked scanner rows did not include data dates')
+    latest = status['latest_data_date']
+    if latest:
+        if not (db_path is not None and as_of_date is None):
+            try:
+                lag = (date.fromisoformat(as_of_date) if as_of_date else date.today()) - date.fromisoformat(latest)
+                status['data_lag_days'] = lag.days
+                if lag.days > max_data_lag_days:
+                    alerts.append(
+                        f"latest_data_date={latest} is stale versus as_of_date={as_of_date}; "
+                        f"lag_days={lag.days} above max_data_lag_days={max_data_lag_days}"
+                    )
+            except ValueError:
+                alerts.append(f'latest_data_date={latest} is not ISO date')
+    elif min_ranked > 0 or ranked:
+        alerts.append('latest_data_date missing from ranked scanner output')
     if alerts:
-        sample_failures = ', '.join(f'{k}: {v}' for k, v in list(failures.items())[:5])
-        detail = '; '.join(alerts)
-        if sample_failures:
-            detail = f'{detail}; sample_failures={sample_failures}'
-        raise SnapshotAlert(detail)
+        detail = ' '.join(alerts)
+        raise SnapshotAlert(
+            f"Wolfy intraday scanner snapshot alert: universe={universe} symbols={symbol_count} ranked={len(ranked)} failures={failure_count}; {detail}"
+        )
     return status
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Silent Wolfy intraday scanner snapshot helper')
-    parser.add_argument('--db-path', default=str(DEFAULT_DB), help='Wolfy SQLite compatibility DB path')
-    parser.add_argument('--universe', choices=['core', 'expanded', 'etf', 'ticker-list'], default='expanded')
-    parser.add_argument('--ticker-list', help='Comma-separated tickers for --universe ticker-list smoke runs')
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description='Silent Wolfy deterministic scanner snapshot watchdog')
+    parser.add_argument('--universe', default='expanded', choices=['core', 'expanded', 'ticker-list'])
+    parser.add_argument('--ticker-list')
     parser.add_argument('--max-workers', type=int, default=8)
     parser.add_argument('--min-ranked', type=int, default=1)
     parser.add_argument('--max-failure-rate', type=float, default=0.35)
-    parser.add_argument('--as-of-date', default=date.today().isoformat(), help='Expected current market date for scanner freshness checks')
+    parser.add_argument('--as-of-date')
     parser.add_argument('--max-data-lag-days', type=int, default=3)
     parser.add_argument('--refresh-universe', action='store_true')
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser.add_argument('--max-symbols', type=int, default=32, help='Bound tickers per cron run; <=0 scans full universe')
+    parser.add_argument('--db-path', type=Path, help='SQLite compatibility DB path for tests/legacy smokes only')
+    args = parser.parse_args(argv)
     try:
         run_snapshot(
-            db_path=Path(args.db_path),
             universe=args.universe,
             ticker_list=args.ticker_list,
             max_workers=args.max_workers,
@@ -144,11 +162,16 @@ def main(argv: list[str] | None = None) -> int:
             as_of_date=args.as_of_date,
             max_data_lag_days=args.max_data_lag_days,
             refresh_universe=args.refresh_universe,
+            max_symbols=args.max_symbols,
+            db_path=args.db_path,
         )
-    except Exception as exc:
-        print(f'Wolfy intraday scanner snapshot alert: {exc}')
+        return 0
+    except SnapshotAlert as exc:
+        print(str(exc))
         return 1
-    return 0
+    except Exception as exc:
+        print(f'Wolfy intraday scanner snapshot alert: {type(exc).__name__}: {exc}')
+        return 1
 
 
 if __name__ == '__main__':

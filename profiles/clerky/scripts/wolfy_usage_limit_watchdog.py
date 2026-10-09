@@ -43,11 +43,11 @@ PAUSE_REASON = 'auto-paused by Wolfy usage-limit watchdog; script-only jobs cont
 # after provider issues, but that line alone is not reliable quota evidence and
 # can create noisy post-reset alerts.
 PATTERN = re.compile(
-    r'(insufficient[_ -]?quota|quota exceeded|daily limit|usage limit|rate limit|ratelimit|too many requests|http\s*429|status\s*429|error.*429|429.*error|usage_limit_reached|payment / credit error|credit error|billing error)',
+    r'(insufficient[_ -]?quota|quota exceeded|daily limit|usage limit|rate limit|ratelimit|too many requests|http\s*429|status\s*429|error.*429|429.*error|usage_limit_reached)',
     re.I,
 )
 AUTH_LIMIT_PATTERN = re.compile(
-    r'(usage_limit_reached|rate-limited|rate limited|insufficient[_ -]?quota|quota exceeded|daily limit|too many requests|status\s*429|\(429\)|credit error|billing error)',
+    r'(usage_limit_reached|rate-limited|rate limited|insufficient[_ -]?quota|quota exceeded|daily limit|too many requests|status\s*429|\(429\))',
     re.I,
 )
 
@@ -90,6 +90,8 @@ def is_watchdog_relevant_log_line(line: str) -> bool:
     Discord/chat messages that say "rate limited" are logged in gateway and
     conversation-turn records. Those should not retrigger the quota watchdog.
     """
+    if 'agent.auxiliary_client:' in line:
+        return False
     if 'gateway.run: inbound message:' in line:
         return False
     if 'conversation turn:' in line and ' msg=' in line:
@@ -108,7 +110,7 @@ def scan_logs() -> list[str]:
         except Exception:
             continue
         for line in lines:
-            if is_watchdog_relevant_log_line(line) and (any(t in line for t in today) or not re.match(r'\d{4}-\d{2}-\d{2}', line)):
+            if is_watchdog_relevant_log_line(line) and any(t in line for t in today):
                 hits.append(f'{path.name}: {line[-500:]}')
     return hits
 
@@ -159,10 +161,12 @@ def log_limit_active() -> tuple[bool, str]:
         except Exception:
             continue
         for line in lines:
+            if 'agent.auxiliary_client:' in line:
+                continue
             lower = line.lower()
             if 'usage_limit_reached' not in line and 'usage limit has been reached' not in lower:
                 continue
-            if not (any(t in line for t in today) or not re.match(r'\d{4}-\d{2}-\d{2}', line)):
+            if not any(t in line for t in today):
                 continue
             reset_at_match = re.search(r"resets_at['\"]?:\s*(\d+)", line)
             seconds_match = re.search(r"resets_in_seconds['\"]?:\s*(\d+)", line)
@@ -263,13 +267,9 @@ def main() -> None:
     for h in new_hits[-10:]:
         print(f'- {h}')
     if limited:
-        print('\nCurrent action: LLM-driven Wolfy/Mike jobs are gated while the provider is limited; script-only jobs continue silently.')
+        print('\nCurrent action: LLM-driven Wolfy/Mike jobs are gated while the production provider is limited; script-only jobs continue silently.')
     else:
-        print('\nRecommended response: pause or reduce Jonah cadence, keep no_agent watchdogs running, and wait for provider reset or switch model/provider.')
-    ctx = scan_insights()
-    if ctx:
-        print('\nRecent Hermes usage context:')
-        print(ctx)
+        print('\nCurrent action: production provider auth is clear; no Wolfy/Mike LLM jobs were gated.')
 
 
 if __name__ == '__main__':

@@ -1,6 +1,7 @@
 import datetime as dt
 import sqlite3
 
+import pytest
 import wolfy_scanner
 
 
@@ -72,11 +73,11 @@ def test_run_scan_skips_fetch_failures_and_still_returns_ranked_results(monkeypa
     def fake_fetch(symbol, days=420):
         if symbol == 'BAD':
             raise RuntimeError('simulated yahoo outage')
-        return make_rows(close=100 if symbol == 'SPY' else 120)
+        return make_rows(close=100 if symbol in {'SPY', 'QQQ'} else 120)
 
     monkeypatch.setattr(wolfy_scanner, 'fetch', fake_fetch)
 
-    ranked, failures = wolfy_scanner.run_scan(['SPY', 'GOOD', 'BAD'], db_path=None, persist=False)
+    ranked, failures = wolfy_scanner.run_scan(['SPY', 'QQQ', 'GOOD', 'BAD'], db_path=None, persist=False)
 
     assert [symbol for _score, symbol, _metrics in ranked] == ['GOOD']
     assert failures == {'BAD': 'simulated yahoo outage'}
@@ -140,6 +141,16 @@ def test_rank_metrics_uses_relative_strength_and_returns_rank_reasons():
     assert 'RS+10.0 vs SPY' in leader['rank_reasons']
     assert 'volume surge' in leader['rank_reasons']
     assert 'squeeze' in leader['rank_reasons']
+
+
+def test_rank_metrics_fails_closed_without_benchmark_rows():
+    candidate = {
+        'date': '2026-06-01', 'close': 100, 'r5': 4, 'r20': 12, 'r60': 20,
+        'vs20': 4, 'vs50': 8, 'atr': 3, 'avgvol': 5_000_000, 'hi20': 101, 'lo20': 80,
+    }
+
+    with pytest.raises(ValueError, match='missing benchmark metrics: SPY, QQQ'):
+        wolfy_scanner.rank_metrics({'LEADER': candidate})
 
 
 def test_persist_scan_adds_notes_json_with_new_factor_payload(tmp_path):

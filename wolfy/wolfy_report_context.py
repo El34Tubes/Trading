@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import argparse
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
+import sys
 from zoneinfo import ZoneInfo
 
 try:
@@ -334,8 +337,19 @@ def _pg_fetch_dicts(cur, sql: str, params: tuple = ()) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def main() -> None:
-    scanner_refresh = run_scanner_before_report()
+def smoke_mode_requested(argv: list[str] | None = None) -> bool:
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument('--smoke', action='store_true', help='print no-write smoke context and skip scanner/agent_runs writes')
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    return args.smoke or os.environ.get('WOLFY_CONTEXT_SMOKE') == '1'
+
+
+def main(argv: list[str] | None = None) -> None:
+    smoke_mode = smoke_mode_requested(argv)
+    if smoke_mode:
+        scanner_refresh = 'SMOKE_MODE=true scanner refresh skipped; no scanner run executed'
+    else:
+        scanner_refresh = run_scanner_before_report()
     scanner_freshness = get_scanner_freshness(None)
     try:
         postgres_scanner_freshness = latest_scanner_freshness()
@@ -401,7 +415,7 @@ def main() -> None:
         except Exception:
             pg.rollback()
 
-    run_id = start_run(len(scanner))
+    run_id = None if smoke_mode else start_run(len(scanner))
     print('Wolfy twice-daily report context')
     print('Wolfy DB=Postgres primary; SQLite retired for live report context')
     print_eod_governance()
@@ -411,10 +425,16 @@ def main() -> None:
         print(postgres_scanner_freshness['warning'])
     print(format_scanner_freshness(scanner_freshness))
     print('Postgres counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
-    print(f'Postgres agent run: AGENT_RUN_ID={run_id}')
+    if smoke_mode:
+        print('Postgres agent run: SMOKE_MODE=true no agent_runs row opened and no scanner/recommendation/setup/paper-trade/position writes executed')
+    else:
+        print(f'Postgres agent run: AGENT_RUN_ID={run_id}')
     print('Promotion gate summary: ' + ' '.join(f'{k}={v}' for k, v in alpha_summary.items()))
-    print(f'After report/recommendation DB writes, run: python3 {CLI} run-finish --run-id {run_id} --status completed --records-created <N> --summary "<Wolfy report/recommendation summary>"')
-    print(f'If blocked, run: python3 {CLI} run-finish --run-id {run_id} --status blocked --error-message "<specific blocker>" --summary "<specific blocker>"')
+    if smoke_mode:
+        print('Smoke mode persistence: no run-finish command is valid because no AGENT_RUN_ID was opened; this context is validation-only and must create no actionable trading output.')
+    else:
+        print(f'After report/recommendation DB writes, run: python3 {CLI} run-finish --run-id {run_id} --status completed --records-created <N> --summary "<Wolfy report/recommendation summary>"')
+        print(f'If blocked, run: python3 {CLI} run-finish --run-id {run_id} --status blocked --error-message "<specific blocker>" --summary "<specific blocker>"')
     print('User constraints: Robinhood-tradable only; no shorts; options allowed but defined-risk preferred; max 3 concurrent paper positions; $5,000 paper account; stops required; PDT-aware; avoid foreign manipulation/government-interference risk.')
     print('Authority: Wolfy may create pending_review recommendations only from EOD closing-data/deterministic-signal support; Wolfy does not self-approve; Sentinel reviews next, Yang handles technical entry/exit after alpha is identified.')
     print('Report taxonomy: scanner leads are discovery only; promotion-gate complete tickets become pending_review recommendations for Sentinel; Sentinel-approved rows are paper-candidate inputs; watching/watch_only rows are explicitly non-actionable watch-only ideas.')

@@ -223,6 +223,7 @@ Common causes:
 - **Package not found**: For npx servers, the npm package may not exist or may need `-y` in args to auto-install.
 - **Timeout**: The server took too long to start. Increase `connect_timeout`.
 - **Port conflict**: For HTTP servers, the URL may be unreachable.
+- **OAuth required in a non-interactive session**: If `hermes mcp add NAME --url URL --auth oauth` reports `non-interactive environment and no cached tokens found`, do not keep retrying the connection from a tool/background run. Add or preserve the server config with `auth: oauth`, leave it `enabled: false` until authorization succeeds, and tell the user to run `hermes mcp login NAME` in an interactive Hermes terminal. After login, enable/test/reload: `hermes config set mcp_servers.NAME.enabled true`, `hermes mcp test NAME`, then start a new session or `/reload-mcp`.
 
 ### "MCP server 'X' requires HTTP transport but mcp.client.streamable_http is not available"
 

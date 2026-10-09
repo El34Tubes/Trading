@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Print compact context for a Jonah knowledge-build cron run.
+"""Print compact Postgres context for a Jonah knowledge-build cron run.
 
-SQLite remains the live source of truth during transition. Postgres is now an
-active oversight layer: Jonah must create/dedupe/claim an agent_tasks row before
-spending LLM tokens, and every run gets an agent_runs ledger row.
+Postgres is Wolfy's operational source of truth. Jonah claims Postgres
+agent_tasks before spending LLM tokens and records each run in agent_runs.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 import os
-import sqlite3
 import subprocess
 
 try:
@@ -32,8 +30,6 @@ except Exception:  # pragma: no cover - context should still print if helper imp
 
 from eod_governance import print_eod_governance
 
-DB = Path('/root/.hermes/wolfy/wolfy.db')
-SYNC = Path('/root/.hermes/wolfy/sync_sqlite_to_postgres.py')
 CLI = Path('/root/.hermes/wolfy/wolfy_agent_cli.py')
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
 BUDGET_GATE = Path('/root/.hermes/wolfy/guardian/budget_gate.py')
@@ -70,20 +66,10 @@ def budget_wake_gate() -> bool:
     return False
 
 
-def maybe_sync_postgres() -> str:
-    if not SYNC.exists():
-        return 'Postgres sync: unavailable; sync script missing.'
-    try:
-        out = subprocess.check_output(['python3', str(SYNC)], text=True, stderr=subprocess.STDOUT, timeout=45).strip()
-        return f'Postgres sync: {out}'
-    except Exception as e:
-        return f'Postgres sync: failed ({type(e).__name__}: {e})'
-
-
 def postgres_context(topic_hint: str | None) -> list[str]:
     lines: list[str] = []
     if psycopg is None:
-        return ['Postgres oversight: psycopg unavailable; using SQLite-only context.']
+        return ['Postgres oversight: psycopg unavailable; Jonah blocked until Postgres driver is available.']
     try:
         with psycopg.connect(PG_DSN) as conn, conn.cursor() as cur:
             cur.execute("SELECT artifact_type, count(*) FROM agent_artifacts GROUP BY artifact_type ORDER BY artifact_type")
@@ -126,7 +112,7 @@ def postgres_context(topic_hint: str | None) -> list[str]:
     return lines
 
 
-def build_task_fingerprint(task: sqlite3.Row | None, source: sqlite3.Row | None) -> str:
+def build_task_fingerprint(task: Any | None, source: Any | None) -> str:
     assert stable_fingerprint is not None
     return stable_fingerprint(
         'jonah-research-context',
@@ -135,21 +121,21 @@ def build_task_fingerprint(task: sqlite3.Row | None, source: sqlite3.Row | None)
     )
 
 
-def claim_postgres_task(task: sqlite3.Row | None, source: sqlite3.Row | None) -> tuple[list[str], int | None, int | None, str | None]:
+def claim_postgres_task(task: Any | None, source: Any | None) -> tuple[list[str], int | None, int | None, str | None]:
     """Ensure+claim Jonah's next research task before any LLM work starts."""
     if connect is None or ensure_agent_task is None or claim_next_task is None or start_agent_run is None:
         return (['Postgres agent task claim: helper unavailable; Jonah should treat this run as blocked until helper import is fixed.'], None, None, None)
     if not task and not source:
         with connect(PG_DSN) as conn:
-            run_id = start_agent_run(conn, agent_name='Jonah', role='research', job_id='jonah-15min', status='completed', summary='No queued SQLite training/source task.')
-            finish_agent_run(conn, run_id, status='completed', summary='No queued SQLite training/source task.', records_created=0)
+            run_id = start_agent_run(conn, agent_name='Jonah', role='research', job_id='jonah-15min', status='completed', summary='No queued Postgres training/source task.')
+            finish_agent_run(conn, run_id, status='completed', summary='No queued Postgres training/source task.', records_created=0)
         return ([f'Postgres agent run: AGENT_RUN_ID={run_id} status=completed no queued Jonah task.'], None, run_id, None)
 
     fingerprint = build_task_fingerprint(task, source)
     task_title = task['task_name'] if task else f"Research source: {source['title']}"
     source_title = source['title'] if source else 'none'
     description = (
-        f"Jonah durable research build. SQLite training_task_id={task['id'] if task else 'none'}; "
+        f"Jonah durable research build. Postgres task_id={task['id'] if task else 'none'}; "
         f"knowledge_source_id={source['id'] if source else 'none'}; source={source_title}. "
         "Claim before token spend; write knowledge_notes/strategy_rules; complete or block after DB writes."
     )
@@ -183,7 +169,7 @@ def claim_postgres_task(task: sqlite3.Row | None, source: sqlite3.Row | None) ->
         'Postgres agent task claim: CLAIMED=true',
         f'AGENT_TASK_ID={claim.id} CLAIM_TOKEN={claim.claim_token} SOURCE_FINGERPRINT={fingerprint}',
         f'AGENT_RUN_ID={run_id}',
-        f'After successful SQLite writes, run: python3 {CLI} complete --task-id {claim.id} --run-id {run_id} --records-created <N> --summary "<what Jonah inserted>"',
+        f'After successful Postgres writes, run: python3 {CLI} complete --task-id {claim.id} --run-id {run_id} --records-created <N> --summary "<what Jonah inserted>"',
         f'If blocked, run: python3 {CLI} block --task-id {claim.id} --run-id {run_id} --reason "<specific blocker>"',
     ], claim.id, run_id, fingerprint)
 

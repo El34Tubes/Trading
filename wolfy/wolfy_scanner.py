@@ -332,8 +332,11 @@ def resolve_symbols(con: sqlite3.Connection, universe: str = 'expanded', ticker_
 
 
 def rank_metrics(data: dict[str, dict]) -> list[tuple[float, str, dict]]:
-    spy = data.get('SPY', {}).get('r20', 0)
-    qqq = data.get('QQQ', {}).get('r20', 0)
+    missing_benchmarks = [symbol for symbol in ('SPY', 'QQQ') if data.get(symbol, {}).get('r20') is None]
+    if missing_benchmarks:
+        raise ValueError(f"missing benchmark metrics: {', '.join(missing_benchmarks)}")
+    spy = data['SPY']['r20']
+    qqq = data['QQQ']['r20']
     rows = []
     for s, v in data.items():
         if s in {'SPY', 'QQQ'}:
@@ -607,9 +610,20 @@ def _persist_scan_sqlite_compat(ranked: list[tuple[float, str, dict]], db_path: 
         con.close()
 
 
-def persist_scan(ranked: list[tuple[float, str, dict]], db_path: Path | None, universe: str, notes: str = 'wolfy_scanner.py automated run') -> int | None:
+def persist_scan(
+    ranked: list[tuple[float, str, dict]],
+    db_path: Path | None,
+    universe: str,
+    notes: str = 'wolfy_scanner.py automated run',
+    symbols_scanned: int | None = None,
+) -> int | None:
     """Persist scanner output to Postgres primary, with optional SQLite compatibility copy."""
-    pg_run = persist_scanner_run_postgres(ranked, universe=universe, notes=notes)
+    pg_run = persist_scanner_run_postgres(
+        ranked,
+        universe=universe,
+        notes=notes,
+        symbols_scanned=symbols_scanned,
+    )
     print(f'# postgres_scanner_run_id={pg_run}', file=sys.stderr)
     if universe == 'expanded':
         try:
@@ -651,8 +665,13 @@ def run_scan(symbols: list[str], db_path: Path | None = DB, persist: bool = True
                     failures[s] = str(e)
                     print(f'ERR {s}: {e}', file=sys.stderr)
     ranked = rank_metrics(data)
-    if persist and db_path:
-        run = persist_scan(ranked, Path(db_path), universe)
+    if persist:
+        run = persist_scan(
+            ranked,
+            Path(db_path) if db_path is not None else None,
+            universe,
+            symbols_scanned=len(symbols),
+        )
         if run is not None:
             print(f'# db_run_id={run}', file=sys.stderr)
     return ranked, failures

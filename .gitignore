@@ -88,6 +88,11 @@ venv/
 **/uv-cache/
 
 # Runtime research data, source inboxes/transcripts, payloads
+# User paste payloads and downloaded issuer/source evidence are archived privately,
+# never published in this public source repository.
+pastes/
+wolfy/be_sources_*/
+wolfy/dhr_sources_*/
 wolfy/wolfy.db
 wolfy/*.db
 wolfy/alpha_report_payload_*.json

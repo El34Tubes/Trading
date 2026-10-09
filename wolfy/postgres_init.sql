@@ -3,6 +3,44 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE IF NOT EXISTS loop_metrics (
+    id BIGSERIAL PRIMARY KEY,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    run_id BIGINT NULL,
+    category TEXT NOT NULL,
+    metric_key TEXT NOT NULL,
+    metric_value NUMERIC,
+    metric_text TEXT,
+    notes TEXT
+);
+-- Compatibility aliases for older read-only ops probes. Canonical fields are
+-- captured_at/metric_key/metric_value.
+ALTER TABLE loop_metrics ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+ALTER TABLE loop_metrics ADD COLUMN IF NOT EXISTS metric_name TEXT;
+ALTER TABLE loop_metrics ADD COLUMN IF NOT EXISTS value_numeric NUMERIC;
+UPDATE loop_metrics
+SET created_at = COALESCE(created_at, captured_at),
+    metric_name = COALESCE(metric_name, metric_key),
+    value_numeric = COALESCE(value_numeric, metric_value)
+WHERE created_at IS NULL OR metric_name IS NULL OR value_numeric IS NULL;
+CREATE OR REPLACE FUNCTION wolfy_sync_loop_metrics_aliases()
+RETURNS trigger AS $$
+BEGIN
+  NEW.created_at := COALESCE(NEW.created_at, NEW.captured_at, now());
+  NEW.metric_name := COALESCE(NEW.metric_name, NEW.metric_key);
+  NEW.value_numeric := COALESCE(NEW.value_numeric, NEW.metric_value);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_loop_metrics_aliases ON loop_metrics;
+CREATE TRIGGER trg_loop_metrics_aliases
+  BEFORE INSERT OR UPDATE OF captured_at, metric_key, metric_value, created_at, metric_name, value_numeric
+  ON loop_metrics
+  FOR EACH ROW EXECUTE FUNCTION wolfy_sync_loop_metrics_aliases();
+CREATE INDEX IF NOT EXISTS idx_loop_metrics_key_time ON loop_metrics(metric_key, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_loop_metrics_name_time ON loop_metrics(metric_name, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS agent_tasks (
     id BIGSERIAL PRIMARY KEY,
@@ -40,15 +78,35 @@ ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS summary TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS instructions TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS instruction TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS definition_of_done TEXT;
+-- Compatibility aliases for optimizer/ops probes that expect verification
+-- metadata as top-level task columns. Canonical storage may still be in
+-- metadata/payload JSONB or definition_of_done.
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS verification_result TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS commit_hash TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS error_message TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS blocker_reason TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS payload JSONB;
+-- Compatibility alias for ad-hoc/read-only probes that expect task metadata.
+-- Canonical structured task detail remains payload.
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS metadata JSONB;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS agent TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS assigned_agent TEXT;
+-- Compatibility alias for ad-hoc/read-only ops probes that expect claimed_by.
+-- Canonical assignment remains agent_tasks.agent_name / assigned_agent.
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS type TEXT;
+-- Compatibility alias for ad-hoc/read-only ops probes that expect one ticker.
+-- Canonical task symbols remain agent_tasks.ticker_symbols (text[]).
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS ticker TEXT;
 -- Compatibility alias for read-only ops probes that expect task_id.
 -- Canonical task primary key remains agent_tasks.id.
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS task_id BIGINT;
+-- Compatibility aliases for read-only/ad-hoc provenance probes.
+-- Canonical task identity remains id/source_fingerprint; durable provenance uses source_table/source_id.
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source_table TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source_id TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source TEXT;
 UPDATE agent_tasks
 SET agent=agent_name
 WHERE agent IS NULL;
@@ -56,11 +114,22 @@ UPDATE agent_tasks
 SET assigned_agent=agent_name
 WHERE assigned_agent IS NULL;
 UPDATE agent_tasks
+SET claimed_by=COALESCE(assigned_agent, agent, agent_name)
+WHERE claimed_by IS NULL;
+UPDATE agent_tasks
 SET type=task_type
 WHERE type IS NULL;
 UPDATE agent_tasks
 SET task_id=id
 WHERE task_id IS NULL;
+UPDATE agent_tasks
+SET ticker=COALESCE(ticker, payload->>'ticker', payload->>'symbol', ticker_symbols[1])
+WHERE ticker IS NULL;
+UPDATE agent_tasks
+SET source_table=COALESCE(source_table, payload->>'source_table', 'agent_tasks'),
+    source_id=COALESCE(source_id, payload->>'source_id', source_fingerprint, id::text),
+    source=COALESCE(source, payload->>'source', source_table, 'agent_tasks')
+WHERE source_table IS NULL OR source_id IS NULL OR source IS NULL;
 UPDATE agent_tasks
 SET summary=description
 WHERE summary IS NULL AND description IS NOT NULL;
@@ -74,6 +143,15 @@ UPDATE agent_tasks
 SET definition_of_done=COALESCE(definition_of_done, payload->>'definition_of_done')
 WHERE definition_of_done IS NULL;
 UPDATE agent_tasks
+SET verification_result=COALESCE(verification_result, metadata->>'verification_result', payload->>'verification_result', definition_of_done)
+WHERE verification_result IS NULL;
+UPDATE agent_tasks
+SET commit_hash=COALESCE(commit_hash, metadata->>'commit_hash', payload->>'commit_hash')
+WHERE commit_hash IS NULL;
+UPDATE agent_tasks
+SET metadata=COALESCE(metadata, payload, '{}'::jsonb)
+WHERE metadata IS NULL;
+UPDATE agent_tasks
 SET error_message=COALESCE(error_message, summary, description)
 WHERE status='blocked' AND error_message IS NULL;
 UPDATE agent_tasks
@@ -86,6 +164,7 @@ SET payload = jsonb_strip_nulls(jsonb_build_object(
     'agent_name', agent_name,
     'agent', agent,
     'assigned_agent', assigned_agent,
+    'claimed_by', claimed_by,
     'task_type', task_type,
     'type', type,
     'title', title,
@@ -98,6 +177,7 @@ SET payload = jsonb_strip_nulls(jsonb_build_object(
     'source_fingerprint', source_fingerprint,
     'topic_tags', topic_tags,
     'ticker_symbols', ticker_symbols,
+    'ticker', ticker,
     'depends_on', depends_on,
     'supersedes', supersedes,
     'created_at', created_at,
@@ -111,13 +191,19 @@ UPDATE agent_tasks
 SET payload = jsonb_strip_nulls(payload || jsonb_build_object(
     'instruction', instruction,
     'definition_of_done', definition_of_done,
+    'verification_result', verification_result,
+    'commit_hash', commit_hash,
+    'verified_at', verified_at,
     'error_message', error_message,
     'blocker_reason', blocker_reason,
     'source_table', source_table,
-    'source_id', source_id
+    'source_id', source_id,
+    'source', source,
+    'ticker', ticker,
+    'metadata', metadata
 ))
 WHERE payload IS NOT NULL
-  AND (instruction IS NOT NULL OR definition_of_done IS NOT NULL OR error_message IS NOT NULL OR blocker_reason IS NOT NULL OR source_table IS NOT NULL OR source_id IS NOT NULL);
+  AND (instruction IS NOT NULL OR definition_of_done IS NOT NULL OR verification_result IS NOT NULL OR commit_hash IS NOT NULL OR verified_at IS NOT NULL OR error_message IS NOT NULL OR blocker_reason IS NOT NULL OR source_table IS NOT NULL OR source_id IS NOT NULL OR source IS NOT NULL OR ticker IS NOT NULL OR metadata IS NOT NULL);
 
 CREATE TABLE IF NOT EXISTS agent_runs (
     id BIGSERIAL PRIMARY KEY,
@@ -396,10 +482,43 @@ WHERE ar.task_id = at.id
 
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source_table TEXT;
 ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source_id TEXT;
+ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source TEXT;
 UPDATE agent_tasks
 SET source_table=COALESCE(source_table, payload->>'source_table', 'agent_tasks'),
-    source_id=COALESCE(source_id, payload->>'source_id', source_fingerprint, id::text)
-WHERE source_table IS NULL OR source_id IS NULL;
+    source_id=COALESCE(source_id, payload->>'source_id', source_fingerprint, id::text),
+    source=COALESCE(source, payload->>'source', source_table, 'agent_tasks')
+WHERE source_table IS NULL OR source_id IS NULL OR source IS NULL;
+
+-- Compatibility aliases for ad-hoc/read-only scanner run probes.
+-- Canonical timing is run_time/completed_at and run size is derived from scanner_results.
+ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
+ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS status TEXT;
+ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS symbols_scanned INTEGER;
+ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS mode TEXT;
+UPDATE scanner_runs sr
+SET started_at=COALESCE(sr.started_at, sr.run_time),
+    completed_at=COALESCE(sr.completed_at, sr.finished_at, sr.run_time),
+    finished_at=COALESCE(sr.finished_at, sr.completed_at, sr.run_time),
+    status=COALESCE(sr.status, CASE WHEN COALESCE(sr.finished_at, sr.completed_at, sr.run_time) IS NOT NULL THEN 'completed' ELSE 'started' END),
+    mode=COALESCE(sr.mode, sr.data_source),
+    symbols_scanned=COALESCE(sr.symbols_scanned, counts.result_count, 0)
+FROM (
+  SELECT run_id, count(*)::integer AS result_count
+  FROM scanner_results
+  GROUP BY run_id
+) counts
+WHERE sr.id = counts.run_id
+  AND (sr.started_at IS NULL OR sr.completed_at IS NULL OR sr.finished_at IS NULL OR sr.status IS NULL OR sr.mode IS NULL OR sr.symbols_scanned IS NULL);
+UPDATE scanner_runs
+SET started_at=COALESCE(started_at, run_time),
+    completed_at=COALESCE(completed_at, finished_at, run_time),
+    finished_at=COALESCE(finished_at, completed_at, run_time),
+    status=COALESCE(status, 'completed'),
+    mode=COALESCE(mode, data_source),
+    symbols_scanned=COALESCE(symbols_scanned, 0)
+WHERE started_at IS NULL OR completed_at IS NULL OR finished_at IS NULL OR status IS NULL OR mode IS NULL OR symbols_scanned IS NULL;
 
 ALTER TABLE scanner_results ADD COLUMN IF NOT EXISTS scanner_run_id BIGINT;
 -- Common ticker/volume aliases used by Jonah ad-hoc research probes.
@@ -467,13 +586,13 @@ SET scanner_run_id=COALESCE(scanner_run_id, run_id),
         'trend_regime', trend_regime
       ))
     ),
-    rs_spy_20=COALESCE(rs_spy_20, CASE WHEN (notes->>'rs_spy_20') ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (notes->>'rs_spy_20')::double precision END),
-    rs_qqq_20=COALESCE(rs_qqq_20, CASE WHEN (notes->>'rs_qqq_20') ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (notes->>'rs_qqq_20')::double precision END),
-    rs_spy_20d=COALESCE(rs_spy_20d, rs_spy_20, CASE WHEN (notes->>'rs_spy_20d') ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (notes->>'rs_spy_20d')::double precision END),
-    rs_qqq_20d=COALESCE(rs_qqq_20d, rs_qqq_20, CASE WHEN (notes->>'rs_qqq_20d') ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (notes->>'rs_qqq_20d')::double precision END),
-    rs_vs_spy_20d=COALESCE(rs_vs_spy_20d, rs_spy_20d, rs_spy_20, CASE WHEN (notes->>'rs_vs_spy_20d') ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (notes->>'rs_vs_spy_20d')::double precision END),
-    rs_vs_qqq_20d=COALESCE(rs_vs_qqq_20d, rs_qqq_20d, rs_qqq_20, CASE WHEN (notes->>'rs_vs_qqq_20d') ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (notes->>'rs_vs_qqq_20d')::double precision END),
-    breakout_20d_pct=COALESCE(breakout_20d_pct, CASE WHEN (notes->>'breakout_20d_pct') ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (notes->>'breakout_20d_pct')::double precision END),
+    rs_spy_20=COALESCE(rs_spy_20, CASE WHEN (notes->>'rs_spy_20') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'rs_spy_20')::double precision END),
+    rs_qqq_20=COALESCE(rs_qqq_20, CASE WHEN (notes->>'rs_qqq_20') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'rs_qqq_20')::double precision END),
+    rs_spy_20d=COALESCE(rs_spy_20d, rs_spy_20, CASE WHEN (notes->>'rs_spy_20d') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'rs_spy_20d')::double precision END),
+    rs_qqq_20d=COALESCE(rs_qqq_20d, rs_qqq_20, CASE WHEN (notes->>'rs_qqq_20d') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'rs_qqq_20d')::double precision END),
+    rs_vs_spy_20d=COALESCE(rs_vs_spy_20d, rs_spy_20d, rs_spy_20, CASE WHEN (notes->>'rs_vs_spy_20d') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'rs_vs_spy_20d')::double precision END),
+    rs_vs_qqq_20d=COALESCE(rs_vs_qqq_20d, rs_qqq_20d, rs_qqq_20, CASE WHEN (notes->>'rs_vs_qqq_20d') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'rs_vs_qqq_20d')::double precision END),
+    breakout_20d_pct=COALESCE(breakout_20d_pct, CASE WHEN (notes->>'breakout_20d_pct') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'breakout_20d_pct')::double precision END),
     volume_surge_1d_20=COALESCE(volume_surge_1d_20, CASE WHEN (notes->>'volume_surge_1d_20') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'volume_surge_1d_20')::double precision END),
     volume_surge_5d_20=COALESCE(volume_surge_5d_20, CASE WHEN (notes->>'volume_surge_5d_20') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'volume_surge_5d_20')::double precision END),
     volume_surge_1d_50=COALESCE(volume_surge_1d_50, CASE WHEN (notes->>'volume_surge_1d_50') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (notes->>'volume_surge_1d_50')::double precision END),
@@ -506,6 +625,13 @@ ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS evidence_quality NUMERIC(5,3);
 ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS rationale TEXT;
 ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS summary TEXT;
 ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS evidence TEXT;
+-- Compatibility alias for ad-hoc/read-only ops probes that expect metadata.
+-- Canonical detail remains alpha_leads.raw_payload.
+ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS metadata JSONB;
+-- Compatibility alias for ad-hoc/read-only probes that expect the historical
+-- suspicious_activity JSON object. Canonical storage remains suspicious_action
+-- + suspicious_flags, with optional raw_payload.suspicious_activity detail.
+ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS suspicious_activity JSONB;
 UPDATE alpha_leads
 SET company_name=COALESCE(company_name, raw_payload->>'company_name', raw_payload->>'company'),
     scanner_type=COALESCE(scanner_type, raw_payload->>'scanner_type', raw_payload->>'signal', raw_payload->>'lead_type', lead_type),
@@ -521,8 +647,14 @@ SET company_name=COALESCE(company_name, raw_payload->>'company_name', raw_payloa
       CASE WHEN (raw_payload->>'score') ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (raw_payload->>'score')::double precision END,
       CASE WHEN (raw_payload->>'scanner_score') ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (raw_payload->>'scanner_score')::double precision END,
       evidence_quality_score::double precision),
-    evidence_quality=COALESCE(evidence_quality, evidence_quality_score)
-WHERE company_name IS NULL OR scanner_type IS NULL OR scanner_run_id IS NULL OR market_context IS NULL OR score IS NULL OR evidence_quality IS NULL OR rationale IS NULL OR summary IS NULL OR evidence IS NULL;
+    evidence_quality=COALESCE(evidence_quality, evidence_quality_score),
+    metadata=COALESCE(metadata, raw_payload, '{}'::jsonb),
+    suspicious_activity=COALESCE(
+      suspicious_activity,
+      raw_payload->'suspicious_activity',
+      jsonb_build_object('recommended_action', suspicious_action, 'flags', suspicious_flags)
+    )
+WHERE company_name IS NULL OR scanner_type IS NULL OR scanner_run_id IS NULL OR market_context IS NULL OR score IS NULL OR evidence_quality IS NULL OR rationale IS NULL OR summary IS NULL OR evidence IS NULL OR metadata IS NULL OR suspicious_activity IS NULL;
 
 ALTER TABLE recommendation_reviews
   ALTER COLUMN recommendation_id TYPE BIGINT USING recommendation_id::bigint;
@@ -530,20 +662,50 @@ ALTER TABLE recommendation_reviews
 DROP VIEW IF EXISTS alpha_search_leads;
 CREATE VIEW alpha_search_leads AS
 SELECT
-  id, sqlite_id, report_id, created_at, updated_at, ticker, lead_type, title,
+  id, legacy_id, legacy_id AS sqlite_id, report_id, created_at, updated_at, ticker, lead_type, title,
   thesis, rationale, summary,
   COALESCE(evidence, rationale, summary, thesis, raw_payload->>'evidence', raw_payload->>'rationale', title) AS evidence,
   status, evidence_quality_score AS score,
   evidence_quality_score, evidence_quality, evidence_count, highest_source_quality,
-  suspicious_action, suspicious_flags, risk_flags, catalyst_window, social_context,
+  suspicious_action, suspicious_flags, suspicious_activity, risk_flags, catalyst_window, social_context,
   filing_context, insider_context, complete_ticket, recommendation_id,
   next_research_question, company_name, scanner_type, scanner_run_id, market_context,
-  raw_payload, source_fingerprint
+  raw_payload, source_fingerprint,
+  'alpha_leads'::text AS source_table,
+  id::text AS source_id
 FROM alpha_leads;
 
 -- Read-only compatibility view for ad-hoc probes that still query the older
 -- SQLite-era strategy_rules name. Canonical EOD strategy state lives in
 -- strategies; archived learning rules live in knowledge_chunks.
+-- Compatibility aliases for ad-hoc/read-only ops probes that query
+-- strategies.metadata or strategies.description directly. Canonical strategy
+-- parameters remain params and canonical prose remains notes; aliases mirror
+-- those fields non-destructively for probe compatibility.
+ALTER TABLE strategies ADD COLUMN IF NOT EXISTS metadata JSONB;
+ALTER TABLE strategies ADD COLUMN IF NOT EXISTS description TEXT;
+UPDATE strategies
+SET metadata = COALESCE(metadata, params, '{}'::jsonb)
+WHERE metadata IS NULL;
+UPDATE strategies
+SET description = notes
+WHERE description IS NULL AND notes IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION wolfy_sync_strategies_aliases()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.metadata IS NULL THEN
+    NEW.metadata := COALESCE(NEW.params, '{}'::jsonb);
+  END IF;
+  NEW.description := COALESCE(NEW.notes, NEW.description);
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_strategies_aliases_biu ON strategies;
+CREATE TRIGGER trg_strategies_aliases_biu
+  BEFORE INSERT OR UPDATE OF params, metadata, notes, description ON strategies
+  FOR EACH ROW EXECUTE FUNCTION wolfy_sync_strategies_aliases();
+
 DROP VIEW IF EXISTS strategy_rules;
 CREATE VIEW strategy_rules AS
 SELECT
@@ -551,23 +713,30 @@ SELECT
   name,
   name AS title,
   NULL::text AS ticker,
+  NULL::text AS ticker_symbol,
   name AS rule_name,
   status,
   status AS scope,
   status AS implementation_status,
   setup_type AS rule_type,
   setup_type AS timeframe,
+  setup_type AS setup_type,
   ARRAY[]::text[] AS ticker_symbols,
+  ARRAY[]::text[] AS ticker_universe,
   ARRAY[]::text[] AS tickers,
   ARRAY[setup_type, status]::text[] AS topic_tags,
   ARRAY[setup_type, status]::text[] AS universe_tags,
+  ARRAY[setup_type]::text[] AS asset_classes,
+  ARRAY[setup_type, status]::text[] AS universe,
   notes AS description,
   notes AS summary,
   notes AS body,
+  notes AS rule_body,
   notes AS reasons,
   COALESCE(params, '{}'::jsonb) AS metadata,
   COALESCE(params->>'source','postgres.strategies') AS source_basis,
   (status IN ('approved','candidate')) AS enabled,
+  (status IN ('approved','candidate')) AS is_enabled,
   (status IN ('approved','active','candidate')) AS is_active,
   NULL::timestamptz AS created_at,
   NULL::timestamptz AS updated_at,
@@ -582,23 +751,30 @@ SELECT
   btrim(regexp_replace(split_part(content, E'\n', 1), '^Rule:\s*', '')) AS name,
   btrim(regexp_replace(split_part(content, E'\n', 1), '^Rule:\s*', '')) AS title,
   NULL::text AS ticker,
+  NULL::text AS ticker_symbol,
   btrim(regexp_replace(split_part(content, E'\n', 1), '^Rule:\s*', '')) AS rule_name,
   'active'::text AS status,
   'active'::text AS scope,
   'active'::text AS implementation_status,
   NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '') AS rule_type,
   NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '') AS timeframe,
+  NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '') AS setup_type,
   ARRAY[]::text[] AS ticker_symbols,
+  ARRAY[]::text[] AS ticker_universe,
   ARRAY[]::text[] AS tickers,
-  ARRAY_REMOVE(ARRAY['sqlite.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS topic_tags,
-  ARRAY_REMOVE(ARRAY['sqlite.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS universe_tags,
+  ARRAY_REMOVE(ARRAY['postgres.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS topic_tags,
+  ARRAY_REMOVE(ARRAY['postgres.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS universe_tags,
+  ARRAY_REMOVE(ARRAY[NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS asset_classes,
+  ARRAY_REMOVE(ARRAY['postgres.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS universe,
   btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS description,
   btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS summary,
   btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS body,
+  btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS rule_body,
   btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS reasons,
   metadata AS metadata,
-  'sqlite.strategy_rules'::text AS source_basis,
+  'postgres.strategy_rules'::text AS source_basis,
   true AS enabled,
+  true AS is_enabled,
   true AS is_active,
   created_at AS created_at,
   created_at AS updated_at,
@@ -607,7 +783,7 @@ SELECT
   source_id AS source_id,
   btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS rule_text
 FROM knowledge_chunks
-WHERE source_table='sqlite.strategy_rules' AND source_id ~ '^[0-9]+$';
+WHERE source_table='postgres.strategy_rules' AND source_id ~ '^[0-9]+$';
 
 CREATE OR REPLACE FUNCTION wolfy_sync_agent_runs_aliases()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -644,6 +820,35 @@ CREATE TRIGGER trg_agent_runs_aliases_biu
   BEFORE INSERT OR UPDATE OF task_id, task_type, title, ended_at, completed_at, finished_at, summary, result_summary, run_id ON agent_runs
   FOR EACH ROW EXECUTE FUNCTION wolfy_sync_agent_runs_aliases();
 
+CREATE OR REPLACE FUNCTION wolfy_sync_scanner_runs_aliases()
+RETURNS trigger AS $$
+BEGIN
+  IF NEW.started_at IS NULL THEN
+    NEW.started_at := NEW.run_time;
+  END IF;
+  IF NEW.completed_at IS NULL THEN
+    NEW.completed_at := COALESCE(NEW.finished_at, NEW.run_time);
+  END IF;
+  IF NEW.finished_at IS NULL THEN
+    NEW.finished_at := COALESCE(NEW.completed_at, NEW.run_time);
+  END IF;
+  IF NEW.status IS NULL THEN
+    NEW.status := CASE WHEN COALESCE(NEW.finished_at, NEW.completed_at, NEW.run_time) IS NOT NULL THEN 'completed' ELSE 'started' END;
+  END IF;
+  IF NEW.symbols_scanned IS NULL THEN
+    NEW.symbols_scanned := 0;
+  END IF;
+  IF NEW.mode IS NULL THEN
+    NEW.mode := NEW.data_source;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS trg_scanner_runs_aliases_biu ON scanner_runs;
+CREATE TRIGGER trg_scanner_runs_aliases_biu
+  BEFORE INSERT OR UPDATE OF run_time, started_at, completed_at, finished_at, status, symbols_scanned, data_source, mode ON scanner_runs
+  FOR EACH ROW EXECUTE FUNCTION wolfy_sync_scanner_runs_aliases();
+
 CREATE OR REPLACE FUNCTION wolfy_sync_agent_tasks_aliases()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -652,6 +857,18 @@ BEGIN
   END IF;
   IF NEW.task_id IS NULL THEN
   NEW.task_id := NEW.id;
+  END IF;
+  IF NEW.ticker IS NULL THEN
+  NEW.ticker := COALESCE(NEW.payload->>'ticker', NEW.payload->>'symbol', NEW.ticker_symbols[1]);
+  END IF;
+  IF NEW.agent IS NULL THEN
+    NEW.agent := NEW.agent_name;
+  END IF;
+  IF NEW.assigned_agent IS NULL THEN
+    NEW.assigned_agent := NEW.agent_name;
+  END IF;
+  IF NEW.claimed_by IS NULL THEN
+    NEW.claimed_by := COALESCE(NEW.assigned_agent, NEW.agent, NEW.agent_name);
   END IF;
   IF NEW.summary IS NULL THEN
     NEW.summary := NEW.description;
@@ -668,22 +885,39 @@ BEGIN
   IF NEW.status = 'blocked' AND NEW.blocker_reason IS NULL THEN
     NEW.blocker_reason := COALESCE(NEW.error_message, NEW.summary, NEW.description);
   END IF;
+  IF NEW.metadata IS NULL THEN
+    NEW.metadata := COALESCE(NEW.payload, '{}'::jsonb);
+  END IF;
+  IF NEW.verification_result IS NULL THEN
+    NEW.verification_result := COALESCE(NEW.metadata->>'verification_result', NEW.payload->>'verification_result', NEW.definition_of_done);
+  END IF;
+  IF NEW.commit_hash IS NULL THEN
+    NEW.commit_hash := COALESCE(NEW.metadata->>'commit_hash', NEW.payload->>'commit_hash');
+  END IF;
   IF NEW.payload IS NULL THEN
   NEW.payload := jsonb_strip_nulls(jsonb_build_object(
   'id', NEW.id,
   'task_id', NEW.task_id,
   'agent_name', NEW.agent_name,
+  'agent', NEW.agent,
+  'assigned_agent', NEW.assigned_agent,
+  'claimed_by', NEW.claimed_by,
   'task_type', NEW.task_type,
   'type', NEW.type,
   'title', NEW.title,
   'description', NEW.description,
   'instructions', NEW.instructions,
   'instruction', NEW.instruction,
+  'definition_of_done', NEW.definition_of_done,
+  'verification_result', NEW.verification_result,
+  'commit_hash', NEW.commit_hash,
+  'verified_at', NEW.verified_at,
   'status', NEW.status,
   'priority', NEW.priority,
   'source_fingerprint', NEW.source_fingerprint,
   'topic_tags', NEW.topic_tags,
   'ticker_symbols', NEW.ticker_symbols,
+  'ticker', NEW.ticker,
   'depends_on', NEW.depends_on,
   'supersedes', NEW.supersedes,
   'created_at', NEW.created_at,
@@ -692,15 +926,26 @@ BEGIN
   'error_message', NEW.error_message,
   'blocker_reason', NEW.blocker_reason,
   'source_table', NEW.source_table,
-  'source_id', NEW.source_id
+  'source_id', NEW.source_id,
+  'source', NEW.source,
+  'ticker', NEW.ticker,
+  'metadata', NEW.metadata
   ));
   ELSE
   NEW.payload := jsonb_strip_nulls(NEW.payload || jsonb_build_object(
   'instruction', NEW.instruction,
+  'definition_of_done', NEW.definition_of_done,
+  'verification_result', NEW.verification_result,
+  'commit_hash', NEW.commit_hash,
+  'verified_at', NEW.verified_at,
+  'claimed_by', NEW.claimed_by,
   'error_message', NEW.error_message,
   'blocker_reason', NEW.blocker_reason,
   'source_table', NEW.source_table,
-  'source_id', NEW.source_id
+  'source_id', NEW.source_id,
+  'source', NEW.source,
+  'ticker', NEW.ticker,
+  'metadata', NEW.metadata
   ));
   END IF;
   IF NEW.source_table IS NULL THEN
@@ -709,12 +954,15 @@ BEGIN
   IF NEW.source_id IS NULL THEN
   NEW.source_id := COALESCE(NEW.payload->>'source_id', NEW.source_fingerprint, NEW.id::text);
   END IF;
+  IF NEW.source IS NULL THEN
+  NEW.source := COALESCE(NEW.payload->>'source', NEW.source_table, 'agent_tasks');
+  END IF;
   RETURN NEW;
 END;
 $$;
 DROP TRIGGER IF EXISTS trg_agent_tasks_aliases_biu ON agent_tasks;
 CREATE TRIGGER trg_agent_tasks_aliases_biu
-  BEFORE INSERT OR UPDATE OF task_id, task_type, type, description, instructions, instruction, summary, error_message, blocker_reason, status, payload, source_table, source_id ON agent_tasks
+  BEFORE INSERT OR UPDATE OF task_id, task_type, type, agent_name, agent, assigned_agent, claimed_by, description, instructions, instruction, definition_of_done, verification_result, commit_hash, verified_at, summary, error_message, blocker_reason, status, payload, metadata, source_table, source_id, source, ticker, ticker_symbols ON agent_tasks
   FOR EACH ROW EXECUTE FUNCTION wolfy_sync_agent_tasks_aliases();
 
 CREATE OR REPLACE FUNCTION wolfy_sync_alpha_leads_aliases()
@@ -749,12 +997,21 @@ BEGIN
   IF NEW.evidence IS NULL THEN
     NEW.evidence := COALESCE(NEW.raw_payload->>'evidence', NEW.raw_payload->>'rationale', NEW.raw_payload->>'summary', NEW.thesis, NEW.title);
   END IF;
+  IF NEW.metadata IS NULL THEN
+    NEW.metadata := COALESCE(NEW.raw_payload, '{}'::jsonb);
+  END IF;
+  IF NEW.suspicious_activity IS NULL THEN
+    NEW.suspicious_activity := COALESCE(
+      NEW.raw_payload->'suspicious_activity',
+      jsonb_build_object('recommended_action', NEW.suspicious_action, 'flags', NEW.suspicious_flags)
+    );
+  END IF;
   RETURN NEW;
 END;
 $$;
 DROP TRIGGER IF EXISTS trg_alpha_leads_aliases_biu ON alpha_leads;
 CREATE TRIGGER trg_alpha_leads_aliases_biu
-  BEFORE INSERT OR UPDATE OF raw_payload, lead_type, evidence_quality_score, evidence_quality, evidence, company_name, scanner_type, scanner_run_id, market_context, score ON alpha_leads
+  BEFORE INSERT OR UPDATE OF raw_payload, lead_type, evidence_quality_score, evidence_quality, evidence, company_name, scanner_type, scanner_run_id, market_context, score, risk_flags, suspicious_flags, suspicious_activity, metadata ON alpha_leads
   FOR EACH ROW EXECUTE FUNCTION wolfy_sync_alpha_leads_aliases();
 
 CREATE OR REPLACE FUNCTION wolfy_sync_scanner_results_aliases()
@@ -858,14 +1115,26 @@ CREATE TABLE IF NOT EXISTS runs (
   started timestamptz,
   finished timestamptz,
   status text,
-  detail jsonb
+  detail jsonb,
+  source text
 );
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS source TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS rows_written INTEGER;
 UPDATE runs
 SET started_at=COALESCE(started_at, started),
-    completed_at=COALESCE(completed_at, finished)
-WHERE started_at IS NULL OR completed_at IS NULL;
+    completed_at=COALESCE(completed_at, finished),
+    ended_at=COALESCE(ended_at, completed_at, finished),
+    source=COALESCE(source, NULLIF(detail->>'source', '')),
+    rows_written=COALESCE(
+      rows_written,
+      NULLIF(detail->>'rows_written', '')::integer,
+      NULLIF(detail->>'rows_upserted', '')::integer,
+      NULLIF(detail->>'feature_rows_upserted', '')::integer
+    )
+WHERE started_at IS NULL OR completed_at IS NULL OR ended_at IS NULL OR source IS NULL OR rows_written IS NULL;
 
 CREATE OR REPLACE FUNCTION wolfy_sync_runs_aliases()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -876,12 +1145,25 @@ BEGIN
   IF NEW.completed_at IS NULL THEN
     NEW.completed_at := NEW.finished;
   END IF;
+  IF NEW.ended_at IS NULL THEN
+    NEW.ended_at := COALESCE(NEW.completed_at, NEW.finished);
+  END IF;
+  IF NEW.source IS NULL THEN
+    NEW.source := NULLIF(NEW.detail->>'source', '');
+  END IF;
+  IF NEW.rows_written IS NULL THEN
+    NEW.rows_written := COALESCE(
+      NULLIF(NEW.detail->>'rows_written', '')::integer,
+      NULLIF(NEW.detail->>'rows_upserted', '')::integer,
+      NULLIF(NEW.detail->>'feature_rows_upserted', '')::integer
+    );
+  END IF;
   RETURN NEW;
 END;
 $$;
 DROP TRIGGER IF EXISTS trg_runs_aliases_biu ON runs;
 CREATE TRIGGER trg_runs_aliases_biu
-  BEFORE INSERT OR UPDATE OF started, finished, started_at, completed_at ON runs
+  BEFORE INSERT OR UPDATE OF started, finished, started_at, completed_at, ended_at, detail, source, rows_written ON runs
   FOR EACH ROW EXECUTE FUNCTION wolfy_sync_runs_aliases();
 
 DROP VIEW IF EXISTS eod_feature_runs;
@@ -893,13 +1175,67 @@ SELECT
   finished,
   started_at,
   completed_at,
+  ended_at,
   status,
+  source,
+  rows_written,
   detail,
   NULLIF(detail->>'bars_loaded', '')::integer AS bars_loaded,
   NULLIF(detail->>'feature_rows_upserted', '')::integer AS feature_rows_upserted,
   NULLIF(detail->>'tickers_processed', '')::integer AS tickers_processed
 FROM runs
-WHERE job LIKE 'eod-%' OR job LIKE 'feature%';
+WHERE job LIKE 'eod%' OR job LIKE 'feature%';
+
+-- Storage/ops metric compatibility for read-only diagnostics. Canonical
+-- watchdog rows use captured_at/root_used_pct/etc.; ad-hoc probes sometimes
+-- expect generic metric_name/metric_value/category/created_at columns.
+CREATE TABLE IF NOT EXISTS system_metrics (
+  id BIGSERIAL PRIMARY KEY,
+  captured_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  hermes_bytes BIGINT,
+  wolfy_bytes BIGINT,
+  retired_db_bytes BIGINT,
+  root_used_pct DOUBLE PRECISION,
+  root_avail_bytes BIGINT,
+  cron_job_count INTEGER,
+  notes TEXT
+);
+ALTER TABLE system_metrics ADD COLUMN IF NOT EXISTS metric_name TEXT;
+ALTER TABLE system_metrics ADD COLUMN IF NOT EXISTS metric_value DOUBLE PRECISION;
+ALTER TABLE system_metrics ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE system_metrics ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+UPDATE system_metrics
+SET metric_name=COALESCE(metric_name, 'storage.snapshot'),
+    metric_value=COALESCE(metric_value, root_used_pct),
+    category=COALESCE(category, 'storage'),
+    created_at=COALESCE(created_at, captured_at)
+WHERE metric_name IS NULL OR metric_value IS NULL OR category IS NULL OR created_at IS NULL;
+
+CREATE OR REPLACE FUNCTION wolfy_sync_system_metrics_aliases()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.created_at IS NULL THEN
+    NEW.created_at := NEW.captured_at;
+  END IF;
+  IF NEW.captured_at IS NULL THEN
+    NEW.captured_at := NEW.created_at;
+  END IF;
+  IF NEW.metric_name IS NULL THEN
+    NEW.metric_name := 'storage.snapshot';
+  END IF;
+  IF NEW.metric_value IS NULL THEN
+    NEW.metric_value := NEW.root_used_pct;
+  END IF;
+  IF NEW.category IS NULL THEN
+    NEW.category := 'storage';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_system_metrics_aliases_biu ON system_metrics;
+CREATE TRIGGER trg_system_metrics_aliases_biu
+  BEFORE INSERT OR UPDATE OF captured_at, created_at, root_used_pct, metric_name, metric_value, category ON system_metrics
+  FOR EACH ROW EXECUTE FUNCTION wolfy_sync_system_metrics_aliases();
 
 -- Universe compatibility for read-only ops probes. Canonical tables are
 -- universe_symbols and universe_backfill_targets; diagnostics sometimes use

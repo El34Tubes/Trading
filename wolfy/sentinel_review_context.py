@@ -10,7 +10,7 @@ WOLFY_DIR = Path('/root/.hermes/wolfy')
 if str(WOLFY_DIR) not in sys.path:
     sys.path.insert(0, str(WOLFY_DIR))
 
-from budget_wake_gate import budget_wake_gate
+from budget_wake_gate import budget_wake_gate  # noqa: E402
 
 try:
     import psycopg
@@ -22,7 +22,7 @@ try:
 except Exception:  # pragma: no cover
     claim_next_task = connect = ensure_agent_task = finish_agent_run = stable_fingerprint = start_agent_run = None
 
-from eod_governance import print_eod_governance
+from eod_governance import print_eod_governance  # noqa: E402
 
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
 CLI = '/root/.hermes/wolfy/wolfy_agent_cli.py'
@@ -104,7 +104,7 @@ def main() -> None:
         return
     print('Sentinel recommendation-review context')
     if psycopg is None:
-        print('Postgres primary unavailable: psycopg import failed. Sentinel must block; do not fall back to SQLite for live review.')
+        print('Postgres primary unavailable: psycopg import failed. Sentinel must block; no fallback is allowed.')
         return
 
     with psycopg.connect(PG_DSN) as pg, pg.cursor() as cur:
@@ -134,7 +134,7 @@ def main() -> None:
         """)
 
     print(f'Postgres DB=wolfy DSN={PG_DSN}')
-    print('SQLite fallback: disabled for live Sentinel context; remaining SQLite consumers are compatibility only.')
+    print('Postgres-only live Sentinel context; no legacy DB fallback is allowed.')
     print_eod_governance()
     print('Postgres counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
     print('User hard constraints: Robinhood-tradable only; no shorts; options allowed but prefer defined risk; max 3 concurrent positions; $5,000 paper account; avoid PDT violations; stops required; avoid foreign manipulation/government-interference risk.')

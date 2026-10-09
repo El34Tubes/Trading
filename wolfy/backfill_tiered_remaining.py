@@ -18,8 +18,8 @@ from typing import Sequence
 
 try:
     import psycopg
-except ModuleNotFoundError as exc:  # pragma: no cover
-    raise SystemExit("psycopg is required; run with: uvx --with 'psycopg[binary]' python backfill_tiered_remaining.py") from exc
+except ModuleNotFoundError:  # pragma: no cover - keep --help available without the driver
+    psycopg = None
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -33,9 +33,36 @@ DEFAULT_TIERS = ["large_cap", "mid_cap", "small_cap"]
 DEFAULT_MIN_HISTORY_BARS = 495
 
 
-def remaining_tickers(conn, tier: str, limit: int, min_history_bars: int) -> list[str]:
+def require_psycopg():
+    if psycopg is None:  # pragma: no cover
+        raise SystemExit("psycopg is required; run with: uvx --with 'psycopg[binary]' python backfill_tiered_remaining.py")
+    return psycopg
+
+
+def remaining_tickers(
+    conn,
+    tier: str,
+    limit: int,
+    min_history_bars: int,
+    exclude: Sequence[str] | None = None,
+) -> list[str]:
+    """Return the next resumable backfill targets for a tier.
+
+    ``exclude`` prevents a bounded multi-batch run from retrying the same
+    still-missing/stale ticker in consecutive batches. A failed or naturally
+    short ticker remains eligible on the next cron tick, but it will not consume
+    both limited batches in the same run.
+    """
+    exclude = list(exclude or [])
+    exclude_clause = ""
+    params: list[object] = [tier, min_history_bars]
+    if exclude:
+        placeholders = ", ".join(["%s"] * len(exclude))
+        exclude_clause = f"AND t.symbol NOT IN ({placeholders})"
+        params.extend(exclude)
+    params.append(limit)
     rows = conn.execute(
-        """
+        f"""
         SELECT t.symbol
         FROM universe_backfill_targets t
         LEFT JOIN (
@@ -54,10 +81,11 @@ def remaining_tickers(conn, tier: str, limit: int, min_history_bars: int) -> lis
               AND coalesce(p.latest_dt, DATE '1900-01-01') < CURRENT_DATE - INTERVAL '5 days'
             )
           )
+          {exclude_clause}
         ORDER BY t.priority, t.symbol
         LIMIT %s
         """,
-        (tier, min_history_bars, limit),
+        params,
     ).fetchall()
     return [row[0] for row in rows]
 
@@ -94,31 +122,40 @@ def log_line(payload: dict) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    db = require_psycopg()
     tiers: Sequence[str] = args.tiers or DEFAULT_TIERS
     deadline = time.monotonic() + args.max_runtime_seconds if args.max_runtime_seconds else None
     batches = 0
     failures = 0
+    attempted_this_run: set[str] = set()
     log_line({"event": "start", "tiers": list(tiers), "batch_size": args.batch_size, "days": args.days})
-    with psycopg.connect(args.dsn) as conn:
+    with db.connect(args.dsn) as conn:
         log_line({"event": "initial_counts", "counts": tier_counts(conn, args.min_history_bars)})
 
     for tier in tiers:
         while True:
             if args.max_batches and batches >= args.max_batches:
-                with psycopg.connect(args.dsn) as conn:
+                with db.connect(args.dsn) as conn:
                     log_line({"event": "max_batches_reached", "counts": tier_counts(conn, args.min_history_bars), "batches": batches, "failures": failures})
                 return 2 if failures else 0
             if deadline and time.monotonic() >= deadline:
-                with psycopg.connect(args.dsn) as conn:
+                with db.connect(args.dsn) as conn:
                     log_line({"event": "deadline_reached", "counts": tier_counts(conn, args.min_history_bars), "batches": batches, "failures": failures})
                 return 2 if failures else 0
-            with psycopg.connect(args.dsn) as conn:
-                tickers = remaining_tickers(conn, tier, args.batch_size, args.min_history_bars)
+            with db.connect(args.dsn) as conn:
+                tickers = remaining_tickers(
+                    conn,
+                    tier,
+                    args.batch_size,
+                    args.min_history_bars,
+                    exclude=sorted(attempted_this_run),
+                )
             if not tickers:
-                with psycopg.connect(args.dsn) as conn:
+                with db.connect(args.dsn) as conn:
                     log_line({"event": "tier_complete", "tier": tier, "counts": tier_counts(conn, args.min_history_bars)})
                 break
             batches += 1
+            attempted_this_run.update(tickers)
             log_line({"event": "batch_start", "batch": batches, "tier": tier, "tickers": tickers})
             try:
                 result = massive_ingest(
@@ -149,14 +186,14 @@ def run(args: argparse.Namespace) -> int:
                 failures += 1
                 log_line({"event": "batch_error", "batch": batches, "tier": tier, "tickers": tickers, "error": repr(exc)})
                 if failures >= args.max_failures:
-                    with psycopg.connect(args.dsn) as conn:
+                    with db.connect(args.dsn) as conn:
                         log_line({"event": "too_many_failures", "counts": tier_counts(conn, args.min_history_bars), "batches": batches, "failures": failures})
                     return 1
                 time.sleep(args.error_sleep_seconds)
             if args.batch_sleep_seconds:
                 time.sleep(args.batch_sleep_seconds)
 
-    with psycopg.connect(args.dsn) as conn:
+    with db.connect(args.dsn) as conn:
         log_line({"event": "complete", "counts": tier_counts(conn, args.min_history_bars), "batches": batches, "failures": failures})
     return 2 if failures else 0
 

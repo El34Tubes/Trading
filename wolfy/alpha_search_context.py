@@ -12,10 +12,10 @@ WOLFY_DIR = Path('/root/.hermes/wolfy')
 if str(WOLFY_DIR) not in sys.path:
     sys.path.insert(0, str(WOLFY_DIR))
 
-from budget_wake_gate import budget_wake_gate
-from wolfy_agent_coordination import connect, start_agent_run
-from alpha_search_pipeline import REQUIRED_SECTIONS, record_alpha_payload, status_snapshot
-from eod_governance import print_eod_governance
+from budget_wake_gate import budget_wake_gate  # noqa: E402
+from wolfy_agent_coordination import connect, start_agent_run  # noqa: E402
+from alpha_search_pipeline import REQUIRED_SECTIONS, record_alpha_payload, status_snapshot  # noqa: E402
+from eod_governance import print_eod_governance  # noqa: E402
 
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
 CLI = Path('/root/.hermes/wolfy/wolfy_agent_cli.py')
@@ -124,7 +124,7 @@ def main() -> None:
             run_id = start_agent_run(conn, agent_name='Wolfy', role='alpha_scout', job_id='wolfy-alpha-search-report', status='started', summary='Standalone alpha search context loaded.')
 
     print('Wolfy standalone Alpha Search Report context')
-    print('Wolfy DB=Postgres primary; SQLite retired for live Alpha Search context')
+    print('Wolfy DB=Postgres primary; legacy DB retired for live Alpha Search context')
     print_eod_governance()
     print('Postgres counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
     if run_id is None:

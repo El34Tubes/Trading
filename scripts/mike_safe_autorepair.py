@@ -7,14 +7,12 @@ It stays silent when everything is healthy.
 from __future__ import annotations
 
 import shutil
-import sqlite3
 import subprocess
 from pathlib import Path
 
 ROOT = Path('/root/.hermes')
 SCRIPTS = ROOT / 'scripts'
 WOLFY = ROOT / 'wolfy'
-WOLFY_DB = WOLFY / 'wolfy.db'
 MIKE = ROOT / 'profiles' / 'mike' / 'scripts'
 CLERKY = ROOT / 'profiles' / 'clerky' / 'scripts'
 
@@ -27,6 +25,8 @@ EXECUTABLE_WOLFY_SCRIPTS = [
 ]
 
 MIKE_SCRIPTS = [
+    'visible_progress_ledger.py',
+    'wolfy_agent_cli.py',
     'wolfy_storage_watchdog.py',
     'wolfy_usage_limit_watchdog.py',
     'wolfy_embed_knowledge_chunks.py',
@@ -47,6 +47,8 @@ MIKE_SCRIPTS = [
     'mike_safe_autorepair.py',
 ]
 CLERKY_SCRIPTS = [
+    'visible_progress_ledger.py',
+    'wolfy_agent_cli.py',
     'wolfy_clerky_activity_context.py',
     'wolfy_kanban_allocator.py',
     # Keep operations watchdog wrappers available in Clerky too so
@@ -66,6 +68,7 @@ CLERKY_SCRIPTS = [
     'eod_monitoring.py',
     # Keep Mike's script-only autorepair callable from profile-scoped
     # diagnostics when Clerky is auditing operations handoffs.
+    'mike_environment_triage_context.py',
     'mike_safe_autorepair.py',
     # Keep legacy wrappers synchronized across profiles so profile-scoped
     # diagnostics/cron handoffs can invoke the same compatibility path.
@@ -75,8 +78,37 @@ WOLFY_SCRIPTS_FROM_GLOBAL: list[str] = [
     'wolfy_eod_screening_context.py',
     'wolfy_eod_weekly_research_context.py',
     'wolfy_tiered_backfill_bounded.py',
+    'mike_environment_triage_context.py',
 ]
 LEGACY_WRAPPERS = {
+    'wolfy_agent_cli.py': """#!/usr/bin/env python3
+\"\"\"Compatibility wrapper for Wolfy's Postgres coordination CLI.
+
+The canonical implementation and its local imports live in the Wolfy directory;
+cron planners and profile-scoped diagnostics may call this stable scripts path.
+\"\"\"
+from __future__ import annotations
+
+import subprocess
+import sys
+
+SCRIPT = '/root/.hermes/wolfy/wolfy_agent_cli.py'
+
+if __name__ == '__main__':
+    raise SystemExit(subprocess.call([sys.executable, SCRIPT, *sys.argv[1:]]))
+""",
+    'visible_progress_ledger.py': """#!/usr/bin/env python3
+\"\"\"Compatibility wrapper for Wolfy's read-only visible progress ledger.\"\"\"
+from __future__ import annotations
+
+import subprocess
+import sys
+
+SCRIPT = '/root/.hermes/wolfy/visible_progress_ledger.py'
+
+if __name__ == '__main__':
+    raise SystemExit(subprocess.call([sys.executable, SCRIPT, *sys.argv[1:]]))
+""",
     'wolfy-alpha-search-report.sh': "#!/usr/bin/env bash\nset -euo pipefail\nexec python3 /root/.hermes/wolfy/alpha_search_context.py \"$@\"\n",
     'wolfy_alpha_search_context.py': """#!/usr/bin/env python3
 \"\"\"Compatibility wrapper for Wolfy's standalone Alpha Search context.\"\"\"
@@ -410,175 +442,11 @@ def ensure_script_modes() -> list[str]:
     return changed
 
 
-def ensure_sqlite_compatibility_aliases() -> list[str]:
-    """Apply non-destructive SQLite compatibility aliases used by diagnostics.
-
-    Jonah/Wolfy LLM-generated smoke queries sometimes ask common note-ledger
-    names (title/category/note/content/note_type) while the canonical Wolfy
-    table uses topic/tags/summary. They also sometimes ask knowledge_sources
-    for path while the canonical table uses url_or_reference. Keep aliases
-    nullable and backfilled instead of changing the canonical write path.
-    """
-    if not WOLFY_DB.exists():
-        return [f'MISSING_WOLFY_DB {WOLFY_DB}']
-    changed: list[str] = []
-    with sqlite3.connect(WOLFY_DB) as con:
-        cols = {row[1] for row in con.execute('PRAGMA table_info(knowledge_notes)')}
-        for name in ('title', 'category', 'note', 'content', 'note_type', 'source_type'):
-            if name not in cols:
-                con.execute(f'ALTER TABLE knowledge_notes ADD COLUMN {name} TEXT')
-                changed.append(f'ADDED_SQLITE_ALIAS knowledge_notes.{name}')
-        source_cols = {row[1] for row in con.execute('PRAGMA table_info(knowledge_sources)')}
-        for name in ('path', 'url'):
-            if name not in source_cols:
-                con.execute(f'ALTER TABLE knowledge_sources ADD COLUMN {name} TEXT')
-                changed.append(f'ADDED_SQLITE_ALIAS knowledge_sources.{name}')
-        rule_cols = {row[1] for row in con.execute('PRAGMA table_info(strategy_rules)')}
-        for name in ('category', 'source_id', 'rule_text'):
-            if name not in rule_cols:
-                con.execute(f'ALTER TABLE strategy_rules ADD COLUMN {name} TEXT')
-                changed.append(f'ADDED_SQLITE_ALIAS strategy_rules.{name}')
-        if 'is_active' not in rule_cols:
-            con.execute('ALTER TABLE strategy_rules ADD COLUMN is_active INTEGER')
-            changed.append('ADDED_SQLITE_ALIAS strategy_rules.is_active')
-        con.execute(
-            """
-            UPDATE knowledge_notes
-            SET title=COALESCE(title, topic),
-                category=COALESCE(category, tags),
-                note=COALESCE(note, summary),
-                content=COALESCE(content, summary),
-                note_type=COALESCE(note_type, category, tags),
-                source_type=COALESCE(source_type, note_type, category, tags)
-            WHERE title IS NULL OR category IS NULL OR note IS NULL OR content IS NULL OR note_type IS NULL OR source_type IS NULL
-            """
-        )
-        con.execute(
-            """
-            UPDATE knowledge_sources
-            SET path=COALESCE(path, url_or_reference),
-                url=COALESCE(url, url_or_reference)
-            WHERE path IS NULL OR url IS NULL
-            """
-        )
-        con.execute(
-            """
-            UPDATE strategy_rules
-            SET category=COALESCE(category, rule_type),
-                source_id=COALESCE(source_id, source_basis),
-                rule_text=COALESCE(rule_text, description),
-                is_active=COALESCE(is_active, enabled),
-                name=COALESCE(name, rule_name),
-                status=COALESCE(status, implementation_status, CASE WHEN enabled=1 THEN 'active' ELSE 'inactive' END),
-                asset_class=COALESCE(asset_class, 'equity_etf_process')
-            WHERE category IS NULL OR source_id IS NULL OR rule_text IS NULL OR is_active IS NULL OR name IS NULL OR status IS NULL OR asset_class IS NULL
-            """
-        )
-        if con.total_changes:
-            changed.append(f'BACKFILLED_SQLITE_ALIASES rows_changed={con.total_changes}')
-        con.executescript(
-            """
-            DROP TRIGGER IF EXISTS trg_knowledge_notes_alias_after_insert;
-            DROP TRIGGER IF EXISTS trg_knowledge_notes_alias_after_update;
-            DROP TRIGGER IF EXISTS trg_knowledge_sources_path_after_insert;
-            DROP TRIGGER IF EXISTS trg_knowledge_sources_path_after_update;
-            DROP TRIGGER IF EXISTS trg_strategy_rules_alias_after_insert;
-            DROP TRIGGER IF EXISTS trg_strategy_rules_alias_after_update;
-
-            CREATE TRIGGER IF NOT EXISTS trg_knowledge_notes_alias_after_insert
-            AFTER INSERT ON knowledge_notes
-            FOR EACH ROW
-            WHEN NEW.title IS NULL OR NEW.category IS NULL OR NEW.note IS NULL OR NEW.content IS NULL OR NEW.note_type IS NULL OR NEW.source_type IS NULL
-            BEGIN
-              UPDATE knowledge_notes
-              SET title=COALESCE(NEW.title, NEW.topic),
-                  category=COALESCE(NEW.category, NEW.tags),
-                  note=COALESCE(NEW.note, NEW.summary),
-                  content=COALESCE(NEW.content, NEW.summary),
-                  note_type=COALESCE(NEW.note_type, NEW.category, NEW.tags),
-                  source_type=COALESCE(NEW.source_type, NEW.note_type, NEW.category, NEW.tags)
-              WHERE id=NEW.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_knowledge_notes_alias_after_update
-            AFTER UPDATE OF topic, tags, summary, title, category, note, content, note_type, source_type ON knowledge_notes
-            FOR EACH ROW
-            WHEN NEW.title IS NULL OR NEW.category IS NULL OR NEW.note IS NULL OR NEW.content IS NULL OR NEW.note_type IS NULL OR NEW.source_type IS NULL
-            BEGIN
-              UPDATE knowledge_notes
-              SET title=COALESCE(NEW.title, NEW.topic),
-                  category=COALESCE(NEW.category, NEW.tags),
-                  note=COALESCE(NEW.note, NEW.summary),
-                  content=COALESCE(NEW.content, NEW.summary),
-                  note_type=COALESCE(NEW.note_type, NEW.category, NEW.tags),
-                  source_type=COALESCE(NEW.source_type, NEW.note_type, NEW.category, NEW.tags)
-              WHERE id=NEW.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_knowledge_sources_path_after_insert
-            AFTER INSERT ON knowledge_sources
-            FOR EACH ROW
-            WHEN NEW.path IS NULL OR NEW.url IS NULL
-            BEGIN
-              UPDATE knowledge_sources
-              SET path=COALESCE(NEW.path, NEW.url_or_reference),
-                  url=COALESCE(NEW.url, NEW.url_or_reference)
-              WHERE id=NEW.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_knowledge_sources_path_after_update
-            AFTER UPDATE OF url_or_reference, path, url ON knowledge_sources
-            FOR EACH ROW
-            WHEN NEW.path IS NULL OR NEW.url IS NULL
-            BEGIN
-              UPDATE knowledge_sources
-              SET path=COALESCE(NEW.path, NEW.url_or_reference),
-                  url=COALESCE(NEW.url, NEW.url_or_reference)
-              WHERE id=NEW.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_strategy_rules_alias_after_insert
-            AFTER INSERT ON strategy_rules
-            FOR EACH ROW
-            WHEN NEW.category IS NULL OR NEW.source_id IS NULL OR NEW.rule_text IS NULL OR NEW.is_active IS NULL OR NEW.name IS NULL OR NEW.status IS NULL OR NEW.asset_class IS NULL
-            BEGIN
-              UPDATE strategy_rules
-              SET category=COALESCE(NEW.category, NEW.rule_type),
-                  source_id=COALESCE(NEW.source_id, NEW.source_basis),
-                  rule_text=COALESCE(NEW.rule_text, NEW.description),
-                  is_active=COALESCE(NEW.is_active, NEW.enabled),
-                  name=COALESCE(NEW.name, NEW.rule_name),
-                  status=COALESCE(NEW.status, NEW.implementation_status, CASE WHEN NEW.enabled=1 THEN 'active' ELSE 'inactive' END),
-                  asset_class=COALESCE(NEW.asset_class, 'equity_etf_process')
-              WHERE id=NEW.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_strategy_rules_alias_after_update
-            AFTER UPDATE OF rule_name, rule_type, description, source_basis, implementation_status, enabled, name, status, asset_class, category, source_id, rule_text, is_active ON strategy_rules
-            FOR EACH ROW
-            WHEN NEW.category IS NULL OR NEW.source_id IS NULL OR NEW.rule_text IS NULL OR NEW.is_active IS NULL OR NEW.name IS NULL OR NEW.status IS NULL OR NEW.asset_class IS NULL
-            BEGIN
-              UPDATE strategy_rules
-              SET category=COALESCE(NEW.category, NEW.rule_type),
-                  source_id=COALESCE(NEW.source_id, NEW.source_basis),
-                  rule_text=COALESCE(NEW.rule_text, NEW.description),
-                  is_active=COALESCE(NEW.is_active, NEW.enabled),
-                  name=COALESCE(NEW.name, NEW.rule_name),
-                  status=COALESCE(NEW.status, NEW.implementation_status, CASE WHEN NEW.enabled=1 THEN 'active' ELSE 'inactive' END),
-                  asset_class=COALESCE(NEW.asset_class, 'equity_etf_process')
-              WHERE id=NEW.id;
-            END;
-            """
-        )
-        con.commit()
-    return changed
-
-
 def ensure_postgres_compatibility_aliases() -> list[str]:
     """Apply non-destructive Postgres aliases used by ad-hoc diagnostics.
 
     LLM-authored operational probes occasionally use common column names from
-    earlier SQLite/context examples. Keep nullable mirror columns plus triggers
+    earlier legacy context examples. Keep nullable mirror columns plus triggers
     so those probes fail less often without changing canonical write paths.
     """
     sql = r"""
@@ -664,14 +532,26 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       started timestamptz,
       finished timestamptz,
       status text,
-      detail jsonb
+      detail jsonb,
+      source text
     );
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS source TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS rows_written INTEGER;
     UPDATE runs
     SET started_at=COALESCE(started_at, started),
-        completed_at=COALESCE(completed_at, finished)
-    WHERE started_at IS NULL OR completed_at IS NULL;
+        completed_at=COALESCE(completed_at, finished),
+        ended_at=COALESCE(ended_at, completed_at, finished),
+        source=COALESCE(source, NULLIF(detail->>'source', '')),
+        rows_written=COALESCE(
+          rows_written,
+          NULLIF(detail->>'rows_written', '')::integer,
+          NULLIF(detail->>'rows_upserted', '')::integer,
+          NULLIF(detail->>'feature_rows_upserted', '')::integer
+        )
+    WHERE started_at IS NULL OR completed_at IS NULL OR ended_at IS NULL OR source IS NULL OR rows_written IS NULL;
 
     CREATE OR REPLACE FUNCTION wolfy_sync_runs_aliases()
     RETURNS trigger LANGUAGE plpgsql AS $$
@@ -682,12 +562,25 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       IF NEW.completed_at IS NULL THEN
         NEW.completed_at := NEW.finished;
       END IF;
+      IF NEW.ended_at IS NULL THEN
+        NEW.ended_at := COALESCE(NEW.completed_at, NEW.finished);
+      END IF;
+      IF NEW.source IS NULL THEN
+        NEW.source := NULLIF(NEW.detail->>'source', '');
+      END IF;
+      IF NEW.rows_written IS NULL THEN
+        NEW.rows_written := COALESCE(
+          NULLIF(NEW.detail->>'rows_written', '')::integer,
+          NULLIF(NEW.detail->>'rows_upserted', '')::integer,
+          NULLIF(NEW.detail->>'feature_rows_upserted', '')::integer
+        );
+      END IF;
       RETURN NEW;
     END;
     $$;
     DROP TRIGGER IF EXISTS trg_runs_aliases_biu ON runs;
     CREATE TRIGGER trg_runs_aliases_biu
-      BEFORE INSERT OR UPDATE OF started, finished, started_at, completed_at ON runs
+      BEFORE INSERT OR UPDATE OF started, finished, started_at, completed_at, ended_at, detail, source, rows_written ON runs
       FOR EACH ROW EXECUTE FUNCTION wolfy_sync_runs_aliases();
 
     DROP VIEW IF EXISTS eod_feature_runs;
@@ -699,13 +592,67 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       finished,
       started_at,
       completed_at,
+      ended_at,
       status,
+      source,
+      rows_written,
       detail,
       NULLIF(detail->>'bars_loaded', '')::integer AS bars_loaded,
       NULLIF(detail->>'feature_rows_upserted', '')::integer AS feature_rows_upserted,
       NULLIF(detail->>'tickers_processed', '')::integer AS tickers_processed
     FROM runs
-    WHERE job LIKE 'eod-%' OR job LIKE 'feature%';
+    WHERE job LIKE 'eod%' OR job LIKE 'feature%';
+
+    -- Storage/ops metric aliases for read-only diagnostic probes. Canonical
+    -- watchdog rows use captured_at/root_used_pct/etc.; probes sometimes ask
+    -- for generic metric_name/metric_value/category/created_at columns.
+    CREATE TABLE IF NOT EXISTS system_metrics (
+      id BIGSERIAL PRIMARY KEY,
+      captured_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      hermes_bytes BIGINT,
+      wolfy_bytes BIGINT,
+      retired_db_bytes BIGINT,
+      root_used_pct DOUBLE PRECISION,
+      root_avail_bytes BIGINT,
+      cron_job_count INTEGER,
+      notes TEXT
+    );
+    ALTER TABLE system_metrics ADD COLUMN IF NOT EXISTS metric_name TEXT;
+    ALTER TABLE system_metrics ADD COLUMN IF NOT EXISTS metric_value DOUBLE PRECISION;
+    ALTER TABLE system_metrics ADD COLUMN IF NOT EXISTS category TEXT;
+    ALTER TABLE system_metrics ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ;
+    UPDATE system_metrics
+    SET metric_name=COALESCE(metric_name, 'storage.snapshot'),
+        metric_value=COALESCE(metric_value, root_used_pct),
+        category=COALESCE(category, 'storage'),
+        created_at=COALESCE(created_at, captured_at)
+    WHERE metric_name IS NULL OR metric_value IS NULL OR category IS NULL OR created_at IS NULL;
+
+    CREATE OR REPLACE FUNCTION wolfy_sync_system_metrics_aliases()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.created_at IS NULL THEN
+        NEW.created_at := NEW.captured_at;
+      END IF;
+      IF NEW.captured_at IS NULL THEN
+        NEW.captured_at := NEW.created_at;
+      END IF;
+      IF NEW.metric_name IS NULL THEN
+        NEW.metric_name := 'storage.snapshot';
+      END IF;
+      IF NEW.metric_value IS NULL THEN
+        NEW.metric_value := NEW.root_used_pct;
+      END IF;
+      IF NEW.category IS NULL THEN
+        NEW.category := 'storage';
+      END IF;
+      RETURN NEW;
+    END;
+    $$;
+    DROP TRIGGER IF EXISTS trg_system_metrics_aliases_biu ON system_metrics;
+    CREATE TRIGGER trg_system_metrics_aliases_biu
+      BEFORE INSERT OR UPDATE OF captured_at, created_at, root_used_pct, metric_name, metric_value, category ON system_metrics
+      FOR EACH ROW EXECUTE FUNCTION wolfy_sync_system_metrics_aliases();
 
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS summary TEXT;
     -- Compatibility alias for prompts/scripts that ask for task instructions.
@@ -713,25 +660,52 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS instructions TEXT;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS instruction TEXT;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS definition_of_done TEXT;
+    -- Compatibility aliases for optimizer/ops probes that expect verification
+    -- metadata as top-level task columns. Canonical storage may still be in
+    -- metadata/payload JSONB or definition_of_done.
+    ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS verification_result TEXT;
+    ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS commit_hash TEXT;
+    ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS error_message TEXT;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS blocker_reason TEXT;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS payload JSONB;
+    -- Compatibility alias for ad-hoc/read-only probes that expect task metadata.
+    -- Canonical structured task detail remains payload.
+    ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS metadata JSONB;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS agent TEXT;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS assigned_agent TEXT;
+    -- Compatibility alias for ad-hoc/read-only ops probes that expect claimed_by.
+    -- Canonical assignment remains agent_tasks.agent_name / assigned_agent.
+    ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+    -- Compatibility alias for ad-hoc/read-only ops probes that expect one ticker.
+    -- Canonical task symbols remain agent_tasks.ticker_symbols (text[]).
+    ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS ticker TEXT;
     -- Compatibility alias for read-only ops probes that expect task_id.
     -- Canonical task primary key remains agent_tasks.id.
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS task_id BIGINT;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source_table TEXT;
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source_id TEXT;
+    -- Compatibility alias for ad-hoc/read-only probes that expect a generic
+    -- task source. Canonical provenance remains source_table/source_id.
+    ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS source TEXT;
     UPDATE agent_tasks SET agent=agent_name WHERE agent IS NULL;
     UPDATE agent_tasks SET task_id=id WHERE task_id IS NULL;
     UPDATE agent_tasks SET started_at=COALESCE(started_at, claimed_at, created_at) WHERE started_at IS NULL;
+    UPDATE agent_tasks SET ticker=COALESCE(ticker, payload->>'ticker', payload->>'symbol', ticker_symbols[1]) WHERE ticker IS NULL;
     UPDATE agent_tasks SET assigned_agent=agent_name WHERE assigned_agent IS NULL;
+    UPDATE agent_tasks SET claimed_by=COALESCE(assigned_agent, agent, agent_name) WHERE claimed_by IS NULL;
     UPDATE agent_tasks SET summary=description WHERE summary IS NULL AND description IS NOT NULL;
     UPDATE agent_tasks SET instructions=description WHERE instructions IS NULL AND description IS NOT NULL;
     UPDATE agent_tasks SET instruction=COALESCE(instruction, instructions, description) WHERE instruction IS NULL;
     UPDATE agent_tasks SET definition_of_done=COALESCE(definition_of_done, payload->>'definition_of_done') WHERE definition_of_done IS NULL;
+    UPDATE agent_tasks
+    SET verification_result=COALESCE(verification_result, metadata->>'verification_result', payload->>'verification_result', definition_of_done)
+    WHERE verification_result IS NULL;
+    UPDATE agent_tasks
+    SET commit_hash=COALESCE(commit_hash, metadata->>'commit_hash', payload->>'commit_hash')
+    WHERE commit_hash IS NULL;
+    UPDATE agent_tasks SET metadata=COALESCE(metadata, payload, '{}'::jsonb) WHERE metadata IS NULL;
     UPDATE agent_tasks
     SET error_message=COALESCE(error_message, summary, description)
     WHERE status='blocked' AND error_message IS NULL;
@@ -740,8 +714,41 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
     WHERE status='blocked' AND blocker_reason IS NULL;
     UPDATE agent_tasks
     SET source_table=COALESCE(source_table, payload->>'source_table', 'agent_tasks'),
-        source_id=COALESCE(source_id, payload->>'source_id', source_fingerprint, id::text)
-    WHERE source_table IS NULL OR source_id IS NULL;
+        source_id=COALESCE(source_id, payload->>'source_id', source_fingerprint, id::text),
+        source=COALESCE(source, payload->>'source', source_table, 'agent_tasks')
+    WHERE source_table IS NULL OR source_id IS NULL OR source IS NULL;
+
+    -- Compatibility aliases for ad-hoc/read-only scanner run probes.
+    -- Canonical timing is run_time/completed_at and run size is derived from scanner_results.
+    ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+    ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+    ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
+    ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS status TEXT;
+    ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS symbols_scanned INTEGER;
+    ALTER TABLE scanner_runs ADD COLUMN IF NOT EXISTS mode TEXT;
+    UPDATE scanner_runs sr
+    SET started_at=COALESCE(sr.started_at, sr.run_time),
+        completed_at=COALESCE(sr.completed_at, sr.finished_at, sr.run_time),
+        finished_at=COALESCE(sr.finished_at, sr.completed_at, sr.run_time),
+        status=COALESCE(sr.status, CASE WHEN COALESCE(sr.finished_at, sr.completed_at, sr.run_time) IS NOT NULL THEN 'completed' ELSE 'started' END),
+        mode=COALESCE(sr.mode, sr.data_source),
+        symbols_scanned=COALESCE(sr.symbols_scanned, counts.result_count, 0)
+    FROM (
+      SELECT run_id, count(*)::integer AS result_count
+      FROM scanner_results
+      GROUP BY run_id
+    ) counts
+    WHERE sr.id = counts.run_id
+      AND (sr.started_at IS NULL OR sr.completed_at IS NULL OR sr.finished_at IS NULL OR sr.status IS NULL OR sr.mode IS NULL OR sr.symbols_scanned IS NULL);
+    UPDATE scanner_runs
+    SET started_at=COALESCE(started_at, run_time),
+        completed_at=COALESCE(completed_at, finished_at, run_time),
+        finished_at=COALESCE(finished_at, completed_at, run_time),
+        status=COALESCE(status, 'completed'),
+        mode=COALESCE(mode, data_source),
+        symbols_scanned=COALESCE(symbols_scanned, 0)
+    WHERE started_at IS NULL OR completed_at IS NULL OR finished_at IS NULL OR status IS NULL OR mode IS NULL OR symbols_scanned IS NULL;
+
     UPDATE agent_tasks
     SET payload = jsonb_strip_nulls(jsonb_build_object(
         'id', id,
@@ -749,17 +756,22 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
         'agent_name', agent_name,
         'agent', agent,
         'assigned_agent', assigned_agent,
+        'claimed_by', claimed_by,
         'task_type', task_type,
         'title', title,
         'description', description,
         'instructions', instructions,
         'instruction', instruction,
         'definition_of_done', definition_of_done,
+        'verification_result', verification_result,
+        'commit_hash', commit_hash,
+        'verified_at', verified_at,
         'status', status,
         'priority', priority,
         'source_fingerprint', source_fingerprint,
         'topic_tags', topic_tags,
         'ticker_symbols', ticker_symbols,
+        'ticker', ticker,
         'depends_on', depends_on,
         'supersedes', supersedes,
         'created_at', created_at,
@@ -769,21 +781,29 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
         'error_message', error_message,
         'blocker_reason', blocker_reason,
         'source_table', source_table,
-        'source_id', source_id
+        'source_id', source_id,
+        'source', source
     ))
     WHERE payload IS NULL;
     UPDATE agent_tasks
     SET payload = jsonb_strip_nulls(payload || jsonb_build_object(
         'instruction', instruction,
         'definition_of_done', definition_of_done,
+        'verification_result', verification_result,
+        'commit_hash', commit_hash,
+        'verified_at', verified_at,
         'started_at', started_at,
+        'claimed_by', claimed_by,
         'error_message', error_message,
         'blocker_reason', blocker_reason,
         'source_table', source_table,
-        'source_id', source_id
+        'source_id', source_id,
+        'source', source,
+        'ticker', ticker,
+        'metadata', metadata
     ))
     WHERE payload IS NOT NULL
-      AND (instruction IS NOT NULL OR definition_of_done IS NOT NULL OR error_message IS NOT NULL OR blocker_reason IS NOT NULL OR source_table IS NOT NULL OR source_id IS NOT NULL);
+      AND (instruction IS NOT NULL OR definition_of_done IS NOT NULL OR verification_result IS NOT NULL OR commit_hash IS NOT NULL OR verified_at IS NOT NULL OR error_message IS NOT NULL OR blocker_reason IS NOT NULL OR source_table IS NOT NULL OR source_id IS NOT NULL OR source IS NOT NULL OR ticker IS NOT NULL OR claimed_by IS NOT NULL OR metadata IS NOT NULL);
 
     ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
     ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
@@ -875,6 +895,13 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
     ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS summary TEXT;
     ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS evidence TEXT;
     ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS risk_flags JSONB NOT NULL DEFAULT '[]';
+    -- Compatibility alias for ad-hoc/read-only ops probes that expect metadata.
+    -- Canonical detail remains alpha_leads.raw_payload.
+    ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS metadata JSONB;
+    -- Compatibility alias for ad-hoc/read-only probes that expect the historical
+    -- suspicious_activity JSON object. Canonical storage remains suspicious_action
+    -- + suspicious_flags, with optional raw_payload.suspicious_activity detail.
+    ALTER TABLE alpha_leads ADD COLUMN IF NOT EXISTS suspicious_activity JSONB;
     UPDATE alpha_leads
     SET company_name=COALESCE(company_name, raw_payload->>'company_name', raw_payload->>'company'),
         scanner_type=COALESCE(scanner_type, raw_payload->>'scanner_type', raw_payload->>'signal', raw_payload->>'lead_type', lead_type),
@@ -891,8 +918,14 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
           CASE WHEN (raw_payload->>'scanner_score') ~ '^-?[0-9]+(\.[0-9]+)?$' THEN (raw_payload->>'scanner_score')::double precision END,
           evidence_quality_score::double precision),
         evidence_quality=COALESCE(evidence_quality, evidence_quality_score),
-        risk_flags=COALESCE(NULLIF(risk_flags, '[]'::jsonb), raw_payload->'risk_flags', suspicious_flags, raw_payload->'suspicious_flags', '[]'::jsonb)
-    WHERE company_name IS NULL OR scanner_type IS NULL OR scanner_run_id IS NULL OR market_context IS NULL OR score IS NULL OR evidence_quality IS NULL OR rationale IS NULL OR summary IS NULL OR evidence IS NULL OR risk_flags IS NULL OR risk_flags = '[]'::jsonb;
+        risk_flags=COALESCE(NULLIF(risk_flags, '[]'::jsonb), raw_payload->'risk_flags', suspicious_flags, raw_payload->'suspicious_flags', '[]'::jsonb),
+        metadata=COALESCE(metadata, raw_payload, '{}'::jsonb),
+        suspicious_activity=COALESCE(
+          suspicious_activity,
+          raw_payload->'suspicious_activity',
+          jsonb_build_object('recommended_action', suspicious_action, 'flags', suspicious_flags)
+        )
+    WHERE company_name IS NULL OR scanner_type IS NULL OR scanner_run_id IS NULL OR market_context IS NULL OR score IS NULL OR evidence_quality IS NULL OR rationale IS NULL OR summary IS NULL OR evidence IS NULL OR risk_flags IS NULL OR risk_flags = '[]'::jsonb OR metadata IS NULL OR suspicious_activity IS NULL;
 
     ALTER TABLE recommendation_reviews
       ALTER COLUMN recommendation_id TYPE BIGINT USING recommendation_id::bigint;
@@ -900,21 +933,53 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
     DROP VIEW IF EXISTS alpha_search_leads;
     CREATE VIEW alpha_search_leads AS
     SELECT
-      id, sqlite_id, report_id, created_at, updated_at, ticker, lead_type, title,
+      id, legacy_id, legacy_id AS sqlite_id, report_id, created_at, updated_at, ticker, lead_type, title,
       thesis, rationale, summary,
       COALESCE(evidence, rationale, summary, thesis, raw_payload->>'evidence', raw_payload->>'rationale', title) AS evidence,
       status, evidence_quality_score AS score,
       evidence_quality_score, evidence_quality, evidence_count, highest_source_quality,
-      suspicious_action, suspicious_flags, risk_flags, catalyst_window, social_context,
+      suspicious_action, suspicious_flags, suspicious_activity, risk_flags, catalyst_window, social_context,
       filing_context, insider_context, complete_ticket, recommendation_id,
       next_research_question, company_name, scanner_type, scanner_run_id, market_context,
-      raw_payload, source_fingerprint
+      raw_payload, source_fingerprint,
+      'alpha_leads'::text AS source_table,
+      id::text AS source_id
     FROM alpha_leads;
 
     ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS type TEXT;
     UPDATE agent_tasks
     SET type=task_type
     WHERE type IS NULL;
+
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+    -- Compatibility aliases for ad-hoc/read-only ops probes that query
+    -- strategies.metadata or strategies.description directly. Canonical strategy
+    -- parameters remain params and canonical prose remains notes; aliases mirror
+    -- those fields non-destructively for probe compatibility.
+    ALTER TABLE strategies ADD COLUMN IF NOT EXISTS metadata JSONB;
+    ALTER TABLE strategies ADD COLUMN IF NOT EXISTS description TEXT;
+    UPDATE strategies
+    SET metadata = COALESCE(metadata, params, '{}'::jsonb)
+    WHERE metadata IS NULL;
+    UPDATE strategies
+    SET description = notes
+    WHERE description IS NULL AND notes IS NOT NULL;
+
+    CREATE OR REPLACE FUNCTION wolfy_sync_strategies_aliases()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.metadata IS NULL THEN
+        NEW.metadata := COALESCE(NEW.params, '{}'::jsonb);
+      END IF;
+      NEW.description := COALESCE(NEW.notes, NEW.description);
+      RETURN NEW;
+    END;
+    $$;
+    DROP TRIGGER IF EXISTS trg_strategies_aliases_biu ON strategies;
+    CREATE TRIGGER trg_strategies_aliases_biu
+      BEFORE INSERT OR UPDATE OF params, metadata, notes, description ON strategies
+      FOR EACH ROW EXECUTE FUNCTION wolfy_sync_strategies_aliases();
 
     DROP VIEW IF EXISTS strategy_rules;
     CREATE VIEW strategy_rules AS
@@ -923,23 +988,30 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       name,
       name AS title,
       NULL::text AS ticker,
+      NULL::text AS ticker_symbol,
       name AS rule_name,
       status,
       status AS scope,
       status AS implementation_status,
       setup_type AS rule_type,
       setup_type AS timeframe,
+      setup_type AS setup_type,
       ARRAY[]::text[] AS ticker_symbols,
+      ARRAY[]::text[] AS ticker_universe,
       ARRAY[]::text[] AS tickers,
       ARRAY[setup_type, status]::text[] AS topic_tags,
       ARRAY[setup_type, status]::text[] AS universe_tags,
+      ARRAY[setup_type]::text[] AS asset_classes,
+      ARRAY[setup_type, status]::text[] AS universe,
       notes AS description,
       notes AS summary,
       notes AS body,
+      notes AS rule_body,
       notes AS reasons,
       COALESCE(params, '{}'::jsonb) AS metadata,
       COALESCE(params->>'source','postgres.strategies') AS source_basis,
       (status IN ('approved','candidate')) AS enabled,
+      (status IN ('approved','candidate')) AS is_enabled,
       (status IN ('approved','active','candidate')) AS is_active,
       NULL::timestamptz AS created_at,
       NULL::timestamptz AS updated_at,
@@ -954,23 +1026,30 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       btrim(regexp_replace(split_part(content, E'\n', 1), '^Rule:\s*', '')) AS name,
       btrim(regexp_replace(split_part(content, E'\n', 1), '^Rule:\s*', '')) AS title,
       NULL::text AS ticker,
+      NULL::text AS ticker_symbol,
       btrim(regexp_replace(split_part(content, E'\n', 1), '^Rule:\s*', '')) AS rule_name,
       'active'::text AS status,
       'active'::text AS scope,
       'active'::text AS implementation_status,
       NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '') AS rule_type,
       NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '') AS timeframe,
+      NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '') AS setup_type,
       ARRAY[]::text[] AS ticker_symbols,
+      ARRAY[]::text[] AS ticker_universe,
       ARRAY[]::text[] AS tickers,
-      ARRAY_REMOVE(ARRAY['sqlite.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS topic_tags,
-      ARRAY_REMOVE(ARRAY['sqlite.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS universe_tags,
+      ARRAY_REMOVE(ARRAY['postgres.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS topic_tags,
+      ARRAY_REMOVE(ARRAY['postgres.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS universe_tags,
+      ARRAY_REMOVE(ARRAY[NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS asset_classes,
+      ARRAY_REMOVE(ARRAY['postgres.strategy_rules', NULLIF(btrim(regexp_replace(split_part(content, E'\n', 2), '^Type:\s*', '')), '')], NULL)::text[] AS universe,
       btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS description,
       btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS summary,
       btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS body,
+      btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS rule_body,
       btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS reasons,
       metadata AS metadata,
-      'sqlite.strategy_rules'::text AS source_basis,
+      'postgres.strategy_rules'::text AS source_basis,
       true AS enabled,
+      true AS is_enabled,
       true AS is_active,
       created_at AS created_at,
       created_at AS updated_at,
@@ -979,7 +1058,7 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       source_id AS source_id,
       btrim(regexp_replace(regexp_replace(content, E'^Rule:[^\n]*\nType:[^\n]*\nDescription:\s*', ''), E'\n+', ' ', 'g')) AS rule_text
     FROM knowledge_chunks
-    WHERE source_table='sqlite.strategy_rules' AND source_id ~ '^[0-9]+$';
+    WHERE source_table='postgres.strategy_rules' AND source_id ~ '^[0-9]+$';
 
     ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS enabled BOOLEAN;
     ALTER TABLE universe_backfill_targets ADD COLUMN IF NOT EXISTS wolfy_tier TEXT;
@@ -1157,6 +1236,18 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       IF NEW.started_at IS NULL THEN
         NEW.started_at := NEW.run_time;
       END IF;
+      IF NEW.completed_at IS NULL THEN
+        NEW.completed_at := COALESCE(NEW.finished_at, NEW.run_time);
+      END IF;
+      IF NEW.finished_at IS NULL THEN
+        NEW.finished_at := COALESCE(NEW.completed_at, NEW.run_time);
+      END IF;
+      IF NEW.status IS NULL THEN
+        NEW.status := CASE WHEN COALESCE(NEW.finished_at, NEW.completed_at, NEW.run_time) IS NOT NULL THEN 'completed' ELSE 'started' END;
+      END IF;
+      IF NEW.symbols_scanned IS NULL THEN
+        NEW.symbols_scanned := 0;
+      END IF;
       IF NEW.mode IS NULL THEN
         NEW.mode := NEW.data_source;
       END IF;
@@ -1165,7 +1256,7 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
     $$;
     DROP TRIGGER IF EXISTS trg_scanner_runs_aliases_biu ON scanner_runs;
     CREATE TRIGGER trg_scanner_runs_aliases_biu
-      BEFORE INSERT OR UPDATE OF run_time, started_at, data_source, mode ON scanner_runs
+      BEFORE INSERT OR UPDATE OF run_time, started_at, completed_at, finished_at, status, symbols_scanned, data_source, mode ON scanner_runs
       FOR EACH ROW EXECUTE FUNCTION wolfy_sync_scanner_runs_aliases();
 
     CREATE OR REPLACE FUNCTION wolfy_sync_agent_tasks_aliases()
@@ -1183,8 +1274,14 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       IF NEW.assigned_agent IS NULL THEN
         NEW.assigned_agent := NEW.agent_name;
       END IF;
+      IF NEW.claimed_by IS NULL THEN
+        NEW.claimed_by := COALESCE(NEW.assigned_agent, NEW.agent, NEW.agent_name);
+      END IF;
       IF NEW.started_at IS NULL THEN
         NEW.started_at := COALESCE(NEW.claimed_at, NEW.created_at);
+      END IF;
+      IF NEW.ticker IS NULL THEN
+        NEW.ticker := COALESCE(NEW.payload->>'ticker', NEW.payload->>'symbol', NEW.ticker_symbols[1]);
       END IF;
       IF NEW.summary IS NULL THEN
         NEW.summary := NEW.description;
@@ -1201,6 +1298,15 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       IF NEW.status = 'blocked' AND NEW.blocker_reason IS NULL THEN
         NEW.blocker_reason := COALESCE(NEW.error_message, NEW.summary, NEW.description);
       END IF;
+      IF NEW.metadata IS NULL THEN
+        NEW.metadata := COALESCE(NEW.payload, '{}'::jsonb);
+      END IF;
+      IF NEW.verification_result IS NULL THEN
+        NEW.verification_result := COALESCE(NEW.metadata->>'verification_result', NEW.payload->>'verification_result', NEW.definition_of_done);
+      END IF;
+      IF NEW.commit_hash IS NULL THEN
+        NEW.commit_hash := COALESCE(NEW.metadata->>'commit_hash', NEW.payload->>'commit_hash');
+      END IF;
       IF NEW.payload IS NULL THEN
         NEW.payload := jsonb_strip_nulls(jsonb_build_object(
           'id', NEW.id,
@@ -1208,17 +1314,23 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
           'agent_name', NEW.agent_name,
           'agent', NEW.agent,
           'assigned_agent', NEW.assigned_agent,
+          'claimed_by', NEW.claimed_by,
           'task_type', NEW.task_type,
           'type', NEW.type,
           'title', NEW.title,
           'description', NEW.description,
           'instructions', NEW.instructions,
           'instruction', NEW.instruction,
+          'definition_of_done', NEW.definition_of_done,
+          'verification_result', NEW.verification_result,
+          'commit_hash', NEW.commit_hash,
+          'verified_at', NEW.verified_at,
           'status', NEW.status,
           'priority', NEW.priority,
           'source_fingerprint', NEW.source_fingerprint,
           'topic_tags', NEW.topic_tags,
           'ticker_symbols', NEW.ticker_symbols,
+          'ticker', NEW.ticker,
           'depends_on', NEW.depends_on,
           'supersedes', NEW.supersedes,
           'created_at', NEW.created_at,
@@ -1228,16 +1340,25 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
           'error_message', NEW.error_message,
           'blocker_reason', NEW.blocker_reason,
           'source_table', NEW.source_table,
-          'source_id', NEW.source_id
+          'source_id', NEW.source_id,
+          'ticker', NEW.ticker,
+          'metadata', NEW.metadata
         ));
       ELSE
         NEW.payload := jsonb_strip_nulls(NEW.payload || jsonb_build_object(
           'instruction', NEW.instruction,
+          'definition_of_done', NEW.definition_of_done,
+          'verification_result', NEW.verification_result,
+          'commit_hash', NEW.commit_hash,
+          'verified_at', NEW.verified_at,
           'started_at', NEW.started_at,
+          'claimed_by', NEW.claimed_by,
           'error_message', NEW.error_message,
           'blocker_reason', NEW.blocker_reason,
           'source_table', NEW.source_table,
-          'source_id', NEW.source_id
+          'source_id', NEW.source_id,
+          'ticker', NEW.ticker,
+          'metadata', NEW.metadata
         ));
       END IF;
       IF NEW.source_table IS NULL THEN
@@ -1251,7 +1372,7 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
     $$;
     DROP TRIGGER IF EXISTS trg_agent_tasks_aliases_biu ON agent_tasks;
     CREATE TRIGGER trg_agent_tasks_aliases_biu
-      BEFORE INSERT OR UPDATE OF task_id, agent_name, agent, assigned_agent, task_type, type, description, instructions, instruction, summary, error_message, blocker_reason, status, payload, source_table, source_id, claimed_at, started_at ON agent_tasks
+      BEFORE INSERT OR UPDATE OF task_id, agent_name, agent, assigned_agent, claimed_by, task_type, type, description, instructions, instruction, definition_of_done, verification_result, commit_hash, verified_at, summary, error_message, blocker_reason, status, payload, metadata, source_table, source_id, claimed_at, started_at, ticker, ticker_symbols ON agent_tasks
       FOR EACH ROW EXECUTE FUNCTION wolfy_sync_agent_tasks_aliases();
 
     CREATE OR REPLACE FUNCTION wolfy_sync_agent_runs_aliases()
@@ -1324,12 +1445,21 @@ def ensure_postgres_compatibility_aliases() -> list[str]:
       IF NEW.risk_flags IS NULL OR NEW.risk_flags = '[]'::jsonb THEN
         NEW.risk_flags := COALESCE(NEW.raw_payload->'risk_flags', NEW.suspicious_flags, NEW.raw_payload->'suspicious_flags', '[]'::jsonb);
       END IF;
+      IF NEW.metadata IS NULL THEN
+        NEW.metadata := COALESCE(NEW.raw_payload, '{}'::jsonb);
+      END IF;
+      IF NEW.suspicious_activity IS NULL THEN
+        NEW.suspicious_activity := COALESCE(
+          NEW.raw_payload->'suspicious_activity',
+          jsonb_build_object('recommended_action', NEW.suspicious_action, 'flags', NEW.suspicious_flags)
+        );
+      END IF;
       RETURN NEW;
     END;
     $$;
     DROP TRIGGER IF EXISTS trg_alpha_leads_aliases_biu ON alpha_leads;
     CREATE TRIGGER trg_alpha_leads_aliases_biu
-      BEFORE INSERT OR UPDATE OF raw_payload, lead_type, evidence_quality_score, evidence_quality, evidence, company_name, scanner_type, scanner_run_id, market_context, score, risk_flags, suspicious_flags ON alpha_leads
+      BEFORE INSERT OR UPDATE OF raw_payload, lead_type, evidence_quality_score, evidence_quality, evidence, company_name, scanner_type, scanner_run_id, market_context, score, risk_flags, suspicious_flags, suspicious_activity, metadata ON alpha_leads
       FOR EACH ROW EXECUTE FUNCTION wolfy_sync_alpha_leads_aliases();
     """
     code, out = run(['psql', '-d', 'wolfy', '-v', 'ON_ERROR_STOP=1', '-q', '-c', sql], timeout=90)
@@ -1342,7 +1472,6 @@ def main() -> int:
     reports: list[str] = []
     reports.extend(sync_scripts())
     reports.extend(ensure_script_modes())
-    reports.extend(ensure_sqlite_compatibility_aliases())
     reports.extend(ensure_postgres_compatibility_aliases())
 
     checks = [

@@ -10,15 +10,15 @@ WOLFY_DIR = Path('/root/.hermes/wolfy')
 if str(WOLFY_DIR) not in sys.path:
     sys.path.insert(0, str(WOLFY_DIR))
 
-from budget_wake_gate import budget_wake_gate
+from budget_wake_gate import budget_wake_gate  # noqa: E402
 
 try:
     import psycopg
 except Exception:  # pragma: no cover
     psycopg = None
 
-from wolfy_agent_coordination import claim_next_task, connect, ensure_agent_task, finish_agent_run, stable_fingerprint, start_agent_run
-from eod_governance import print_eod_governance
+from wolfy_agent_coordination import claim_next_task, connect, ensure_agent_task, finish_agent_run, stable_fingerprint, start_agent_run  # noqa: E402
+from eod_governance import print_eod_governance  # noqa: E402
 
 PG_DSN = 'dbname=wolfy user=root host=/var/run/postgresql'
 CLI = '/root/.hermes/wolfy/wolfy_agent_cli.py'
@@ -85,7 +85,7 @@ def main() -> None:
         return
     print('Yang technical-analysis context')
     if psycopg is None:
-        print('Postgres primary unavailable: psycopg import failed. Yang must block; do not fall back to SQLite for live technical context.')
+        print('Postgres primary unavailable: psycopg import failed. Yang must block; no fallback is allowed.')
         return
     with psycopg.connect(PG_DSN) as pg, pg.cursor() as cur:
         ensure_pg_yang_reviews(cur)
@@ -132,14 +132,15 @@ def main() -> None:
                 cur.execute(f'SELECT COUNT(*) FROM {t}')
                 counts[t] = int(cur.fetchone()[0])
             except Exception:
-                pg.rollback(); counts[t] = 0
+                pg.rollback()
+                counts[t] = 0
     smoke_mode = os.environ.get('WOLFY_CONTEXT_SMOKE') == '1'
     if smoke_mode:
         run_id, task_id = None, None
     else:
         run_id, task_id = start_yang_run(candidates)
     print(f'Postgres DB=wolfy DSN={PG_DSN}')
-    print('SQLite fallback: disabled for live Yang context; remaining SQLite consumers are compatibility only.')
+    print('Postgres-only live Yang context; no legacy DB fallback is allowed.')
     print_eod_governance()
     print('Postgres counts: ' + ', '.join(f'{k}={v}' for k, v in counts.items()))
     if smoke_mode:

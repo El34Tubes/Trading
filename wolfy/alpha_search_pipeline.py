@@ -157,7 +157,7 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         """
         CREATE TABLE IF NOT EXISTS alpha_search_reports (
           id BIGSERIAL PRIMARY KEY,
-          sqlite_id BIGINT UNIQUE,
+          legacy_id BIGINT UNIQUE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           source_job_id TEXT NOT NULL DEFAULT 'wolfy-alpha-search-report',
           agent_run_id TEXT,
@@ -173,7 +173,7 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         """
         CREATE TABLE IF NOT EXISTS alpha_leads (
           id BIGSERIAL PRIMARY KEY,
-          sqlite_id BIGINT UNIQUE,
+          legacy_id BIGINT UNIQUE,
           report_id BIGINT REFERENCES alpha_search_reports(id) ON DELETE SET NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -214,7 +214,7 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         """
         CREATE TABLE IF NOT EXISTS alpha_lead_evidence (
           id BIGSERIAL PRIMARY KEY,
-          sqlite_id BIGINT UNIQUE,
+          legacy_id BIGINT UNIQUE,
           lead_id BIGINT NOT NULL REFERENCES alpha_leads(id) ON DELETE CASCADE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           evidence_type TEXT NOT NULL,
@@ -232,7 +232,7 @@ def ensure_alpha_tables_postgres(pg_dsn: str | None = DEFAULT_PG_DSN) -> None:
         """
         CREATE TABLE IF NOT EXISTS alpha_handoffs (
           id BIGSERIAL PRIMARY KEY,
-          sqlite_id BIGINT UNIQUE,
+          legacy_id BIGINT UNIQUE,
           lead_id BIGINT REFERENCES alpha_leads(id) ON DELETE CASCADE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           target_agent TEXT NOT NULL,

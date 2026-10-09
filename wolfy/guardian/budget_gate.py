@@ -22,8 +22,14 @@ from decimal import Decimal
 
 try:
     import psycopg
+    POSTGRES_DRIVER = "psycopg"
 except Exception:  # pragma: no cover - surfaced at runtime
-    psycopg = None
+    try:
+        import psycopg2 as psycopg  # type: ignore[no-redef]
+        POSTGRES_DRIVER = "psycopg2"
+    except Exception:
+        psycopg = None  # type: ignore[assignment]
+        POSTGRES_DRIVER = "missing"
 
 DEFAULT_DSN = "dbname=wolfy user=root host=/var/run/postgresql"
 DEFAULT_DAILY_CAP = 200_000
@@ -60,10 +66,45 @@ def ensure_loop_metrics(conn) -> None:
             )
             """
         )
+        # Compatibility aliases for older ops probes/prompts. Canonical
+        # columns remain captured_at/metric_key/metric_value, but ad-hoc
+        # diagnostics have historically queried created_at/metric_name/
+        # value_numeric.
+        cur.execute("ALTER TABLE loop_metrics ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ")
+        cur.execute("ALTER TABLE loop_metrics ADD COLUMN IF NOT EXISTS metric_name TEXT")
+        cur.execute("ALTER TABLE loop_metrics ADD COLUMN IF NOT EXISTS value_numeric NUMERIC")
+        cur.execute(
+            """
+            UPDATE loop_metrics
+            SET created_at = COALESCE(created_at, captured_at),
+                metric_name = COALESCE(metric_name, metric_key),
+                value_numeric = COALESCE(value_numeric, metric_value)
+            WHERE created_at IS NULL OR metric_name IS NULL OR value_numeric IS NULL
+            """
+        )
+        cur.execute(
+            """
+            CREATE OR REPLACE FUNCTION wolfy_sync_loop_metrics_aliases()
+            RETURNS trigger AS $$
+            BEGIN
+              NEW.created_at := COALESCE(NEW.created_at, NEW.captured_at, now());
+              NEW.metric_name := COALESCE(NEW.metric_name, NEW.metric_key);
+              NEW.value_numeric := COALESCE(NEW.value_numeric, NEW.metric_value);
+              RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            DROP TRIGGER IF EXISTS trg_loop_metrics_aliases ON loop_metrics;
+            CREATE TRIGGER trg_loop_metrics_aliases
+              BEFORE INSERT OR UPDATE OF captured_at, metric_key, metric_value, created_at, metric_name, value_numeric
+              ON loop_metrics
+              FOR EACH ROW EXECUTE FUNCTION wolfy_sync_loop_metrics_aliases();
+            """
+        )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_loop_metrics_key_time "
             "ON loop_metrics(metric_key, captured_at DESC)"
         )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_loop_metrics_name_time ON loop_metrics(metric_name, created_at DESC)")
     conn.commit()
 
 
