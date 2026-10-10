@@ -6,10 +6,13 @@ Wolfy is a deterministic, end-of-day U.S. equities research and **paper-only** r
 
 This repository also preserves the surrounding Hermes operations layer: profiles, scheduled jobs, watchdogs, skills, coordination scripts, release controls, and disaster-recovery instructions.
 
-## Current state — 2026-10-08
+## Current state — 2026-10-09
 
 | Component | State |
 |---|---|
+| Server preservation snapshot | `652f025`, tagged `wolfy-server-preservation-2026-10-09-final` (tag pushed to `origin`) |
+| Scheduler | **Frozen** — 0 enabled jobs, per `RECOVERY-MANIFEST.json` `scheduler_frozen: true` |
+| Recovery asset set | `frozen-*` is primary; the unprefixed assets remain as a verified pre-freeze baseline |
 | Existing close-confirmed breakout paper pipeline | Production-active |
 | Trend pullback/reclaim sleeve | Implemented and tested; research/shadow only |
 | Volatility-contraction breakout sleeve | Implemented and tested; research/shadow only |
@@ -480,6 +483,12 @@ A backup is not considered complete merely because the dump command succeeded. R
 - `45f852b` — isolated split-ingestion tests from production.
 - `85084d5` — completed ordered production migration set.
 - `e95a70c` — bounded default-disabled production paper adapter; 1,032 tests passed.
+- `47b8256` — tagged `wolfy-server-preservation-2026-10-09`; superseded as a restore target.
+- `652f025` — closed the preservation audit blockers. Tagged
+  `wolfy-server-preservation-2026-10-09-final` and recorded as the `public_source_commit`
+  of `RECOVERY-MANIFEST.json` (schema `wolfy-recovery-manifest-v2`); the clean-clone result
+  recorded for this snapshot is 1,041 tests passed. **This is the restore target** — prefer
+  it over `47b8256`.
 
 All historical feature/release branches are preserved and pushed in addition to `main`.
 
